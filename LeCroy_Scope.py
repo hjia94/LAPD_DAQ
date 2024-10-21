@@ -634,6 +634,28 @@ class LeCroy_Scope:
 
 		if self.verbose and (t1-t0 > 1): print('    .............................%6.3g sec' % (t1-t0))
 		return data
+	#-------------------------------------------------------------------------
+	def acquire_raw(self, trace):
+		"""Add by Donglai Ma, for heavy data, just aquire the raw data and save to file
+
+		"""
+		trace = self.validate_trace(trace)
+
+		#waveform_setup:   SP=NP=0 -> send all points, for first point FP=1, segment# SN=0 - send all segments
+		self.scope.write('WAVEFORM_SETUP SP,0,NP,0,FP,1,SN,0')
+		#no header, WORD length data, binary
+		self.scope.write('COMM_HEADER OFF')
+		self.scope.write('COMM_FORMAT DEF9,WORD,BIN')
+
+		# read raw data from scope
+
+		if self.verbose: print('\n<:> reading',trace,'from scope')
+		#t0 = time.time()
+
+		self.scope.write(trace+':WAVEFORM?')
+		self.trace_bytes = self.scope.read_raw()
+		return self.trace_bytes
+	#-------------------------------------------------------------------------
 
 
 	#-------------------------------------------------------------------------

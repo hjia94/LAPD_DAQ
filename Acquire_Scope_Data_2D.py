@@ -271,3 +271,60 @@ def Acquire_Scope_Data(ifn, get_positions, get_channel_description, ip_addresses
 	f.close()  # close the HDF5 file
 	
 	return ifn
+def Acquire_Scope_Data_to_Disk(disk_folder, get_positions, get_channel_description, ip_addresses, exp_name, threading = False):
+	# The main data acquisition routine
+	#
+	# 	Arguments are user-provided callback functions that return the following:
+	# 		disk_folder          target disk folders for saving data,
+	# 		get_positions()              the positions array,
+	#  		exp_name			  experiment name
+	# 		get_channel_description(c)   the individual channel descriptions (c = 'C1', 'C2', 'C3', 'C4'),
+	# 		get_ip_addresses()           a dict of the form {'scope':'}
+	positions, xpos, ypos = get_positions()
+	mc = Motor_Control_2D(x_ip_addr=ip_addresses['x'], y_ip_addr=ip_addresses['y'])
+    
+    # create the scope access object, and iterate over positions
+	with LeCroy_Scope(ip_addresses['scope'], verbose=False) as scope:
+		if not scope:
+			print('Scope not found at '+ip_addresses['scope'])      # I think we have raised an exception if this is the case, so we never get here
+			return
+		#scope_grp.attrs['ScopeType'] = scope.idn_string
+
+		NPos = len(positions)
+		NTimes = scope.max_samples()
+		try:
+
+			######### BEGIN MAIN ACQUISITION LOOP #########
+			print('starting acquisition loop at', time.ctime())
+
+			for pos in positions:
+        
+				acquisition_loop_start_time = time.time()
+
+				# move to next position
+				print('position index =', pos[0], '  x =', pos[1], '  y =', pos[2], end='')
+				try:
+					mc.enable
+					mc.probe_positions = (pos[1], pos[2])
+					mc.disable
+				except KeyboardInterrupt:
+					raise KeyboardInterrupt
+				except:
+					print('Motor fail to move to position index =', pos[0], '  x =', pos[1], '  y =', pos[2], end='\n')
+					continue
+
+				print('------------------', scope.gaaak_count, '-------------------- ',pos[0],sep='')
+
+				# Acquire the raw data and save to disk
+				# Use threading to speed up the process
+				acquire_displayed_traces_to_disk(scope, disk_folder, pos[0]-1, threading)
+					
+        
+
+
+		except KeyboardInterrupt:
+			print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+
+		except:
+			print('\n______Halted due to some error______', '  at', time.ctime())
+			pass
