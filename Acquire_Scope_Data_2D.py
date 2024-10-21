@@ -55,6 +55,25 @@ def acquire_displayed_traces(scope, datasets, hdr_data, pos_ndx):
 	
 	scope.set_trigger_mode('NORM')   # resume triggering
 
+def acquire_displayed_traces_to_disk(scope, disk_folder, pos_ndx, exp_name, threading = False):
+	"""
+
+	"""
+	scope.set_trigger_mode('STOP')
+	traces = scope.displayed_traces()
+	if threading is not True:
+		for tr in traces:
+			st = time.time()
+			data = scope.acquire_raw(tr)
+			file_name = disk_folder + os.sep + exp_name + str(pos_ndx) + '_' + tr + '.bin'
+			with open(file_name, 'wb') as f:
+				f.write(data)
+    
+			print('ma_test',time.time()-st)
+	scope.set_trigger_mode('NORM')
+			# with open(disk_folder + os.sep + str(pos_ndx) + '_' + tr + '.txt', 'w') as f:
+			# 	f.write(data)
+	# TODO: Implement threading
 
 
 #----------------------------------------------------------------------------------------
