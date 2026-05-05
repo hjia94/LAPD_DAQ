@@ -8,11 +8,8 @@ import xarray as xr
 
 from typing import Dict
 
-from .multi_scope_acquisition import (
-    load_experiment_config,
-    MultiScopeAcquisition,
-    single_shot_acquisition,
-)
+from .config import load_experiment_config
+from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
 
 
 def configure_bmotion_hdf5_group(
