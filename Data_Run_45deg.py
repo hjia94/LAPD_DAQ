@@ -19,7 +19,7 @@ Created on Feb.12.2025
 import datetime
 import os
 import numpy as np
-from multi_scope_acquisition import run_acquisition
+from acquisition import run_acquisition
 import time
 import sys
 import logging

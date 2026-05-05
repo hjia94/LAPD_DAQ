@@ -8,7 +8,7 @@ import xarray as xr
 
 from typing import Dict
 
-from multi_scope_acquisition import (
+from .multi_scope_acquisition import (
     load_experiment_config,
     MultiScopeAcquisition,
     single_shot_acquisition,

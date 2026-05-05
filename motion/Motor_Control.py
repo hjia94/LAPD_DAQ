@@ -9,10 +9,10 @@ Created on Tue Oct 24 14:29:25 2017
 """
 
 import math
-from Motor_Control_1D import Motor_Control
+from .Motor_Control_1D import Motor_Control
 import time
 import numpy
-from obstacle_avoidance import BoundaryChecker
+from .obstacle_avoidance import BoundaryChecker
 from scipy.optimize import minimize
 
 # TODO: fix calculate_velocity to read from cm_per_turn directly

@@ -2,6 +2,30 @@
 Data acquisition script using Ethernet motor and LeCroy scope as digitizer on LAPD.
 Modified from Scope_DAQ used on process plasma chamber.
 
+## Repository Layout
+
+```
+LAPD_DAQ/
+├── Data_Run.py                       # Standard multi-scope acquisition (xy/xyz motion or stationary)
+├── Data_Run_45deg.py                 # 45-degree probe variant
+├── Data_Run_MultiScope_Camera.py     # Multi-scope + Phantom high-speed camera
+├── Data_Run_bmotion.py               # Multi-scope using bapsf_motion library
+│
+├── acquisition/        # Acquisition engines called by the Data_Run_*.py scripts
+├── drivers/            # Hardware interfaces (LeCroy scope, Phantom camera)
+├── motion/             # Motor control + position management
+├── pi_gpio/            # Raspberry Pi trigger client/server
+├── McPherson/          # Standalone McPherson spectrometer GUI
+├── notebooks/          # Scratch notebooks (scope/motor testing)
+├── legacy/             # Superseded scripts kept for reference
+│
+├── experiment_config.txt       # User-edited per-run configuration
+├── example_experiment_config.txt
+└── requirements.txt
+```
+
+All four entry-point scripts are run from the repo root, e.g. `python Data_Run.py`.
+
 ## Latest Updates (September 2025)
 
 ### Configuration and HDF5 Improvements
@@ -332,10 +356,16 @@ This system handles:
 ## Main Scripts
 
 ### Data_Run.py
-Standard data acquisition script for stationary or simple motion control measurements.
+Standard multi-scope data acquisition with optional xy/xyz probe motion.
 
-### Data_Run bmotion.py
-Data acquisition script using the `bapsf_motion` library for advanced probe positioning. See the [bmotion Acquisition System](#bmotion-acquisition-system) section for detailed information.
+### Data_Run_45deg.py
+Variant of `Data_Run.py` for 45-degree probe drives. Reads the same `experiment_config.txt` but generates positions via `motion.create_all_positions_45deg`.
+
+### Data_Run_MultiScope_Camera.py
+Combined multi-scope and Phantom high-speed camera acquisition. Uses `pi_gpio.pi_client` for tungsten-dropper trigger control.
+
+### Data_Run_bmotion.py
+Multi-scope acquisition using the `bapsf_motion` library for advanced probe positioning. See the [bmotion Acquisition System](#bmotion-acquisition-system) section for detailed information.
 
 ## Configuration Files
 
@@ -432,7 +462,7 @@ y_step = 2.0
 
 ### bmotion HDF5 Structure
 
-When using `Data_Run bmotion.py`, the following enhanced structure is created:
+When using `Data_Run_bmotion.py`, the following enhanced structure is created:
 
 ```
 experiment_file.hdf5
@@ -517,7 +547,7 @@ experiment_file.hdf5
 ### Usage
 
 ```bash
-python "Data_Run bmotion.py"
+python Data_Run_bmotion.py
 ```
 
 **Interactive Workflow:**
@@ -577,6 +607,6 @@ python Data_Run.py
 
 ### bmotion Acquisition
 ```python
-python "Data_Run bmotion.py"
+python Data_Run_bmotion.py
 ```
 

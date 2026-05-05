@@ -22,7 +22,7 @@ TODO: this script is not optimized for speed. Need to:
 
 import datetime
 import os
-from multi_scope_acquisition import run_acquisition
+from acquisition import run_acquisition
 import time
 import sys
 

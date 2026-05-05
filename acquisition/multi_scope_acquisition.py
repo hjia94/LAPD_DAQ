@@ -29,7 +29,7 @@ TODO: MultiscopeAquisition class getting initial time array needs to be optimize
 '''
 
 import numpy as np
-from LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE
+from drivers.LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE
 import h5py
 import time
 import os
@@ -37,12 +37,6 @@ import configparser
 import traceback
 import warnings
 import xarray as xr
-
-# Import motion control components from the motion package
-import sys
-motion_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motion")
-if motion_dir not in sys.path:
-    sys.path.insert(0, motion_dir)
 
 from motion import PositionManager
 #===============================================================================================================================================

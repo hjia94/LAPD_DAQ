@@ -23,23 +23,13 @@ Created July.2025
 import datetime
 import os
 import numpy as np
-from multi_scope_acquisition import MultiScopeAcquisition, load_experiment_config
-from phantom_recorder import PhantomRecorder
+from acquisition import MultiScopeAcquisition, load_experiment_config
+from drivers.phantom_recorder import PhantomRecorder
 import time
 import sys
 import h5py
 
-# Add paths for imports - works regardless of where the script is run from
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-pi_gpio_dir = os.path.join(current_dir, "pi_gpio")
-
-# Add directories to path if they exist and aren't already in path
-for path_to_add in [current_dir, parent_dir, pi_gpio_dir]:
-    if os.path.exists(path_to_add) and path_to_add not in sys.path:
-        sys.path.insert(0, path_to_add)
-
-from pi_client import TungstenDropper, TriggerClient
+from pi_gpio.pi_client import TungstenDropper, TriggerClient
 
 MOTOR_IP = '192.168.7.99'
 PI_HOST = '192.168.7.38'

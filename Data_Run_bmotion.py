@@ -22,7 +22,7 @@ import time
 import sys
 import logging
 
-from acquisition_bmotion import run_acquisition_bmotion
+from acquisition import run_acquisition_bmotion
 
 logging.basicConfig(
     filename='motor.log',

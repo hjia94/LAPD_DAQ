@@ -32,7 +32,13 @@ import tkinter.filedialog
 import numpy
 import h5py
 
-from LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE, EXPANDED_TRACE_NAMES
+# Make repo root importable so `drivers/` resolves when this module is launched
+# directly via `python McPherson/McPherson_DAQ_Scan_Control.py`.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from drivers.LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE, EXPANDED_TRACE_NAMES
 from spectrometer_controller import spectrometer
 
 
