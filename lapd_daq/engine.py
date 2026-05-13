@@ -184,7 +184,11 @@ def _build_direct_camera(config: RunConfig):
         "hdf5_file_path": str(output_path),
         "save_path": str(output_path.parent),
     }
-    return PhantomCameraAdapter(PhantomRecorder(camera_config), experiment_name=output_path.stem)
+    return PhantomCameraAdapter(
+        PhantomRecorder(camera_config),
+        experiment_name=output_path.stem,
+        save_path=output_path.parent,
+    )
 
 
 def _build_direct_trigger(config: RunConfig):

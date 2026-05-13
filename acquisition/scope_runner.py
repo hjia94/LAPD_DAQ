@@ -22,7 +22,6 @@ import time
 
 import numpy as np
 
-from drivers.LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE  # noqa: F401  (re-exported)
 from motion import PositionManager
 
 from . import hdf5_writer
@@ -237,6 +236,7 @@ class MultiScopeAcquisition:
             print(f"\nInitializing {name}...", end='')
 
             try:
+                LeCroy_Scope = _lecroy_scope_class()
                 self.scopes[name] = LeCroy_Scope(ip, verbose=False)
                 scope = self.scopes[name]
 
@@ -313,6 +313,12 @@ class MultiScopeAcquisition:
             scope = self.scopes[name]
             scope.set_trigger_mode('SINGLE')
         print("armed")
+
+
+def _lecroy_scope_class():
+    from drivers.LeCroy_Scope import LeCroy_Scope
+
+    return LeCroy_Scope
 
 
 # =============================================================================

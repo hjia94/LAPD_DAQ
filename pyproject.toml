@@ -6,14 +6,34 @@ build-backend = "setuptools.build_meta"
 name = "lapd-daq"
 version = "0.1.0"
 description = "LAPD experiment acquisition runner with an EPICS-ready device boundary."
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "h5py",
     "numpy",
 ]
 
+[project.optional-dependencies]
+scope = [
+    "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git",
+    "pyvisa",
+]
+bmotion = [
+    "bapsf-motion",
+    "xarray",
+]
+camera = []
+
 [project.scripts]
 lapd-daq = "lapd_daq.cli:main"
 
 [tool.setuptools]
-packages = ["lapd_daq", "lapd_daq.devices", "lapd_daq.storage"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = [
+    "acquisition*",
+    "drivers*",
+    "lapd_daq*",
+    "motion*",
+    "pi_gpio*",
+]

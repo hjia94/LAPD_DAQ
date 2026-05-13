@@ -89,7 +89,7 @@ def load_run_config(config_path: str | Path, mode: str = "stationary",
 
     camera_params = _coerce_section(_items(parser, "camera_config"))
     camera = CameraConfig(
-        enabled=mode in {"camera", "dropper"} or bool(camera_params),
+        enabled=mode in {"camera", "dropper"},
         parameters=camera_params,
         pv_prefix=parser.get("epics", "camera_pv_prefix", fallback=None),
     )

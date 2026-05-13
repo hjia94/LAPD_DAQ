@@ -12,7 +12,12 @@ from .scope_runner import (
     single_shot_acquisition,
     single_shot_acquisition_45,
 )
-from .bmotion import run_acquisition_bmotion
+
+
+def run_acquisition_bmotion(*args, **kwargs):
+    from .bmotion import run_acquisition_bmotion as _run_acquisition_bmotion
+
+    return _run_acquisition_bmotion(*args, **kwargs)
 
 __all__ = [
     "MultiScopeAcquisition",
