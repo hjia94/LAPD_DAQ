@@ -16,7 +16,7 @@ from lapd_daq.models import AchievedPosition, CameraShot, ScopeShot, ShotPlan, S
 SCHEMA_VERSION = "0.1"
 
 
-class RunWriter:
+class HDF5RunWriter:
     """Owns all HDF5 group/dataset names for a run."""
 
     def __init__(self, path: str | Path, config: RunConfig):
@@ -36,12 +36,13 @@ class RunWriter:
             config_group = h5.require_group("Configuration")
             _replace_dataset(config_group, "experiment_config", np.string_(self.config.raw_text))
 
-            run_group = h5.require_group("Run")
+            control_group = h5.require_group("Control")
+            run_group = control_group.require_group("Run")
             run_group.attrs["config_path"] = str(self.config.config_path)
             run_group.attrs["num_duplicate_shots"] = self.config.num_duplicate_shots
             run_group.attrs["num_run_repeats"] = self.config.num_run_repeats
 
-            devices_group = run_group.require_group("Devices")
+            devices_group = control_group.require_group("Devices")
             for device_name, metadata in (device_metadata or {}).items():
                 device_group = devices_group.require_group(device_name)
                 for key, value in metadata.items():
@@ -86,9 +87,10 @@ class RunWriter:
                     f"{trace.channel}_header",
                     data=np.void(trace.header),
                 )
-                data_ds.attrs["description"] = self.config.channel_descriptions.get(
-                    f"{scope_shot.scope_name}_{trace.channel}",
-                    f"Channel {trace.channel} - No description available",
+                data_ds.attrs["description"] = _channel_description(
+                    self.config.channel_descriptions,
+                    scope_shot.scope_name,
+                    trace.channel,
                 )
                 data_ds.attrs["dtype"] = "int16"
                 header_ds.attrs["description"] = f"Binary header data for {trace.channel}"
@@ -140,7 +142,7 @@ class RunWriter:
 
     def finalize(self, results: list[ShotResult]) -> None:
         with h5py.File(self.path, "a") as h5:
-            run_group = h5.require_group("Run")
+            run_group = h5.require_group("Control").require_group("Run")
             dtype = np.dtype([
                 ("shot_num", ">u4"),
                 ("status", h5py.string_dtype(encoding="utf-8")),
@@ -219,3 +221,14 @@ def _hdf5_attr(value):
     if isinstance(value, (str, int, float, bool, np.number)):
         return value
     return str(value)
+
+
+def _channel_description(descriptions: dict[str, str], scope_name: str, channel: str) -> str:
+    wanted = f"{scope_name}_{channel}".lower()
+    for key, value in descriptions.items():
+        if key.lower() == wanted:
+            return value
+    return f"Channel {channel} - No description available"
+
+
+RunWriter = HDF5RunWriter

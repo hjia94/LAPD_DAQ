@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 
 from lapd_daq.config import load_run_config
-from lapd_daq.devices.fake import FakeCameraDevice, FakeMotionDevice, FakeScopeDevice, FakeTriggerDevice
-from lapd_daq.engine import AcquisitionRun, DeviceSet
+from lapd_daq.devices.fakes import FakeCameraDevice, FakeMotionDevice, FakeScopeDevice, FakeTriggerDevice
+from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,14 +35,14 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _fake_devices(config) -> DeviceSet:
+def _fake_devices(config) -> AcquisitionDevices:
     scopes = [FakeScopeDevice(scope.name) for scope in config.scopes]
     if not scopes:
         scopes = [FakeScopeDevice()]
     motion = FakeMotionDevice() if config.motion.enabled else None
     camera = FakeCameraDevice() if config.camera.enabled else None
     trigger = FakeTriggerDevice() if config.trigger.enabled else None
-    return DeviceSet(scopes=scopes, motion=motion, camera=camera, trigger=trigger)
+    return AcquisitionDevices(scopes=scopes, motion=motion, camera=camera, trigger=trigger)
 
 
 if __name__ == "__main__":

@@ -9,18 +9,16 @@ from pathlib import Path
 import numpy as np
 
 from lapd_daq.config import RunConfig
-from lapd_daq.devices.direct import (
-    LabScopesLeCroyAdapter,
-    LegacyMotorAdapter,
-    PhantomCameraAdapter,
-    PiTriggerAdapter,
-)
+from lapd_daq.devices.lab_scopes import LabScopesLeCroyScopeAdapter
+from lapd_daq.devices.legacy_motion import LegacyMotorAdapter
+from lapd_daq.devices.phantom import PhantomCameraAdapter
+from lapd_daq.devices.pi_gpio import PiGPIOTriggerAdapter
 from lapd_daq.models import PlannedPosition, ShotPlan, ShotResult
-from lapd_daq.storage.hdf5 import RunWriter, planned_positions_to_hdf5
+from lapd_daq.storage.hdf5 import HDF5RunWriter, planned_positions_to_hdf5
 
 
 @dataclass
-class DeviceSet:
+class AcquisitionDevices:
     scopes: list = field(default_factory=list)
     motion: object | None = None
     camera: object | None = None
@@ -30,11 +28,11 @@ class DeviceSet:
 class AcquisitionRun:
     """Coordinates config, devices, shot plans, and storage."""
 
-    def __init__(self, config: RunConfig, devices: DeviceSet | None = None):
+    def __init__(self, config: RunConfig, devices: AcquisitionDevices | None = None):
         self.config = config
         self.devices = devices or build_direct_devices(config)
         self.output_path = config.output_path or default_output_path(config)
-        self.writer = RunWriter(self.output_path, config)
+        self.writer = HDF5RunWriter(self.output_path, config)
 
     def build_shot_plan(self) -> list[ShotPlan]:
         if self.config.motion.enabled and self.config.motion.kind in {"xy_grid", "xyz_grid"}:
@@ -130,12 +128,12 @@ class AcquisitionRun:
         return metadata
 
 
-def build_direct_devices(config: RunConfig) -> DeviceSet:
+def build_direct_devices(config: RunConfig) -> AcquisitionDevices:
     scopes = [
-        LabScopesLeCroyAdapter(scope.name, scope.ip_address, description=scope.description)
+        LabScopesLeCroyScopeAdapter(scope.name, scope.ip_address, description=scope.description)
         for scope in config.scopes
     ]
-    return DeviceSet(
+    return AcquisitionDevices(
         scopes=scopes,
         motion=_build_direct_motion(config),
         camera=_build_direct_camera(config),
@@ -197,7 +195,7 @@ def _build_direct_trigger(config: RunConfig):
         return None
     from pi_gpio.pi_client import TriggerClient
 
-    return PiTriggerAdapter(TriggerClient(str(params["pi_host"]), int(params.get("pi_port", 54321))))
+    return PiGPIOTriggerAdapter(TriggerClient(str(params["pi_host"]), int(params.get("pi_port", 54321))))
 
 
 def _resolution(value) -> tuple[int, int]:
@@ -240,3 +238,6 @@ def _grid_shot_plan(config: RunConfig) -> list[ShotPlan]:
                         )
                         shot_num += 1
     return plans
+
+
+DeviceSet = AcquisitionDevices
