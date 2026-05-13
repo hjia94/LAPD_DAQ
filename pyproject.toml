@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lapd-daq"
+version = "0.1.0"
+description = "LAPD experiment acquisition runner with an EPICS-ready device boundary."
+requires-python = ">=3.9"
+dependencies = [
+    "h5py",
+    "numpy",
+]
+
+[project.scripts]
+lapd-daq = "lapd_daq.cli:main"
+
+[tool.setuptools]
+packages = ["lapd_daq", "lapd_daq.devices", "lapd_daq.storage"]
