@@ -429,6 +429,7 @@ def run_acquisition(save_path, config_path):
     config, raw_config_text = load_experiment_config(config_path)
     num_duplicate_shots = int(config.get('nshots', 'num_duplicate_shots', fallback=1))
     num_run_repeats = int(config.get('nshots', 'num_run_repeats', fallback=1))
+    shot_num = 0
 
     has_position_config = 'position' in config and config.items('position')
 

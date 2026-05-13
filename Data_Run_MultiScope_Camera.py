@@ -80,7 +80,7 @@ def get_camera_config(config):
 # Enhanced acquisition function with camera integration
 #===============================================================================================================================================
 # Used for both run_acquisition_with_camera() and run_acquisition_with_WDropper()
-config = load_experiment_config(config_path)
+config, raw_config_text = load_experiment_config(config_path)
 scope_ips = dict(config.items('scope_ips')) if config.has_section('scope_ips') else {}
 cam_config = get_camera_config(config)
 num_shots = config.getint('nshots', 'num_duplicate_shots', fallback=1)  # Get from [nshots] section
@@ -97,7 +97,7 @@ def run_acquisition_with_camera(hdf5_path):
     camera_recorder = None  # Initialize to avoid NameError in finally block
     
     try:
-        with MultiScopeAcquisition(hdf5_path, config) as msa:
+        with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
             print("Initializing HDF5 file structure...", end='')
             msa.initialize_hdf5_base()
             print("✓")
@@ -188,9 +188,9 @@ def run_acquisition_with_WDropper(hdf5_path):
     camera_recorder = None
     
     try:
-        config = load_experiment_config(config_path)
+        config, raw_config_text = load_experiment_config(config_path)
         # Initialize multi-scope acquisition (no motor control)
-        with MultiScopeAcquisition(scope_ips, hdf5_path, config) as msa:
+        with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
 
             # Initialize HDF5 file structure (append mode since file already exists)
             print("Initializing HDF5 file structure...", end='')

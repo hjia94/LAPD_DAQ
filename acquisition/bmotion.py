@@ -231,7 +231,7 @@ def record_bmotion_positions(
 def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
     print('Starting acquisition at', time.ctime())
 
-    config = load_experiment_config(config_path)
+    config, raw_config_text = load_experiment_config(config_path)
     nshots = config.getint('nshots', 'num_duplicate_shots', fallback=1)
 
     print("Loading TOML configuration...", end='')
@@ -256,7 +256,7 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
     print(f"Total shots: {total_shots}")
 
     # Start acquisition loop
-    with MultiScopeAcquisition(hdf5_path, config) as msa:
+    with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
         try:
             print("Initializing HDF5 file...", end='')
             msa.initialize_hdf5_base()
