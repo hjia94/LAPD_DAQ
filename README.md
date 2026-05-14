@@ -1,612 +1,582 @@
 # LAPD_DAQ
-Data acquisition script using Ethernet motor and LeCroy scope as digitizer on LAPD.
-Modified from Scope_DAQ used on process plasma chamber.
+
+Python data-acquisition tools for LAPD experiments using LeCroy oscilloscopes,
+Ethernet motor controllers, Phantom cameras, Raspberry Pi triggers, and
+`bapsf_motion` workflows.
+
+The current branch introduces a cleaner `lapd_daq` acquisition framework with a
+single CLI, mock-device dry runs, centralized HDF5 writing, and adapter
+boundaries that can later be replaced by EPICS PV-backed devices. The older
+`Data_Run_*.py` scripts are still present for transition workflows.
+
+## Current Status
+
+- Supported now: stationary scope acquisition, XY/XYZ grid acquisition, camera
+  mode, dropper trigger mode, bmotion script workflow, and mock dry runs.
+- Mock tests are the automated test target in this repo. Real hardware tests
+  should be performed separately on the dedicated hardware PC.
+- 45-degree probe acquisition is not migrated in this refactor branch.
+  `Data_Run_45deg.py` exits early with a clear unsupported message.
+- EPICS is the future control backend. For now, Python directly controls
+  devices through adapter classes.
 
 ## Repository Layout
 
-```
+```text
 LAPD_DAQ/
-├── Data_Run.py                       # Standard multi-scope acquisition (xy/xyz motion or stationary)
-├── Data_Run_45deg.py                 # 45-degree probe variant
-├── Data_Run_MultiScope_Camera.py     # Multi-scope + Phantom high-speed camera
-├── Data_Run_bmotion.py               # Multi-scope using bapsf_motion library
-│
-├── acquisition/        # Acquisition engines called by the Data_Run_*.py scripts
-├── drivers/            # Hardware interfaces (LeCroy scope, Phantom camera)
-├── motion/             # Motor control + position management
-├── pi_gpio/            # Raspberry Pi trigger client/server
-├── McPherson/          # Standalone McPherson spectrometer GUI
-├── notebooks/          # Scratch notebooks (scope/motor testing)
-├── legacy/             # Superseded scripts kept for reference
-│
-├── experiment_config.txt       # User-edited per-run configuration
-├── example_experiment_config.txt
-└── requirements.txt
+  lapd_daq/                  New package: CLI, config model, run engine, devices, HDF5 writer
+  acquisition/               Transitional acquisition package used by Data_Run*.py scripts
+  drivers/                   LeCroy and Phantom hardware driver wrappers
+  motion/                    Motor control and position management helpers
+  pi_gpio/                   Raspberry Pi trigger/dropper client package
+  legacy/                    Superseded scripts kept for reference
+  notebooks/                 Scratch notebooks for scope and motor testing
+  tests/                     Mock-only automated tests
+  Data_Run.py                Transitional legacy-style standard acquisition script
+  Data_Run_MultiScope_Camera.py
+  Data_Run_bmotion.py
+  Data_Run_45deg.py          Explicitly unsupported in this refactor branch
+  example_experiment_config.txt
+  pyproject.toml
 ```
 
-All four entry-point scripts are run from the repo root, e.g. `python Data_Run.py`.
+## Install
 
-## Latest Updates (September 2025)
+Use Python 3.10 or newer.
 
-### Configuration and HDF5 Improvements
-- **Enhanced Configuration Handling**: Configuration files now loaded once with raw text preservation
-- **Performance Optimization**: Added shot_count attribute for faster shot existence checks
-- **Metadata Enhancements**: Full raw configuration text stored in HDF5 for improved reproducibility
-- **Memory Efficiency**: Reduced redundant file operations for better performance
+Command Prompt:
 
-## Installation Requirements
-
-### Python Version
-- Python 3.8 or higher
-
-### Required Libraries
-```bash
-# Core functionality
-h5py>=3.7.0         # HDF5 file handling
-numpy>=1.22.0       # Numerical operations
-matplotlib>=3.5.0   # Data visualization
-scipy>=1.8.0        # Signal processing
-
-# Scope communication
-pyvisa>=1.12.0      # Instrument control
-pyvisa-py>=0.5.2    # Pure Python backend for PyVISA
-
-# Motion control (if using probe positioning)
-bapsf_motion>=0.4.0  # BAPSF motion control library (optional)
+```cmd
+git clone https://github.com/hjia94/LAPD_DAQ.git
+cd LAPD_DAQ
+python -m venv .venv
+.venv\Scripts\activate.bat
+python -m pip install -e .
 ```
 
-> **Note:** The versions listed above are the ones the code was developed and tested with. You do not need to install these exact versions—any recent version should work. If you use the provided `requirements.txt`, it will install the latest available versions by default.
+PowerShell:
 
-### Installation
+```powershell
+git clone https://github.com/hjia94/LAPD_DAQ.git
+cd LAPD_DAQ
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install -e .
+```
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/LAPD_DAQ.git
-   cd LAPD_DAQ
+Install optional hardware extras only on machines that need them:
+
+Command Prompt:
+
+```cmd
+REM LeCroy scope control through lab_scopes and PyVISA
+python -m pip install -e ".[scope]"
+
+REM bapsf_motion workflows
+python -m pip install -e ".[bmotion]"
+```
+
+PowerShell:
+
+```powershell
+# LeCroy scope control through lab_scopes and PyVISA
+python -m pip install -e ".[scope]"
+
+# bapsf_motion workflows
+python -m pip install -e ".[bmotion]"
+```
+
+The `camera` extra is intentionally empty because the Phantom camera SDK and
+Python bindings are hardware-PC specific. Install those according to the camera
+PC setup notes before using camera mode.
+
+## Step-by-Step: Run a Mock Acquisition
+
+Use this first after any install or code change. It writes an HDF5 file without
+touching hardware.
+
+1. Create a local config:
+
+   Command Prompt:
+
+   ```cmd
+   copy example_experiment_config.txt experiment_config.txt
    ```
 
-2. Create and activate a virtual environment:
-   ```bash
-   python -m venv .venv
-   # On Windows:
-   .venv\Scripts\activate
-   # On Linux/macOS:
-   source .venv/bin/activate
+   PowerShell:
+
+   ```powershell
+   Copy-Item example_experiment_config.txt experiment_config.txt
    ```
 
-3. Install required packages:
-   ```bash
-   pip install -r requirements.txt
+2. Edit `experiment_config.txt` for the run. For a simple stationary mock run,
+   keep `[scope_ips]` populated and either remove or comment out active
+   `[position]` values.
+
+3. Run the CLI in dry-run mode:
+
+   Command Prompt:
+
+   ```cmd
+   lapd-daq run --config experiment_config.txt --mode stationary --dry-run --output mock_stationary.hdf5
    ```
 
-4. For bmotion control (optional):
-   ```bash
-   pip install bapsf_motion
+   PowerShell:
+
+   ```powershell
+   lapd-daq run --config experiment_config.txt --mode stationary --dry-run --output mock_stationary.hdf5
    ```
 
-## Configuration
+4. Confirm the output:
 
-All experiment settings are now configured through a single file: `experiment_config.txt`. This replaces the old system of hardcoded values in individual scripts.
+   Command Prompt:
 
-### Setting Up an Experiment
-
-1. **Copy the example config:**
-   ```bash
-   cp example_experiment_config.txt experiment_config.txt
+   ```cmd
+   python -m pytest tests/test_lapd_daq_framework.py
    ```
 
-2. **Edit the configuration sections:**
+   PowerShell:
 
-   **`[experiment]`** - Main experiment description (multi-line text)
+   ```powershell
+   python -m pytest tests/test_lapd_daq_framework.py
+   ```
+
+Expected HDF5 structure includes a root scope group such as `bdotscope`, a
+`time_array`, `shot_N/C1_data`, `shot_N/C1_header`, and run metadata under
+`/Control/Run`.
+
+## Step-by-Step: Standard Scope Acquisition
+
+Use this on the hardware PC after the mock dry run succeeds.
+
+1. Activate the environment:
+
+   Command Prompt:
+
+   ```cmd
+   .venv\Scripts\activate.bat
+   ```
+
+   PowerShell:
+
+   ```powershell
+   .\.venv\Scripts\activate
+   ```
+
+2. Install scope dependencies if needed:
+
+   Command Prompt:
+
+   ```cmd
+   python -m pip install -e ".[scope]"
+   ```
+
+   PowerShell:
+
+   ```powershell
+   python -m pip install -e ".[scope]"
+   ```
+
+3. Edit `experiment_config.txt`:
+
    ```ini
+   [nshots]
+   num_duplicate_shots = 5
+   num_run_repeats = 1
+
    [experiment]
-   description = """
-   Your detailed experiment description here...
-   Include plasma conditions, timing, probe setup, etc.
-   """
-   ```
+   description = Describe plasma conditions, probe setup, timing, and operator notes.
 
-   **`[scopes]`** - Scope descriptions
-   ```ini
    [scopes]
-   LPScope = LeCroy HDO4104 - 4GHz 20GS/s oscilloscope for Langmuir probe diagnostics
-   testScope = LeCroy WavePro 404HD - RF and probe diagnostics
-   ```
+   BdotScope = LeCroy HDO4104 - 4GHz 20GS/s
 
-   **`[channels]`** - Channel descriptions
-   ```ini
    [channels]
-   LPScope_C1 = Isat, p39, G: 1
-   LPScope_C2 = Isweep, p39
-   testScope_C1 = RF signal input
+   BdotScope_C1 = Bdot probe signal
+   BdotScope_C2 = Trigger monitor
+
+   [scope_ips]
+   BdotScope = 192.168.7.63
    ```
 
-   **`[position]`** - Motion/position settings (optional)
+4. For stationary acquisition, leave `[position]` empty or remove it:
+
+   Command Prompt:
+
+   ```cmd
+   lapd-daq run --config experiment_config.txt --mode stationary --output run_stationary.hdf5
+   ```
+
+   PowerShell:
+
+   ```powershell
+   lapd-daq run --config experiment_config.txt --mode stationary --output run_stationary.hdf5
+   ```
+
+5. For XY grid acquisition, fill `[position]` and `[motor_ips]`:
+
    ```ini
    [position]
-   # Uncomment these lines to enable probe movement:
-   # nx = 31
-   # ny = 41
-   # xmin = -15
-   # xmax = 15
-   # ...
+   nx = 31
+   ny = 41
+   xmin = -15
+   xmax = 15
+   ymin = -20
+   ymax = 20
+
+   [motor_ips]
+   x = 192.168.7.101
+   y = 192.168.7.102
+   # z = 192.168.7.103
    ```
 
-3. **Choose acquisition mode:**
-   - **With movement:** Uncomment and fill the `[position]` section → Use `Data_Run.py` or `Data_Run_45deg.py`
-   - **Stationary:** Leave `[position]` empty/commented → Use `Data_Run_MultiScope_Camera.py`
+   Then run:
 
-### Automatic Acquisition Mode Detection
+   Command Prompt:
 
-The system now automatically detects the acquisition mode from your configuration:
+   ```cmd
+   lapd-daq run --config experiment_config.txt --mode grid --output run_grid.hdf5
+   ```
 
-- **45-degree probe acquisition**: Detected when `[position]` section contains:
-  - `probe_list` parameter (e.g., `probe_list = P16,P22,P29,P34,P42`)
-  - Dictionary-format `xstart` and/or `xstop` parameters:
-    ```ini
-    xstart = {"P16": -38, "P22": -18, "P29": -38, "P34": -38, "P42": -38}
-    xstop = {"P16": -38, "P22": 18, "P29": -38, "P34": -38, "P42": -38}
-    ```
+   PowerShell:
 
-- **XY/XYZ probe acquisition**: Detected when `[position]` section contains:
-  - Standard grid parameters: `nx`, `ny`, `xmin`, `xmax`, `ymin`, `ymax`
-  - Optional Z parameters: `nz`, `zmin`, `zmax` (for 3D movement)
+   ```powershell
+   lapd-daq run --config experiment_config.txt --mode grid --output run_grid.hdf5
+   ```
 
-- **Stationary acquisition**: When `[position]` section is empty or missing
+6. Check the terminal summary and inspect the HDF5 file before moving it into
+   long-term storage.
 
-The `is_45deg` parameter is now automatically determined and no longer needs to be manually specified in most cases.
+## Step-by-Step: Camera and Dropper Modes
 
-### Configuration Loading System
+Camera mode uses the new CLI and `drivers.phantom_recorder.PhantomRecorder`.
+The camera is enabled only when `--mode camera` or `--mode dropper` is selected;
+having `[camera_config]` in the config does not affect stationary or grid runs.
 
-**Consolidated Configuration Parser**
+1. Confirm the Phantom SDK and Python camera bindings are installed on the
+   hardware PC.
 
-The system now uses a single, centralized `load_position_config()` function located in `motion/position_manager.py`:
+2. Add camera settings:
 
-```python
-from motion.position_manager import load_position_config
+   ```ini
+   [camera_config]
+   exposure_us = 30
+   fps = 10000
+   pre_trigger_frames = -500
+   post_trigger_frames = 1000
+   resolution = 256,256
+   ```
 
-# Load configuration with automatic mode detection
-config, is_45deg = load_position_config('experiment_config.txt')
+3. Run camera mode:
+
+   Command Prompt:
+
+   ```cmd
+   lapd-daq run --config experiment_config.txt --mode camera --output run_camera.hdf5
+   ```
+
+   PowerShell:
+
+   ```powershell
+   lapd-daq run --config experiment_config.txt --mode camera --output run_camera.hdf5
+   ```
+
+4. For dropper mode, add trigger settings:
+
+   ```ini
+   [trigger]
+   pi_host = 192.168.7.38
+   pi_port = 54321
+   ```
+
+   Then run:
+
+   Command Prompt:
+
+   ```cmd
+   lapd-daq run --config experiment_config.txt --mode dropper --output run_dropper.hdf5
+   ```
+
+   PowerShell:
+
+   ```powershell
+   lapd-daq run --config experiment_config.txt --mode dropper --output run_dropper.hdf5
+   ```
+
+Camera `.cine` files are saved next to the HDF5 output. HDF5 camera metadata
+stores the basename for compatibility.
+
+## Step-by-Step: bmotion Acquisition
+
+The bmotion workflow remains script-driven during this transition.
+
+1. Install bmotion dependencies on the hardware PC:
+
+   Command Prompt:
+
+   ```cmd
+   python -m pip install -e ".[bmotion]"
+   ```
+
+   PowerShell:
+
+   ```powershell
+   python -m pip install -e ".[bmotion]"
+   ```
+
+2. Edit `Data_Run_bmotion.py` and set:
+
+   - `exp_name`
+   - `base_path`
+   - `config_path`
+   - `toml_path`
+
+3. Prepare `experiment_config.txt` for scopes and shots.
+
+4. Prepare the separate bmotion TOML file for motion groups, drives, transforms,
+   motion builders, and exclusion zones.
+
+5. Run:
+
+   Command Prompt:
+
+   ```cmd
+   python Data_Run_bmotion.py
+   ```
+
+   PowerShell:
+
+   ```powershell
+   python Data_Run_bmotion.py
+   ```
+
+6. Follow the interactive prompts to select motion groups and motion direction.
+
+The output stores scope data in the standard root-level scope groups and bmotion
+configuration/position data under `/Configuration` and `/Control/Positions`.
+
+## Configuration Reference
+
+The repo still uses INI-style experiment configs for immediate usability.
+Internally, `lapd_daq.config.load_run_config()` converts the INI file to typed
+Python config objects.
+
+Important sections:
+
+- `[nshots]`: `num_duplicate_shots`, `num_run_repeats`
+- `[experiment]`: human-readable run description stored in HDF5
+- `[scopes]`: scope display names and descriptions
+- `[channels]`: channel descriptions using `ScopeName_C1` keys
+- `[scope_ips]`: direct scope IPs
+- `[position]`: XY/XYZ grid parameters for `--mode grid`
+- `[motor_ips]`: motor controller IPs for direct grid motion
+- `[camera_config]`: Phantom camera settings, used only in camera/dropper modes
+- `[trigger]`: Raspberry Pi trigger settings for dropper mode
+
+Future EPICS-related PV fields may be added to the INI config during migration,
+but EPICS-native `.db`, `.dbd`, `.template`, `.substitutions`, and `st.cmd`
+files should eventually own hardware control configuration.
+
+## HDF5 Output
+
+The new writer keeps the root-level scope layout compatible with old analysis
+readers:
+
+```text
+run.hdf5
+  attrs:
+    description
+    creation_time
+    schema_version
+    run_mode
+    software_versions
+  Configuration/
+    experiment_config
+  Control/
+    Run/
+      attrs: config_path, num_duplicate_shots, num_run_repeats
+      shot_status
+    Devices/
+    Positions/
+      positions_setup_array
+      positions_array
+    FastCam/
+      shot number
+      cine file name
+      timestamp
+  ScopeName/
+    attrs: description, ip_address, scope_type, shot_count
+    time_array
+    shot_1/
+      C1_data
+      C1_header
+      C2_data
+      C2_header
 ```
 
-**Function Features:**
-- **Unified parsing**: Handles all configuration formats (tuples, JSON dicts, lists, etc.)
-- **Automatic mode detection**: Returns both config data and determined acquisition mode
-- **Smart type conversion**: 
-  - Comma-separated values → tuples (e.g., `x_limits = -40,200`)
-  - JSON format → dictionaries (e.g., `xstart = {"P16": -38, "P22": -18}`)
-  - String lists → arrays (e.g., `probe_list = P16,P22,P29,P34,P42`)
-- **Backward compatibility**: Existing code continues to work unchanged
+Scope waveform datasets store raw `int16` samples and LeCroy binary headers.
+Use the existing `data-analysis/read/read_scope_data.py` helpers or
+`lab_scopes` readers to convert raw traces to voltage.
 
-**Return Values:**
-- `config`: Dictionary of parsed configuration parameters (or `None` if no config)
-- `is_45deg`: Boolean indicating 45-degree probe acquisition mode
+## Tests
 
-**Previous Behavior (deprecated):**
-Previously, there were two separate `load_position_config` functions in different modules, which caused confusion and code duplication. The consolidation eliminates this redundancy while maintaining all functionality.
+Automated tests use only fake/mock devices:
 
-**PositionManager Integration:**
-The `PositionManager` class now automatically determines the acquisition mode:
+Command Prompt:
 
-```python
-# Old way (manual specification)
-pos_manager = PositionManager(save_path, nz=None, is_45deg=True)
-
-# New way (automatic detection from config)
-pos_manager = PositionManager(save_path, nz=None)  # is_45deg auto-detected
-
-# Still supports manual override when needed
-pos_manager = PositionManager(save_path, nz=None, is_45deg=False)  # Force non-45deg
+```cmd
+set PYTHONPATH=C:\Users\hjia9\Documents\GitHub\LAPD_DAQ\.venv\Lib\site-packages;%PYTHONPATH%
+python -m pytest tests/test_lapd_daq_framework.py
 ```
 
-**Enhanced Configuration Handling (September 2025)**
+PowerShell:
 
-The configuration loading system has been further enhanced for better performance and reliability:
-
-```python
-# Enhanced configuration loading returning both parsed config and raw text
-config, raw_config_text = load_experiment_config('experiment_config.txt')
+```powershell
+$env:PYTHONPATH = "C:\Users\hjia9\Documents\GitHub\LAPD_DAQ\.venv\Lib\site-packages;$env:PYTHONPATH"
+python -m pytest tests/test_lapd_daq_framework.py
 ```
 
-**New Features:**
-- **Raw Text Preservation**: Configuration file contents are now preserved exactly as written
-- **Single-Read Approach**: Configuration files are opened only once, improving efficiency
-- **Improved Error Handling**: Better fallbacks when configuration files have issues
-- **Memory-Based Storage**: Raw configuration text stored in memory instead of re-reading files
+The TRC replay compatibility test uses fixed files under `D:\data\raw data`
+when present and skips itself when the external fixtures are missing.
 
+## Hardware Diagnostic Checks
 
-### Data Acquisition Integration
+Use `scripts/hardware_daq_check.py` only on the PC connected to the relevant
+instrument. Each command checks one instrument family at a time: `scope`,
+`motion`, or `camera`. The safe default is non-destructive:
 
-#### HDF5 Structure and Data Format
+- `scope` initializes the selected scope; add `--acquire` to write one shot.
+- `motion` reads the current probe position; add `--move-to x,y[,z]` to move.
+- `camera` configures the Phantom camera; add `--record` to wait for a trigger
+  and save one `.cine`.
 
-```
-experiment_name.hdf5/
-├── attrs/
-│   ├── description          # Overall experiment description
-│   ├── creation_time        # Time when file was created
-│   └── source_code          # Python scripts used to create the file
-│
-├── Control/
-│   └── Positions/
-│       ├── positions_setup_array  # Planned positions with metadata
-│       │   └── attrs/
-│       │       ├── xpos           # Array of x positions
-│       │       ├── ypos           # Array of y positions
-│       │       └── zpos           # Array of z positions (if 3D)
-│       │
-│       └── positions_array        # Actual achieved positions
-│
-├── FastScope/               # Scope group
-│   ├── attrs/
-│   │   ├── description     # Scope description
-│   │   ├── ip_address      # Scope IP address
-│   │   ├── scope_type      # Scope identification string
-│   │   └── external_delay(ms)  # External delay in milliseconds
-│   │
-│   ├── time_array          # Time array for all channels
-│   │   └── attrs/
-│   │       ├── units       # "seconds"
-│   │       ├── description # Time array info and mode
-│   │       └── dtype       # Data type of time array
-│   │
-│   ├── shot_1/            # First shot data
-│   │   ├── attrs/
-│   │   │   └── acquisition_time
-│   │   │
-│   │   ├── C1_data        # Channel 1 raw data (int16)
-│   │   │   └── attrs/
-│   │   │       ├── description  # Channel description
-│   │   │       └── dtype       # Data type (int16)
-│   │   ├── C1_header      # Channel 1 binary header
-│   │   │   └── attrs/
-│   │   │       └── description
-│   │   ├── C2_data        # Channel 2 raw data (int16)
-│   │   ├── C2_header      # Channel 2 binary header
-│   │   └── ...            # Additional channels
-│   │
-│   ├── shot_2/            # Second shot data
-│   │   └── ...            # Same structure as shot_1
-│   │
-│   └── shot_N/            # Shot N data
-│       ├── attrs/         # For skipped positions:
-│       │   ├── skipped = True
-│       │   └── skip_reason = "Cannot find valid path..."
-│       └── acquisition_time
-│
-└── x-ray_dipole/          # Second scope group
-    └── ...                # Same structure as above
+Scope initialize-only check:
+
+Command Prompt:
+
+```cmd
+python scripts\hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope
 ```
 
-#### Key Features and Data Format (2025 Update)
+PowerShell:
 
-1. **Raw int16 Data Storage**
-   - All scope waveform data is now saved as raw `int16` arrays for maximum write speed and minimal file size.
-   - No conversion to float64 is performed during acquisition or saving.
-   - To convert to physical units, use the scale/offset in the binary header (see LeCroy documentation).
-
-2. **HDF5 Optimization Settings**
-   - **Chunking:** Large chunk sizes are used for fast writing (typically 512k–1M samples per chunk).
-   - **Compression:** By default, no compression is used for maximum speed. Optionally, `'lzf'` can be enabled for fast, lightweight compression.
-   - **Shuffle:** Disabled for speed (enabling can improve compression if used).
-   - **Fletcher32:** Enabled by default for data integrity (detects corruption on read).
-
-3. **Metadata and Structure**
-   - Channel and scope descriptions, acquisition time, and binary headers are stored as attributes or datasets.
-   - Skipped positions are recorded with `skipped=True` and a `skip_reason` attribute.
-   - Time arrays are stored once per scope group.
-
-#### Reading int16 Data
-
-When reading, you will get raw int16 arrays. To convert to voltage:
-
-```python
-import h5py
-import numpy as np
-
-with h5py.File('experiment_name.hdf5', 'r') as f:
-    scope_group = f['FastScope']
-    for shot_name in [k for k in scope_group.keys() if k.startswith('shot_')]:
-        shot_group = scope_group[shot_name]
-        for channel in [k for k in shot_group.keys() if k.endswith('_data')]:
-            raw = shot_group[channel][:]  # int16 array
-            header = shot_group[channel.replace('_data', '_header')][:]
-            # Use header to get vertical_gain and vertical_offset, then:
-            # voltage = vertical_gain * raw - vertical_offset
+```powershell
+python scripts/hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope
 ```
 
-#### HDF5 Performance Tuning
+Scope one-shot acquisition through the DAQ HDF5 writer:
 
-- For **maximum speed**, use `compression=None`, `shuffle=False`, `fletcher32=False`.
-- For **data integrity**, set `fletcher32=True` (default in this repo).
-- For **smaller files** with some speed, use `compression='lzf'` and optionally `shuffle=True`.
-- Chunk size can be tuned for your disk and data size; larger chunks are faster up to a point.
+Command Prompt:
 
----
-
-2. **Position Skipping**
-   - When a position is blocked by an obstacle:
-     ```
-     shot_group.attrs['skipped'] = True
-     shot_group.attrs['skip_reason'] = "Cannot find valid path: Position blocked by obstacle"
-     ```
-   - Data file maintains complete record of attempted positions
-   - Empty shot groups created with skip explanations
-
-### Notes
-- All time values are stored in seconds
-- Binary headers contain scope-specific metadata
-- Source code is preserved for reproducibility
-- Skipped positions are documented with reasons
-- Data compression and chunking optimize storage
-
-
-# LAPD DAQ System
-
-Multi-scope data acquisition system for the Large Plasma Device (LAPD) with support for probe positioning using motion control systems.
-
-## Overview
-
-This system handles:
-- Multi-scope data acquisition from LeCroy oscilloscopes
-- Probe positioning using motion control systems
-- HDF5 data storage with comprehensive metadata
-- Real-time data visualization
-- Support for both stationary and moving probe measurements
-
-## Main Scripts
-
-### Data_Run.py
-Standard multi-scope data acquisition with optional xy/xyz probe motion.
-
-### Data_Run_45deg.py
-Variant of `Data_Run.py` for 45-degree probe drives. Reads the same `experiment_config.txt` but generates positions via `motion.create_all_positions_45deg`.
-
-### Data_Run_MultiScope_Camera.py
-Combined multi-scope and Phantom high-speed camera acquisition. Uses `pi_gpio.pi_client` for tungsten-dropper trigger control.
-
-### Data_Run_bmotion.py
-Multi-scope acquisition using the `bapsf_motion` library for advanced probe positioning. See the [bmotion Acquisition System](#bmotion-acquisition-system) section for detailed information.
-
-## Configuration Files
-
-### experiment_config.txt
-Main experiment configuration containing:
-- Experiment description and parameters
-- Scope IP addresses and channel assignments
-- Shot configuration (num_duplicate_shots, num_run_repeats)
-- Channel descriptions and settings
-
-## HDF5 File Structure
-
-### Standard Acquisition Structure
-```
-experiment_file.hdf5
-├── attributes: description, creation_time, source_code, config_version
-├── Configuration/
-│   └── experiment_config (dataset, raw config text)  # Added in 2025 update
-├── ScopeName1/
-│   ├── attributes: description, ip_address, scope_type, shot_count  # shot_count added in 2025
-│   ├── time_array (dataset)
-│   ├── shot_1/
-│   │   ├── attributes: acquisition_time
-│   │   ├── C1_data (dataset, int16)
-│   │   ├── C1_header (dataset, binary)
-│   │   ├── C2_data (dataset, int16)
-│   │   └── C2_header (dataset, binary)
-│   ├── shot_2/
-│   └── ...
-├── ScopeName2/
-│   └── ... (similar structure)
-└── Control/
-    └── Positions/
-        ├── positions_array (dataset, structured array)
-        └── ProbeX/ [for multi-probe setups]
-            ├── shot_1/
-            ├── shot_2/
-            └── ...
+```cmd
+python scripts\hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope --acquire --output scope_check.hdf5
 ```
 
-### Data Types and Compression
+PowerShell:
 
-- **Scope data**: Stored as `int16` with LZF compression for optimal speed/size balance
-- **Time arrays**: Stored as `float64` for maximum precision
-- **Position data**: 32-bit floats for position coordinates
-- **Headers**: Binary data preserving original scope header information
-- **Configuration**: Raw text stored as string datasets for maximum fidelity
-
-### Performance Optimizations (September 2025)
-
-- **shot_count Attribute**: Added to scope groups for fast existence checks and indexing
-- **Raw Config Storage**: Configuration files stored as raw text exactly as written
-- **Memory Optimizations**: Single-read approach for configuration files
-- **Fast Access Pattern**: Direct group access for shot data instead of filtering
-
-## bmotion Acquisition System
-
-### Overview
-The `bmotion` acquisition system provides advanced probe positioning capabilities using the `bapsf_motion` library, specifically designed for LAPD's 6K probe drive system.
-
-### Key Features
-- **Multi-Motion Group Support**: Handle multiple motion groups simultaneously
-- **Advanced Motion Planning**: Complex patterns, grids, and exclusion zones
-- **TOML Configuration**: Flexible, human-readable motion configuration
-- **Real-time Position Feedback**: Verification and logging of achieved positions
-- **Coordinate Transforms**: Support for LAPD probe coordinate systems
-- **Error Recovery**: Graceful handling of motion failures with data preservation
-
-### Configuration
-
-#### bmotion_config.toml
-TOML configuration file for `bapsf_motion` containing:
-- **Motion group definitions**: Individual motion systems (e.g., probe drives)
-- **Drive and axis configurations**: Hardware-specific settings
-- **Transform parameters**: Coordinate system transformations
-- **Motion builder settings**: Grid patterns, exclusion zones, custom paths
-- **Layer definitions**: Multi-layer scan configurations
-
-Example structure:
-```toml
-[motion_groups.probe_x]
-name = "Probe X Drive"
-drives = ["x_axis"]
-
-[motion_groups.probe_x.motion_builder]
-type = "grid"
-x_start = -40.0
-x_stop = 40.0
-x_step = 2.0
-y_start = -30.0
-y_stop = 30.0
-y_step = 2.0
+```powershell
+python scripts/hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope --acquire --output scope_check.hdf5
 ```
 
-### bmotion HDF5 Structure
+Motion read-only check:
 
-When using `Data_Run_bmotion.py`, the following enhanced structure is created:
+Command Prompt:
 
-```
-experiment_file.hdf5
-├── Configuration/
-│   └── bmotion_config (dataset)              # Complete TOML configuration
-│
-├── Control/
-│   └── Positions/
-│       ├── motion_group_1_name/              # Each motion group directly under Positions
-│       │   ├── motion_list (dataset)         # Planned positions from bmotion
-│       │   ├── positions_array (dataset)     # Actual achieved positions (structured)
-│       │   └── attributes: name, key
-│       ├── motion_group_2_name/
-│       │   ├── motion_list (dataset)
-│       │   ├── positions_array (dataset)     # Structured array: shot_num, x, y
-│       │   └── attributes: name, key
-│       └── ...
-│
-├── ScopeName1/                               # Standard scope data structure
-│   ├── time_array (dataset)
-│   ├── shot_1/
-│   │   ├── C1_data, C1_header, ...
-│   └── ...
-└── ScopeName2/
-    └── ...
+```cmd
+python scripts\hardware_daq_check.py motion --config experiment_config.txt --dimension xy
 ```
 
-#### Motion Group Datasets
+PowerShell:
 
-**motion_list Dataset**
-- **Purpose**: Stores the complete motion list generated by `bapsf_motion`
-- **Format**: 2D numpy array where each row is a [x, y] position
-- **Source**: Generated from TOML configuration (grid settings, exclusion zones, etc.)
-- **Coordinates**: Positions in the measurement coordinate system (typically cm)
-- **Storage**: Created once at initialization with all planned positions
-
-**positions_array Dataset**
-- **Purpose**: Records actual achieved positions for each shot
-- **Format**: Structured array with dtype `[('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]`:
-  - `shot_num`: Shot number (1-based indexing, uint32)
-  - `x`: Actual x position achieved by the motion system (float32)
-  - `y`: Actual y position achieved by the motion system (float32)
-- **Updates**: Populated in real-time during acquisition with position feedback
-- **Size**: Pre-allocated for total number of shots
-- **Access**: Each motion group has its own positions_array directly under `Control/Positions/{group_name}/`
-
-**bmotion_config Dataset**
-- **Purpose**: Preserves complete TOML configuration for reproducibility
-- **Format**: String dataset containing full TOML file content
-- **Location**: `Configuration/bmotion_config`
-
-### Motion Workflow
-
-1. **Configuration Loading**
-   - Load TOML configuration file
-   - Initialize `bapsf_motion` RunManager
-   - Display available motion groups to user
-
-2. **Motion Group Selection**
-   - Present motion groups with sizes and descriptions
-   - Allow user to select specific groups or all groups
-   - Configure motion direction (forward/backward) for each group
-
-3. **Motion List Generation**
-   - Generate motion lists from TOML parameters
-   - Calculate maximum motion list size across all groups
-   - Store motion lists in HDF5 structure
-
-4. **Acquisition Loop**
-   - For each position index:
-     - Move all selected motion groups to target positions
-     - Wait for motion completion and verify positions
-     - Acquire scope data for specified number of shots
-     - Record actual achieved positions for each motion group
-     - Handle motion errors gracefully with position logging
-
-5. **Data Organization**
-   - Each motion group maintains its own position history
-   - Planned vs. achieved positions clearly separated
-   - Complete configuration preserved for analysis
-
-### Usage
-
-```bash
-python Data_Run_bmotion.py
+```powershell
+python scripts/hardware_daq_check.py motion --config experiment_config.txt --dimension xy
 ```
 
-**Interactive Workflow:**
-1. System loads TOML configuration and displays available motion groups
-2. User selects which motion groups to use for the acquisition
-3. User configures motion direction (forward/backward) for each group
-4. System calculates total shots and begins acquisition
-5. Real-time position feedback and data acquisition proceeds
-6. Complete motion and scope data saved to HDF5 file
+Motion single move:
 
-### Error Handling
+Command Prompt:
 
-- **Motion Failures**: Individual motion group failures are logged with reasons
-- **Position Verification**: Actual vs. planned positions compared and stored
-- **Data Integrity**: Skipped shots documented with skip reasons
-- **Recovery**: System continues acquisition even if some motion groups fail
-- **Configuration Backup**: Complete TOML config preserved in HDF5 file
-
-### Integration Benefits
-
-- **Reproducibility**: Complete motion configuration stored with data
-- **Flexibility**: Support for complex motion patterns and multiple motion groups
-- **Reliability**: Robust error handling and position verification
-- **Analysis**: Clear separation of planned vs. achieved positions
-- **Scalability**: Support for multiple simultaneous motion systems
-
-## Key Features
-
-### Optimized Data Acquisition
-- Parallel scope arming for synchronized measurements
-- Raw int16 data acquisition for maximum speed
-- Chunked HDF5 storage with compression
-- Automatic error recovery and data preservation
-- Shot count tracking for rapid indexing (Sept 2025)
-- Direct group access patterns for large datasets (Sept 2025)
-
-### Comprehensive Metadata
-- Complete experiment description and parameters
-- Source code preservation for reproducibility
-- Scope and channel configuration details
-- Timing and acquisition metadata
-- Raw configuration file preservation (Sept 2025)
-- Memory-optimized configuration loading (Sept 2025)
-
-### Robust Error Handling
-- Automatic scope reconnection on failures
-- Motion error recovery with position logging
-- Skipped shot tracking with reason codes
-- Data integrity preservation during interruptions
-
-## Usage Examples
-
-### Standard Acquisition
-```python
-python Data_Run.py
+```cmd
+python scripts\hardware_daq_check.py motion --config experiment_config.txt --dimension xy --move-to 0,0 --output motion_check.hdf5
 ```
 
-### bmotion Acquisition
-```python
-python Data_Run_bmotion.py
+PowerShell:
+
+```powershell
+python scripts/hardware_daq_check.py motion --config experiment_config.txt --dimension xy --move-to 0,0 --output motion_check.hdf5
 ```
 
+Camera configure-only check:
+
+Command Prompt:
+
+```cmd
+python scripts\hardware_daq_check.py camera --config experiment_config.txt --output camera_check.hdf5
+```
+
+PowerShell:
+
+```powershell
+python scripts/hardware_daq_check.py camera --config experiment_config.txt --output camera_check.hdf5
+```
+
+Camera one-shot recording:
+
+Command Prompt:
+
+```cmd
+python scripts\hardware_daq_check.py camera --config experiment_config.txt --record --experiment-name camera_check --output camera_check.hdf5
+```
+
+PowerShell:
+
+```powershell
+python scripts/hardware_daq_check.py camera --config experiment_config.txt --record --experiment-name camera_check --output camera_check.hdf5
+```
+
+Data_Run-style real-scope check with no motor movement:
+
+Command Prompt:
+
+```cmd
+python scripts\hardware_daq_check.py data-run-scope --config experiment_config.txt --scope BdotScope --shots 1 --output data_run_scope_check.hdf5
+```
+
+PowerShell:
+
+```powershell
+python scripts/hardware_daq_check.py data-run-scope --config experiment_config.txt --scope BdotScope --shots 1 --output data_run_scope_check.hdf5
+```
+
+This follows the transitional `Data_Run.py` scope path: initialize HDF5,
+initialize the real scope, arm/acquire one or more shots, and write the standard
+root-level scope datasets. It ignores `[position]` and never initializes motors.
+
+Data_Run-style real-motion check with fake delayed scope data:
+
+Command Prompt:
+
+```cmd
+python scripts\hardware_daq_check.py data-run-motion --config experiment_config.txt --max-shots 1 --pause 0.5 --allow-motion --output data_run_motion_check.hdf5
+```
+
+PowerShell:
+
+```powershell
+python scripts/hardware_daq_check.py data-run-motion --config experiment_config.txt --max-shots 1 --pause 0.5 --allow-motion --output data_run_motion_check.hdf5
+```
+
+This follows the transitional `Data_Run.py` motion path: load positions from
+`[position]`, initialize the real motor controller, move through up to
+`--max-shots` positions, pause instead of acquiring scope data, and write a fake
+small scope waveform so the HDF5 file still has the normal shot structure. The
+`--allow-motion` flag is required so this cannot move hardware accidentally.
+
+## EPICS Migration Path
+
+1. Clean Python framework using direct hardware adapters.
+2. Add EPICS PV naming fields while direct adapters still run hardware.
+3. Move devices behind EPICS IOCs and replace direct adapters with EPICS PV
+   adapters.
+4. Let EPICS own device state, interlocks, autosave, and control logic.
+5. Keep `LAPD_DAQ` focused on experiment orchestration, shot sequencing, and
+   HDF5 data products.

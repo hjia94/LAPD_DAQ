@@ -1,99 +1,109 @@
-# Number of shots
+# Example experiment_config.txt for LAPD_DAQ
+#
+# Copy this file to experiment_config.txt and edit IP addresses before running.
+# The active defaults are intentionally small so the hardware diagnostic checks
+# can be run on the instrument PC without starting a full scan.
+#
+# Recommended first checks:
+#
+#   Real scope, no motor movement:
+#   python scripts\hardware_daq_check.py data-run-scope --config experiment_config.txt --scope BdotScope --shots 1 --output data_run_scope_check.hdf5
+#
+#   Real motor movement, fake delayed scope data:
+#   python scripts\hardware_daq_check.py data-run-motion --config experiment_config.txt --max-shots 1 --pause 0.5 --allow-motion --output data_run_motion_check.hdf5
+#
+# WARNING: data-run-motion will move the configured motors when --allow-motion
+# is present. Verify that the active [position] target below is safe for the
+# installed probe and current LAPD configuration before running it.
+
 [nshots]
-num_duplicate_shots = 5 # number of shots per position
+# Keep diagnostics to one shot by default. Increase for a real acquisition.
+num_duplicate_shots = 1
 num_run_repeats = 1
 
 [position]
-nx = 31
-ny = 41
+# Safe diagnostic target for data-run-motion. This creates one position:
+# shot_1 at x=0 cm, y=0 cm. Change these values only after confirming the
+# target is safe for the installed probe and motor geometry.
+nx = 1
+ny = 1
+xmin = 0
+xmax = 0
+ymin = 0
+ymax = 0
 
-xmin = -15
-xmax = 15
-ymin = -20
-ymax = 20
+# Example full XY scan values. Copy these over the diagnostic values above
+# when you are ready to run a real grid scan.
+# nx = 31
+# ny = 41
+# xmin = -15
+# xmax = 15
+# ymin = -20
+# ymax = 20
+
+# Example 3D extension.
+# nz = 11
+# zmin = -5
+# zmax = 5
 
 [motor_ips]
-x = 192.168.7.101            # X-axis motor controller
-y = 192.168.7.102            # Y-axis motor controller  
-# z = 192.168.7.103            # Z-axis motor controller (for 3D movement)
+# Direct motor-controller IPs used by --mode grid and data-run-motion.
+# Keep comments on separate lines; the transitional Data_Run parser does not
+# strip inline comments from values.
+x = 192.168.7.101
+y = 192.168.7.102
+# z = 192.168.7.103
 
 [experiment]
-description = Multi-scope Data Acquisition with Probe Movement
-    Experiment: 18-isatswp-p39-xy-2000G-800G
-    Date: 2024-12-XX
-    Operator: Research Team
+description = LAPD_DAQ hardware diagnostic template
+    Purpose:
+    - Run one real-scope Data_Run-style check without motor movement.
+    - Run one real-motor Data_Run-style check with fake delayed scope data.
 
-    LAPD B field:
-    ========
-    Black magnets at south:(PS12-13: 1100A)	2.0 kG
-    Magenta & yellow magnets: 		0.8 kG
-    Black magnet at north PS11: (0 A) 	0.0 kG
-
-    South LaB6 source:
-    ============
-    He plasma, 120 V bank discharge voltage, 3282 A discharge current
-    1/3 Hz rep rate 
-    Heater: ~36Vrms/2050 A
-
-    Timing:
-    =====
-    South Lab6 source: 0-15 ms 
-    Lang Sweep: 200 us pulse-width, 18 cycles every 1 ms starting at 0.7 ms
-    Scope trigger: load traces to see. Must be several milliseconds before plasma turned on
-
-    Moving Lang probe, coated shaft, 4 tip on port 29 (drive 4)
-
-    Probe Movement:
-    - Controlled by motion control system
-    - Parameters loaded from [position] section below when available
-
-    50 Ohm termination on scope.
-    Isat channel has a low pass filter to kill noise.
+    Edit this description for the actual experiment before production runs.
 
 [scopes]
 BdotScope = LeCroy HDO4104 - 4GHz 20GS/s
 XrayScope = LeCroy regular black scope
 
 [channels]
-BdotScope_C1 = N/A
-BdotScope_C2 = active
-BdotScope_C3 = active
-BdotScope_C4 = active
-XrayScope_C1 = N/A
-XrayScope_C2 = active
-XrayScope_C3 = active
-XrayScope_C4 = active
+BdotScope_C1 = Bdot diagnostic channel 1
+BdotScope_C2 = Bdot diagnostic channel 2
+BdotScope_C3 = Bdot diagnostic channel 3
+BdotScope_C4 = Bdot diagnostic channel 4
+XrayScope_C1 = X-ray diagnostic channel 1
+XrayScope_C2 = X-ray diagnostic channel 2
+XrayScope_C3 = X-ray diagnostic channel 3
+XrayScope_C4 = X-ray diagnostic channel 4
 
 [scope_ips]
+# Direct LeCroy scope IPs used by --mode stationary/grid/camera/dropper and
+# data-run-scope. Edit these to match the hardware PC network.
 BdotScope = 192.168.7.63
 XrayScope = 192.168.7.64
 
+[camera_config]
+# Used only when running --mode camera, --mode dropper, or the camera hardware
+# diagnostic. These values are ignored by stationary/grid modes.
+exposure_us = 30
+fps = 10000
+pre_trigger_frames = -500
+post_trigger_frames = 1000
+resolution = 256,256
 
-# --- For 45deg Movement (Data_Run_45deg.py) ---
+[trigger]
+# Raspberry Pi trigger settings for dropper mode. Edit before use.
+pi_host = 192.168.7.38
+pi_port = 54321
+
+# --- 45-degree probe notes ---
+# 45-degree acquisition is not migrated in the current refactor branch.
+# Keep these fields only as reference for the pre-refactor hardware PC workflow.
 # probe_list = P16,P22,P29,P34,P42
-# nx = 37
 # xstart = {"P16": -38, "P22": -18, "P29": -38, "P34": -38, "P42": -38}
 # xstop = {"P16": -38, "P22": 18, "P29": -38, "P34": -38, "P42": -38}
 
-
-# --- For 45deg Movement (Data_Run_45deg.py) ---
-# P16 = 192.168.7.141          # Probe P16 motor controller
-# P22 = 192.168.7.142          # Probe P22 motor controller
-# P29 = 192.168.7.143          # Probe P29 motor controller
-# P34 = 192.168.7.144          # Probe P34 motor controller
-# P42 = 192.168.7.145          # Probe P42 motor controller
-
-# --- For B-motion Movement (Data_Run bmotion.py) ---
-# Uses motion group configurations from separate TOML file
-# Motor IPs are defined in the TOML configuration file
-
-
-# Camera configuration (optional, for Data_Run_MultiScope_Camera.py)
-[camera_config]
-# exposure_us = 30
-# fps = 10000
-# pre_trigger_frames = -500
-# post_trigger_frames = 1000
-# resolution = 256,256
-# Example experiment_config.txt for LAPD DAQ system
-# Copy this file to experiment_config.txt and edit for your experiment
+# --- bmotion notes ---
+# Data_Run_bmotion.py uses a separate TOML file for motion groups, drives,
+# transforms, motion builders, and exclusion zones. Motor IPs for bmotion are
+# defined in that TOML file, not in [motor_ips].
