@@ -28,7 +28,7 @@ def configure_bmotion_hdf5_group(
         config_grp = f.require_group('Configuration')
         with open(toml_path, 'r') as toml_file:
             bmotion_config_text = toml_file.read()
-            config_grp.create_dataset('bmotion_config', data=np.string_(bmotion_config_text))
+            config_grp.create_dataset('bmotion_config', data=np.bytes_(bmotion_config_text))
         
         # Save motion_list from each selected motion group directly under Control/Positions
         for mg_key in selected_mg_keys:

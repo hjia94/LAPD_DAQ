@@ -274,7 +274,7 @@ class MultiScopeAcquisition:
             
             # Store experiment_config.txt from the raw_config_text
             if self.raw_config_text:
-                config_group.create_dataset('experiment_config', data=np.string_(self.raw_config_text))
+                config_group.create_dataset('experiment_config', data=np.bytes_(self.raw_config_text))
                 print("Stored full configuration file content from memory")
             else:
                 # As a fallback, try to convert config to string using configparser's write method
@@ -283,11 +283,11 @@ class MultiScopeAcquisition:
                     config_buffer = io.StringIO()
                     self.config.write(config_buffer)
                     config_text = config_buffer.getvalue()
-                    config_group.create_dataset('experiment_config', data=np.string_(config_text))
+                    config_group.create_dataset('experiment_config', data=np.bytes_(config_text))
                     print("Stored configuration using ConfigParser's write method")
                 except Exception as e:
                     print(f"Could not convert config to string: {str(e)}")
-                    config_group.create_dataset('experiment_config', data=np.string_(f"Error saving configuration: {str(e)}"))
+                    config_group.create_dataset('experiment_config', data=np.bytes_(f"Error saving configuration: {str(e)}"))
             
             # Create scope groups with their descriptions
             for scope_name in self.scope_ips:

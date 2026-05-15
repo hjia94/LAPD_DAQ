@@ -62,7 +62,7 @@ def write_experiment_metadata(save_path, description, source_code,
         config_group = f.require_group('Configuration')
         config_group.create_dataset(
             'experiment_config',
-            data=np.string_(_serialize_config(raw_config_text, config)),
+            data=np.bytes_(_serialize_config(raw_config_text, config)),
         )
 
         for scope_name in scope_names:

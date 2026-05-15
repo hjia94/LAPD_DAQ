@@ -34,7 +34,7 @@ class HDF5RunWriter:
             h5.attrs["software_versions"] = str(_software_versions())
 
             config_group = h5.require_group("Configuration")
-            _replace_dataset(config_group, "experiment_config", np.string_(self.config.raw_text))
+            _replace_dataset(config_group, "experiment_config", np.bytes_(self.config.raw_text))
 
             control_group = h5.require_group("Control")
             run_group = control_group.require_group("Run")
