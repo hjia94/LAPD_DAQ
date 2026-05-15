@@ -6,7 +6,11 @@ import argparse
 import configparser
 import unittest
 
-from tests._hardware_check_helpers import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hardware_check_helpers import (
     fake_scope_payload,
     parse_move_to,
     restrict_scope_config,

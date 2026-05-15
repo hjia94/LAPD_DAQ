@@ -35,7 +35,10 @@ from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.models import PlannedPosition, ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from tests._hardware_check_helpers import (
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hardware_check_helpers import (
     ensure_fake_scope_config,
     fake_scope_payload,
     fake_time_array,
