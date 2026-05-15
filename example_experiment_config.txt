@@ -4,17 +4,21 @@
 # The active defaults are intentionally small so the hardware diagnostic checks
 # can be run on the instrument PC without starting a full scan.
 #
-# Recommended first checks:
+# Recommended first checks (edit flags at the top of the test file, then run):
 #
 #   Real scope, no motor movement:
-#   python scripts\hardware_daq_check.py data-run-scope --config experiment_config.txt --scope BdotScope --shots 1 --output data_run_scope_check.hdf5
+#     Set RUN_DATA_RUN_SCOPE_CHECK = True and EXPERIMENT_CONFIG_PATH in
+#     tests/test_hardware_instruments.py, then:
+#     pytest tests/test_hardware_instruments.py::DataRunScopeHardware -v -s
 #
 #   Real motor movement, fake delayed scope data:
-#   python scripts\hardware_daq_check.py data-run-motion --config experiment_config.txt --max-shots 1 --pause 0.5 --allow-motion --output data_run_motion_check.hdf5
+#     Set RUN_DATA_RUN_MOTION_CHECK = True and MOTION_ALLOW_MOVE = True in
+#     tests/test_hardware_instruments.py, then:
+#     pytest tests/test_hardware_instruments.py::DataRunMotionHardware -v -s
 #
-# WARNING: data-run-motion will move the configured motors when --allow-motion
-# is present. Verify that the active [position] target below is safe for the
-# installed probe and current LAPD configuration before running it.
+# WARNING: the motion check WILL move the configured motors when
+# MOTION_ALLOW_MOVE is True. Verify that the active [position] target below
+# is safe for the installed probe and current LAPD configuration first.
 
 [nshots]
 # Keep diagnostics to one shot by default. Increase for a real acquisition.

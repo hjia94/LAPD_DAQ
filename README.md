@@ -440,136 +440,45 @@ when present and skips itself when the external fixtures are missing.
 
 ## Hardware Diagnostic Checks
 
-Use `scripts/hardware_daq_check.py` only on the PC connected to the relevant
-instrument. Each command checks one instrument family at a time: `scope`,
-`motion`, or `camera`. The safe default is non-destructive:
+Per-instrument hardware diagnostics live in
+[tests/test_hardware_instruments.py](tests/test_hardware_instruments.py). Run
+them only on the PC connected to the relevant instrument. Every check is
+skipped by default — opt in by editing the flags at the top of the file:
 
-- `scope` initializes the selected scope; add `--acquire` to write one shot.
-- `motion` reads the current probe position; add `--move-to x,y[,z]` to move.
-- `camera` configures the Phantom camera; add `--record` to wait for a trigger
-  and save one `.cine`.
+- `RUN_SCOPE_CHECK` connects to one LeCroy scope and reads its time array.
+  Set `SCOPE_ALLOW_ACQUIRE = True` to arm and write one shot.
+- `RUN_MOTION_CHECK` connects to the motion controller and reads the current
+  probe position. Set `MOTION_TARGET = (x, y[, z])` **and**
+  `MOTION_ALLOW_MOVE = True` to command one move.
+- `RUN_CAMERA_CHECK` configures the Phantom camera. Set
+  `CAMERA_ALLOW_RECORD = True` to wait for a trigger and save one `.cine`.
+- `RUN_DATA_RUN_SCOPE_CHECK` runs the transitional `Data_Run.py` scope path
+  end-to-end against real scopes; ignores `[position]` and never initializes
+  motors.
+- `RUN_DATA_RUN_MOTION_CHECK` runs the transitional `Data_Run.py` motion path
+  end-to-end with real motors and fake delayed scope data. Requires
+  `MOTION_ALLOW_MOVE = True` so motors cannot move accidentally.
 
-Scope initialize-only check:
+All checks read connection info from the same `[scope_ips]` / `[motor_ips]`
+sections used by `Data_Run.py`. Point `EXPERIMENT_CONFIG_PATH` at the
+hardware PC's `experiment_config.txt`.
 
-Command Prompt:
+Run a single check:
 
-```cmd
-python scripts\hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope
+```terminal
+pytest tests/test_hardware_instruments.py::ScopeHardwareCheck -v -s
 ```
 
-PowerShell:
+Run all enabled hardware checks:
 
-```powershell
-python scripts/hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope
+```terminal
+pytest tests/test_hardware_instruments.py -v -s
 ```
 
-Scope one-shot acquisition through the DAQ HDF5 writer:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope --acquire --output scope_check.hdf5
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py scope --config experiment_config.txt --scope BdotScope --acquire --output scope_check.hdf5
-```
-
-Motion read-only check:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py motion --config experiment_config.txt --dimension xy
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py motion --config experiment_config.txt --dimension xy
-```
-
-Motion single move:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py motion --config experiment_config.txt --dimension xy --move-to 0,0 --output motion_check.hdf5
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py motion --config experiment_config.txt --dimension xy --move-to 0,0 --output motion_check.hdf5
-```
-
-Camera configure-only check:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py camera --config experiment_config.txt --output camera_check.hdf5
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py camera --config experiment_config.txt --output camera_check.hdf5
-```
-
-Camera one-shot recording:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py camera --config experiment_config.txt --record --experiment-name camera_check --output camera_check.hdf5
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py camera --config experiment_config.txt --record --experiment-name camera_check --output camera_check.hdf5
-```
-
-Data_Run-style real-scope check with no motor movement:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py data-run-scope --config experiment_config.txt --scope BdotScope --shots 1 --output data_run_scope_check.hdf5
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py data-run-scope --config experiment_config.txt --scope BdotScope --shots 1 --output data_run_scope_check.hdf5
-```
-
-This follows the transitional `Data_Run.py` scope path: initialize HDF5,
-initialize the real scope, arm/acquire one or more shots, and write the standard
-root-level scope datasets. It ignores `[position]` and never initializes motors.
-
-Data_Run-style real-motion check with fake delayed scope data:
-
-Command Prompt:
-
-```cmd
-python scripts\hardware_daq_check.py data-run-motion --config experiment_config.txt --max-shots 1 --pause 0.5 --allow-motion --output data_run_motion_check.hdf5
-```
-
-PowerShell:
-
-```powershell
-python scripts/hardware_daq_check.py data-run-motion --config experiment_config.txt --max-shots 1 --pause 0.5 --allow-motion --output data_run_motion_check.hdf5
-```
-
-This follows the transitional `Data_Run.py` motion path: load positions from
-`[position]`, initialize the real motor controller, move through up to
-`--max-shots` positions, pause instead of acquiring scope data, and write a fake
-small scope waveform so the HDF5 file still has the normal shot structure. The
-`--allow-motion` flag is required so this cannot move hardware accidentally.
+For an end-to-end fake-device acquisition + HDF5 structure verification, use
+[tests/test_daq_framework_combined.py](tests/test_daq_framework_combined.py).
+Its top-of-file `*_MODE` flags also support `"real"` to run the full pipeline
+against real hardware.
 
 ## EPICS Migration Path
 

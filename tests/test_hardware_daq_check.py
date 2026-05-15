@@ -1,29 +1,37 @@
+"""Unit tests for the pure helpers used by hardware diagnostic tests."""
+
+from __future__ import annotations
+
 import argparse
 import configparser
 import unittest
 
-from scripts import hardware_daq_check
+from tests._hardware_check_helpers import (
+    fake_scope_payload,
+    parse_move_to,
+    restrict_scope_config,
+    target_coordinates,
+)
 
 
-class HardwareDaqCheckTests(unittest.TestCase):
+class HardwareCheckHelperTests(unittest.TestCase):
     def test_parse_move_to_accepts_xy_and_xyz(self):
-        self.assertEqual(hardware_daq_check._parse_move_to("1, 2"), (1.0, 2.0))
-        self.assertEqual(hardware_daq_check._parse_move_to("1,2,3"), (1.0, 2.0, 3.0))
+        self.assertEqual(parse_move_to("1, 2"), (1.0, 2.0))
+        self.assertEqual(parse_move_to("1,2,3"), (1.0, 2.0, 3.0))
 
     def test_parse_move_to_rejects_wrong_dimension(self):
         with self.assertRaises(argparse.ArgumentTypeError):
-            hardware_daq_check._parse_move_to("1")
+            parse_move_to("1")
 
     def test_target_coordinates(self):
-        self.assertEqual(hardware_daq_check._target_coordinates((1.0, 2.0)), {"x": 1.0, "y": 2.0})
+        self.assertEqual(target_coordinates((1.0, 2.0)), {"x": 1.0, "y": 2.0})
         self.assertEqual(
-            hardware_daq_check._target_coordinates((1.0, 2.0, 3.0)),
+            target_coordinates((1.0, 2.0, 3.0)),
             {"x": 1.0, "y": 2.0, "z": 3.0},
         )
 
     def test_fake_scope_payload_shape(self):
-        payload = hardware_daq_check._fake_scope_payload("PauseScope", "C2", 4, 3)
-
+        payload = fake_scope_payload("PauseScope", "C2", 4, 3)
         traces, data, headers = payload["PauseScope"]
         self.assertEqual(traces, ["C2"])
         self.assertEqual(data["C2"].tolist(), [3, 4, 5, 6])
@@ -35,7 +43,7 @@ class HardwareDaqCheckTests(unittest.TestCase):
         config.set("scope_ips", "scope_a", "1.1.1.1")
         config.set("scope_ips", "scope_b", "2.2.2.2")
 
-        hardware_daq_check._restrict_scope_config(config, "scope_b")
+        restrict_scope_config(config, "scope_b")
 
         self.assertEqual(dict(config.items("scope_ips")), {"scope_b": "2.2.2.2"})
 
