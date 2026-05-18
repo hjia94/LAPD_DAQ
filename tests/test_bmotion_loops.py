@@ -33,6 +33,7 @@ from _bmotion_stubs import (
     StubRunManager,
     bmotion_module,
     install_stubs,
+    make_grid_motion_list,
     make_temp_hdf5_with_scopes,
     make_toml_file,
     restore_modules,
@@ -60,9 +61,10 @@ class BmotionLoopTests(unittest.TestCase):
         self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
         self._stdout_ctx.__enter__()
 
-        # Two motion groups: A has 3 positions, B has 5.
-        ml_a = np.arange(3 * 2, dtype=float).reshape(3, 2)
-        ml_b = np.arange(5 * 2, dtype=float).reshape(5, 2)
+        # Two motion groups: A has a 3x1 grid (3 points), B has a 5x1 grid (5 points).
+        # Real rectangular grids are required by the writer's validation.
+        ml_a = make_grid_motion_list(nx=3, ny=1)
+        ml_b = make_grid_motion_list(nx=5, ny=1)
         self.mg_a = StubMotionGroup("A", ml_a)
         self.mg_b = StubMotionGroup("B", ml_b)
         self.rm = StubRunManager({"a": self.mg_a, "b": self.mg_b})
@@ -91,8 +93,21 @@ class BmotionLoopTests(unittest.TestCase):
             self.assertEqual(blob["direction"], {"a": "forward", "b": "backward"})
 
             for name, ml_size in (("A", 3), ("B", 5)):
-                self.assertIn(f"Control/Positions/{name}/motion_list", f)
+                self.assertIn(f"Control/Positions/{name}/positions_setup_array", f)
                 self.assertIn(f"Control/Positions/{name}/positions_array", f)
+                # Raw motion_list dataset is gone now (single source of truth).
+                self.assertNotIn(f"Control/Positions/{name}/motion_list", f)
+
+                setup = f[f"Control/Positions/{name}/positions_setup_array"]
+                self.assertEqual(setup.shape, (ml_size,))
+                self.assertEqual(setup.dtype.names, ("shot_num", "x", "y"))
+                self.assertEqual(list(setup["shot_num"]), list(range(1, ml_size + 1)))
+                self.assertIn("xpos", setup.attrs)
+                self.assertIn("ypos", setup.attrs)
+                # Grids built by make_grid_motion_list are nx*1, so ypos has one unique value.
+                self.assertEqual(len(setup.attrs["xpos"]), ml_size)
+                self.assertEqual(len(setup.attrs["ypos"]), 1)
+
                 ds = f[f"Control/Positions/{name}/positions_array"]
                 self.assertEqual(ds.shape, (total_shots,))
                 self.assertEqual(ds.dtype.names, ("shot_num", "x", "y"))
@@ -322,6 +337,45 @@ class BmotionLoopTests(unittest.TestCase):
             arr_a = f["Control/Positions/A/positions_array"][:]
             self.assertEqual(int(arr_a["shot_num"][0]), 1)
             self.assertEqual(int(arr_a["shot_num"][1]), 2)
+
+    # ----- _build_setup_array validation --------------------------------- #
+    def test_configure_hdf5_rejects_non_grid_motion_list(self):
+        # Points (0,0),(1,2),(3,4): 3 unique x * 3 unique y = 9 != 3 points.
+        non_grid = np.array([[0.0, 0.0], [1.0, 2.0], [3.0, 4.0]])
+        mg = StubMotionGroup("NG", non_grid)
+        rm = StubRunManager({"ng": mg})
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
+        toml_path = make_toml_file()
+        with self.assertRaisesRegex(RuntimeError, "rectangular grid"):
+            bmotion_module.configure_bmotion_hdf5_group(
+                hdf5_path, 3, 1, toml_path, rm, ["ng"],
+                ml_order={"ng": "forward"}, execution_order="interleaved",
+            )
+
+    def test_configure_hdf5_rejects_3d_motion_list(self):
+        # 2x1x1 grid in 3D = 2 rows of (x,y,z): valid 3D but not supported yet.
+        ml_3d = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        mg = StubMotionGroup("M3", ml_3d, space_labels=("x", "y", "z"))
+        rm = StubRunManager({"m3": mg})
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
+        toml_path = make_toml_file()
+        with self.assertRaisesRegex(RuntimeError, "2D motion only"):
+            bmotion_module.configure_bmotion_hdf5_group(
+                hdf5_path, 2, 1, toml_path, rm, ["m3"],
+                ml_order={"m3": "forward"}, execution_order="interleaved",
+            )
+
+    def test_configure_hdf5_rejects_unexpected_axis_labels(self):
+        ml = make_grid_motion_list(nx=2, ny=2)
+        mg = StubMotionGroup("RT", ml, space_labels=("r", "theta"))
+        rm = StubRunManager({"rt": mg})
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
+        toml_path = make_toml_file()
+        with self.assertRaisesRegex(RuntimeError, r"axis labels"):
+            bmotion_module.configure_bmotion_hdf5_group(
+                hdf5_path, 4, 1, toml_path, rm, ["rt"],
+                ml_order={"rt": "forward"}, execution_order="interleaved",
+            )
 
 
 if __name__ == "__main__":

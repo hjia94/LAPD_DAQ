@@ -146,10 +146,17 @@ install_stubs()
 # --------------------------------------------------------------------------- #
 # Test doubles
 # --------------------------------------------------------------------------- #
+class _StubCoord:
+    """Mimics the `.values` accessor on an xarray coordinate."""
+    def __init__(self, values):
+        self.values = np.asarray(values)
+
+
 class StubMotionList(sys.modules["xarray"].DataArray):
     """Quacks like xr.DataArray for the parts of bmotion.py that touch it."""
-    def __init__(self, values):
+    def __init__(self, values, space_labels=("x", "y")):
         self._values = np.asarray(values, dtype=float)
+        self._coords = {"space": _StubCoord(list(space_labels))}
 
     @property
     def shape(self):
@@ -162,6 +169,10 @@ class StubMotionList(sys.modules["xarray"].DataArray):
     @property
     def values(self):
         return self._values
+
+    @property
+    def coords(self):
+        return self._coords
 
 
 class StubMotionBuilder:
@@ -180,9 +191,9 @@ class StubPosition:
 
 
 class StubMotionGroup:
-    def __init__(self, name, ml_values, x=0.0, y=0.0):
+    def __init__(self, name, ml_values, x=0.0, y=0.0, space_labels=("x", "y")):
         self.config = {"name": name}
-        self.mb = StubMotionBuilder(StubMotionList(ml_values))
+        self.mb = StubMotionBuilder(StubMotionList(ml_values, space_labels=space_labels))
         self.position = StubPosition(x, y)
         self.move_ml_calls = []
 
@@ -221,6 +232,18 @@ def make_temp_hdf5_with_scopes(scope_ips):
         for scope_name in scope_ips:
             f.create_group(scope_name)
     return tmp.name
+
+
+def make_grid_motion_list(nx, ny, x0=0.0, y0=0.0, dx=1.0, dy=1.0):
+    """Build an `(nx*ny, 2)` array of points on a rectangular grid.
+
+    Stubs that feed `StubMotionGroup` need true grids now that the writer
+    validates `len(unique_x) * len(unique_y) == N`.
+    """
+    xs = x0 + dx * np.arange(nx)
+    ys = y0 + dy * np.arange(ny)
+    xx, yy = np.meshgrid(xs, ys, indexing="xy")
+    return np.stack([xx.ravel(), yy.ravel()], axis=1)
 
 
 def make_toml_file(text="# stub bmotion toml\n"):

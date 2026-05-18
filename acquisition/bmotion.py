@@ -14,6 +14,48 @@ from .config import load_experiment_config
 from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
 
 
+_POSITION_DTYPE = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
+
+
+def _build_setup_array(mg):
+    """Validate `mg`'s motion list and return (setup_array, xpos, ypos).
+
+    Mirrors the planned-positions layout from PositionManager's XY path:
+    structured array of (shot_num,x,y) with `xpos`/`ypos` axis vectors.
+    Rejects motion groups bmotion can't honestly represent in that layout
+    (non-2D, non-(x,y) axes, non-rectangular grids).
+    """
+    name = mg.config['name']
+    ml = mg.mb.motion_list
+    arr = np.asarray(ml.values, dtype=np.float64)
+    if arr.ndim != 2:
+        raise RuntimeError(
+            f"bmotion motion group '{name}' has motion_list of ndim={arr.ndim}; expected 2."
+        )
+    N, M = arr.shape
+    if M != 2:
+        raise RuntimeError(
+            f"bmotion currently supports 2D motion only; motion group '{name}' has M={M}"
+        )
+    axis_labels = tuple(str(s).lower() for s in ml.coords['space'].values)
+    if axis_labels != ('x', 'y'):
+        raise RuntimeError(
+            f"bmotion expects axis labels ('x','y'); motion group '{name}' has {axis_labels}"
+        )
+    xpos = np.unique(arr[:, 0])
+    ypos = np.unique(arr[:, 1])
+    if len(xpos) * len(ypos) != N:
+        raise RuntimeError(
+            f"bmotion requires a rectangular grid; motion group '{name}' "
+            f"has N={N} but len(xpos)*len(ypos)={len(xpos) * len(ypos)}"
+        )
+    setup = np.zeros(N, dtype=_POSITION_DTYPE)
+    setup['shot_num'] = np.arange(1, N + 1)
+    setup['x'] = arr[:, 0]
+    setup['y'] = arr[:, 1]
+    return setup, xpos, ypos
+
+
 def configure_bmotion_hdf5_group(
     hdf5_path: str,
     total_shots: int,
@@ -24,6 +66,14 @@ def configure_bmotion_hdf5_group(
     ml_order: Dict = None,
     execution_order: str = "interleaved",
 ):
+    # Validate every selected motion group up front so we abort before
+    # creating any HDF5 datasets if one of them is unsupported.
+    prepared = []
+    for mg_key in selected_mg_keys:
+        mg = run_manager.mgs[mg_key]
+        setup, xpos, ypos = _build_setup_array(mg)
+        prepared.append((mg_key, mg.config['name'], setup, xpos, ypos))
+
     with h5py.File(hdf5_path, 'a') as f:
         ctl_grp = f.require_group('Control')
         pos_grp = ctl_grp.require_group('Positions')
@@ -41,26 +91,21 @@ def configure_bmotion_hdf5_group(
             "execution_order": execution_order,
         })
         config_grp.create_dataset('bmotion_selection', data=np.bytes_(selection_blob))
-        
-        # Save motion_list from each selected motion group directly under Control/Positions
-        for mg_key in selected_mg_keys:
-            mg = run_manager.mgs[mg_key]
-            mg_name = mg.config['name']
-            motion_list = mg.mb.motion_list
-            
-            # Create group for this motion group using the name as key directly under Positions
+
+        for mg_key, mg_name, setup, xpos, ypos in prepared:
             mg_group = pos_grp.create_group(mg_name)
             mg_group.attrs['name'] = mg_name
             mg_group.attrs['key'] = str(mg_key)
-            
-            # Store motion list values
-            ds = mg_group.create_dataset('motion_list', data=motion_list.values)
-            
-            # Create structured array to save actual achieved positions (like reference implementation)
-            dtype = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
-            mg_group.create_dataset('positions_array', shape=(total_shots,), dtype=dtype)
 
-        # No longer need the combined positions_array since each motion group has its own
+            setup_ds = mg_group.create_dataset(
+                'positions_setup_array', data=setup, dtype=_POSITION_DTYPE,
+            )
+            setup_ds.attrs['xpos'] = xpos
+            setup_ds.attrs['ypos'] = ypos
+
+            mg_group.create_dataset(
+                'positions_array', shape=(total_shots,), dtype=_POSITION_DTYPE,
+            )
 
 
 def get_motion_list_size(rm: bmotion.actors.RunManager, mg_key) -> int:
