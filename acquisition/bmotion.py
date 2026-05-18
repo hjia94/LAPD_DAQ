@@ -1,5 +1,6 @@
 import bapsf_motion as bmotion
 import h5py
+import json
 import numpy as np
 import time
 import traceback
@@ -8,6 +9,7 @@ import xarray as xr
 
 from typing import Dict
 
+from .bmotion_config import resolve_bmotion_selection
 from .config import load_experiment_config
 from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
 
@@ -19,16 +21,24 @@ def configure_bmotion_hdf5_group(
     toml_path: str,
     run_manager: bmotion.actors.RunManager,
     selected_mg_keys,
+    ml_order: Dict = None,
 ):
     with h5py.File(hdf5_path, 'a') as f:
         ctl_grp = f.require_group('Control')
         pos_grp = ctl_grp.require_group('Positions')
-        
+
         # Store TOML configuration file
         config_grp = f.require_group('Configuration')
         with open(toml_path, 'r') as toml_file:
             bmotion_config_text = toml_file.read()
             config_grp.create_dataset('bmotion_config', data=np.bytes_(bmotion_config_text))
+
+        # Record exactly which subset/direction was used for this run.
+        selection_blob = json.dumps({
+            "mg_keys": [str(k) for k in selected_mg_keys],
+            "direction": {str(k): v for k, v in (ml_order or {}).items()},
+        })
+        config_grp.create_dataset('bmotion_selection', data=np.bytes_(selection_blob))
         
         # Save motion_list from each selected motion group directly under Control/Positions
         for mg_key in selected_mg_keys:
@@ -49,109 +59,6 @@ def configure_bmotion_hdf5_group(
             mg_group.create_dataset('positions_array', shape=(total_shots,), dtype=dtype)
 
         # No longer need the combined positions_array since each motion group has its own
-
-
-def select_motion_groups(rm: bmotion.actors.RunManager):
-    # Print and select from all available motion lists
-    if not rm.mgs:
-        raise RuntimeError("No motion groups found in TOML configuration")
-
-    print(f"\nAvailable motion groups ({len(rm.mgs)}):")
-    print(f"  Key : {'Name':<25} -- {'Size':<16}")
-    for mg_key, mg in rm.mgs.items():
-        motion_list_size = 0 if mg.mb.motion_list is None else mg.mb.motion_list.shape[0]
-        print(
-            f"{mg_key:>5} : {mg.config['name']:.25} -- {motion_list_size:6d} positions"
-        )
-
-    # Prompt user to select a motion list
-    while True:
-        selection = input(
-            f"Select motion group(s) [^Key Column]:\n"
-            f"  A - for all\n"
-            f"  Space Separated Keys for each motion group (e.g. '1 3 5'): "
-        )
-
-        if selection.startswith("'") or selection.startswith('"'):
-            selection = selection[1:]
-
-        if selection.endswith("'") or selection.endswith('"'):
-            selection = selection[:-1]
-
-        if selection == "A":
-            selection = list(rm.mgs.keys())
-            break
-
-        selection_items = selection.split()
-        initial_selection = selection_items
-        validated_selection = []
-        
-        for item in selection_items:
-            if item == "":
-                continue
-
-            # First try the item as-is (string key)
-            if item in rm.mgs:
-                validated_selection.append(item)
-                continue
-
-            # Then try converting to integer
-            try:
-                item_int = int(item)
-                if item_int in rm.mgs:
-                    validated_selection.append(item_int)
-                    continue
-                else:
-                    print(f"Motion Group key '{item}' not found in available groups.")
-                    validated_selection = None
-                    break
-            except ValueError:
-                print(f"Invalid motion group key '{item}'. Must be a valid key from the list above.")
-                validated_selection = None
-                break
-
-        if validated_selection is None or len(validated_selection) == 0:
-            print(f"Motion Group selection was invalid. Please SELECT AGAIN.\n")
-            continue
-        
-        selection = validated_selection
-        break
-
-    # Ensure selection is always a list, even for single selections
-    if not isinstance(selection, list):
-        selection = [selection]
-        
-    return selection
-
-
-def select_motion_list_order(rm: bmotion.actors.RunManager, order: Dict):
-    for mg_key in list(order.keys()):  # Convert keys to list to avoid changing dict during iteration
-        mg = rm.mgs[mg_key]
-
-        while True:
-            direction = input(
-                f"Motion list direction is forward for '{mg.config['name']}'.\n"
-                f"Press Enter to continue, or R + Enter to reverse: "
-            ).strip().upper()
-
-            if direction == "":
-                # Forward direction (default)
-                order[mg_key] = "forward"
-                print("Motion list direction is forward.\n")
-                break
-            elif direction == "R":
-                # Reverse direction
-                order[mg_key] = "backward"
-                print("Motion list direction is reversed.\n")
-                break
-            else:
-                print(
-                    f"Motion list direction selection was invalid '{direction}'.  "
-                    f"Please press Enter for forward or 'R' + Enter for reverse. TRY AGAIN...\n"
-                )
-                continue
-
-    return order
 
 
 def get_max_motion_list_size(rm: bmotion.actors.RunManager, mg_keys) -> int:
@@ -239,14 +146,14 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
     print("✓")
 
     try:
-        selection = select_motion_groups(run_manager)
-
-        ml_order = dict(zip(selection, ["forward"] * len(selection)))
-        ml_order = select_motion_list_order(run_manager, ml_order)
-    except KeyboardInterrupt as err:
-        print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+        sel = resolve_bmotion_selection(config, run_manager)
+    except (ValueError, RuntimeError):
         run_manager.terminate()
-        raise KeyboardInterrupt from err
+        raise
+    selection = sel.mg_keys
+    ml_order = sel.direction
+    print(f"Selected motion groups: {selection}")
+    print(f"Directions: {ml_order}")
 
     max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
 
@@ -271,7 +178,8 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
 
             # create position group in hdf5
             configure_bmotion_hdf5_group(
-                hdf5_path, total_shots, len(ml_order), toml_path, run_manager, list(ml_order.keys())
+                hdf5_path, total_shots, len(ml_order), toml_path, run_manager,
+                list(ml_order.keys()), ml_order=ml_order,
             )
 
             # Main acquisition loop

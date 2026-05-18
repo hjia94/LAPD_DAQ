@@ -111,3 +111,19 @@ pi_port = 54321
 # Data_Run_bmotion.py uses a separate TOML file for motion groups, drives,
 # transforms, motion builders, and exclusion zones. Motor IPs for bmotion are
 # defined in that TOML file, not in [motor_ips].
+
+[bmotion]
+# Consumed only by Data_Run_bmotion.py. Selects which motion groups from
+# bmotion_config.toml to run and the traversal direction per group.
+# If this section is omitted entirely: all motion groups run forward.
+#
+# motion_groups accepts:
+#   - "all"                       -> every group in the TOML
+#   - comma- or space-separated keys, e.g. "0, 2, 5"  or  "P22 P29"
+motion_groups = all
+#
+# direction accepts:
+#   - bare word "forward" / "backward" applied to ALL selected groups
+#   - per-key mapping: "0=forward, 2=backward, 5=forward"
+#   - keys not listed default to "forward"
+direction = forward
