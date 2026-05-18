@@ -38,6 +38,24 @@ class BmotionConfigTests(unittest.TestCase):
         self.assertIsInstance(sel, BmotionSelection)
         self.assertEqual(sel.mg_keys, [0, 1, 2])
         self.assertEqual(sel.direction, {0: "forward", 1: "forward", 2: "forward"})
+        self.assertEqual(sel.execution_order, "interleaved")
+
+    def test_execution_order_defaults_to_interleaved(self):
+        rm = _StubRunManager([0, 1])
+        cfg = _make_config("[bmotion]\nmotion_groups = all\n")
+        self.assertEqual(resolve_bmotion_selection(cfg, rm).execution_order, "interleaved")
+
+    def test_execution_order_sequential(self):
+        rm = _StubRunManager([0, 1])
+        cfg = _make_config("[bmotion]\nmotion_groups = all\nexecution_order = sequential\n")
+        self.assertEqual(resolve_bmotion_selection(cfg, rm).execution_order, "sequential")
+
+    def test_execution_order_invalid_raises(self):
+        rm = _StubRunManager([0, 1])
+        cfg = _make_config("[bmotion]\nmotion_groups = all\nexecution_order = parallel\n")
+        with self.assertRaises(ValueError) as ctx:
+            resolve_bmotion_selection(cfg, rm)
+        self.assertIn("parallel", str(ctx.exception))
 
     def test_motion_groups_all_keyword(self):
         rm = _StubRunManager([0, 1, 2])

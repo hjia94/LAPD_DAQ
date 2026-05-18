@@ -12,12 +12,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 _VALID_DIRECTIONS = ("forward", "backward")
+_VALID_EXECUTION_ORDERS = ("interleaved", "sequential")
 
 
 @dataclass(frozen=True)
 class BmotionSelection:
     mg_keys: List[Any]
     direction: Dict[Any, str]
+    execution_order: str = "interleaved"
 
 
 def _resolve_key(token: str, available: Dict[Any, Any]):
@@ -103,13 +105,25 @@ def _parse_direction(raw: str, selected: List[Any], available: Dict[Any, Any]) -
     return mapping
 
 
+def _parse_execution_order(raw: str) -> str:
+    raw = (raw or "").strip().lower()
+    if raw == "":
+        return "interleaved"
+    if raw not in _VALID_EXECUTION_ORDERS:
+        raise ValueError(
+            f"execution_order: '{raw}' is not valid. "
+            f"Expected one of {_VALID_EXECUTION_ORDERS}."
+        )
+    return raw
+
+
 def resolve_bmotion_selection(
     config: configparser.ConfigParser,
     run_manager,
 ) -> BmotionSelection:
     """Parse [bmotion] from the experiment config.
 
-    [bmotion] absent or empty -> all motion groups, all forward.
+    [bmotion] absent or empty -> all motion groups, all forward, interleaved.
     Raises ValueError with an actionable message on any invalid entry.
     """
     available = dict(run_manager.mgs)
@@ -119,10 +133,17 @@ def resolve_bmotion_selection(
     if config.has_section("bmotion"):
         mg_raw = config.get("bmotion", "motion_groups", fallback="all")
         dir_raw = config.get("bmotion", "direction", fallback="forward")
+        order_raw = config.get("bmotion", "execution_order", fallback="interleaved")
     else:
         mg_raw = "all"
         dir_raw = "forward"
+        order_raw = "interleaved"
 
     selected = _parse_motion_groups(mg_raw, available)
     direction = _parse_direction(dir_raw, selected, available)
-    return BmotionSelection(mg_keys=selected, direction=direction)
+    execution_order = _parse_execution_order(order_raw)
+    return BmotionSelection(
+        mg_keys=selected,
+        direction=direction,
+        execution_order=execution_order,
+    )
