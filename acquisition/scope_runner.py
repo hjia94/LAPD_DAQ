@@ -151,14 +151,10 @@ class MultiScopeAcquisition:
         self.config = config
         self.raw_config_text = raw_config_text
 
-        if 'scope_ips' not in config:
-            raise RuntimeError("No [scope_ips] section found in config. Please check experiment_config.txt")
-        self.scope_ips = dict(config.items('scope_ips'))
-        if not self.scope_ips:
-            raise RuntimeError(
-                "No scope IPs found in [scope_ips] section. "
-                "Please uncomment and configure scope IP addresses in experiment_config.txt"
-            )
+        if 'scope_ips' in config:
+            self.scope_ips = dict(config.items('scope_ips'))
+        else:
+            self.scope_ips = {}
 
     def cleanup(self):
         """Close every open scope handle."""

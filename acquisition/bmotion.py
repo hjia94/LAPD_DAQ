@@ -354,7 +354,7 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
 
             print("\nStarting initial acquisition...")
             active_scopes = msa.initialize_scopes()
-            if not active_scopes:
+            if msa.scope_ips and not active_scopes:
                 raise RuntimeError(
                     "No valid data found from any scope. Aborting acquisition."
                 )
