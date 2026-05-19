@@ -218,12 +218,13 @@ class BmotionSequentialHardwareCheck(_BmotionHardwareBase):
         for i, name_i in enumerate(mg_names):
             for name_j in mg_names[i + 1:]:
                 overlap = per_mg_active[name_i] & per_mg_active[name_j]
-                self.assertFalse(
-                    overlap.any(),
-                    f"MGs {name_i} and {name_j} both wrote to shot index "
-                    f"{int(np.where(overlap)[0][0])} — sequential mode "
-                    f"should record only the active group",
-                )
+                if overlap.any():
+                    first_overlap = int(np.where(overlap)[0][0])
+                    self.fail(
+                        f"MGs {name_i} and {name_j} both wrote to shot index "
+                        f"{first_overlap} — sequential mode should record "
+                        f"only the active group"
+                    )
 
         # Combined coverage should equal total_shots (i.e. every shot has
         # exactly one active MG).
