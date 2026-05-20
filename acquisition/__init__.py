@@ -5,6 +5,7 @@ from the top-level `multi_scope_acquisition` and `acquisition_bmotion` modules,
 so callers only need to know about the `acquisition` package.
 """
 
+from .bmotion_config import BmotionSelection, resolve_bmotion_selection
 from .config import load_experiment_config
 from .scope_runner import (
     MultiScopeAcquisition,
@@ -20,10 +21,12 @@ def run_acquisition_bmotion(*args, **kwargs):
     return _run_acquisition_bmotion(*args, **kwargs)
 
 __all__ = [
+    "BmotionSelection",
     "MultiScopeAcquisition",
     "load_experiment_config",
+    "resolve_bmotion_selection",
     "run_acquisition",
+    "run_acquisition_bmotion",
     "single_shot_acquisition",
     "single_shot_acquisition_45",
-    "run_acquisition_bmotion",
 ]

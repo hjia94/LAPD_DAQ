@@ -95,8 +95,8 @@ def load_run_config(config_path: str | Path, mode: str = "stationary",
     )
 
     trigger = TriggerConfig(
-        enabled=mode == "dropper" or parser.has_section("trigger"),
-        parameters=_coerce_section(_items(parser, "trigger")),
+        enabled=mode == "dropper" or parser.has_section("raspberry_pi"),
+        parameters=_coerce_section(_items(parser, "raspberry_pi")),
         pv_prefix=parser.get("epics", "trigger_pv_prefix", fallback=None),
     )
 

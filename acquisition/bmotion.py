@@ -1,5 +1,6 @@
 import bapsf_motion as bmotion
 import h5py
+import json
 import numpy as np
 import time
 import traceback
@@ -8,8 +9,51 @@ import xarray as xr
 
 from typing import Dict
 
+from .bmotion_config import resolve_bmotion_selection
 from .config import load_experiment_config
 from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
+
+
+_POSITION_DTYPE = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
+
+
+def _build_setup_array(mg):
+    """Validate `mg`'s motion list and return (setup_array, xpos, ypos).
+
+    Mirrors the planned-positions layout from PositionManager's XY path:
+    structured array of (shot_num,x,y) with `xpos`/`ypos` axis vectors.
+    Rejects motion groups bmotion can't honestly represent in that layout
+    (non-2D, non-(x,y) axes, non-rectangular grids).
+    """
+    name = mg.config['name']
+    ml = mg.mb.motion_list
+    arr = np.asarray(ml.values, dtype=np.float64)
+    if arr.ndim != 2:
+        raise RuntimeError(
+            f"bmotion motion group '{name}' has motion_list of ndim={arr.ndim}; expected 2."
+        )
+    N, M = arr.shape
+    if M != 2:
+        raise RuntimeError(
+            f"bmotion currently supports 2D motion only; motion group '{name}' has M={M}"
+        )
+    axis_labels = tuple(str(s).lower() for s in ml.coords['space'].values)
+    if axis_labels != ('x', 'y'):
+        raise RuntimeError(
+            f"bmotion expects axis labels ('x','y'); motion group '{name}' has {axis_labels}"
+        )
+    xpos = np.unique(arr[:, 0])
+    ypos = np.unique(arr[:, 1])
+    if len(xpos) * len(ypos) != N:
+        raise RuntimeError(
+            f"bmotion requires a rectangular grid; motion group '{name}' "
+            f"has N={N} but len(xpos)*len(ypos)={len(xpos) * len(ypos)}"
+        )
+    setup = np.zeros(N, dtype=_POSITION_DTYPE)
+    setup['shot_num'] = np.arange(1, N + 1)
+    setup['x'] = arr[:, 0]
+    setup['y'] = arr[:, 1]
+    return setup, xpos, ypos
 
 
 def configure_bmotion_hdf5_group(
@@ -19,139 +63,62 @@ def configure_bmotion_hdf5_group(
     toml_path: str,
     run_manager: bmotion.actors.RunManager,
     selected_mg_keys,
+    ml_order: Dict = None,
+    execution_order: str = "interleaved",
 ):
+    # Validate every selected motion group up front so we abort before
+    # creating any HDF5 datasets if one of them is unsupported.
+    prepared = []
+    for mg_key in selected_mg_keys:
+        mg = run_manager.mgs[mg_key]
+        setup, xpos, ypos = _build_setup_array(mg)
+        prepared.append((mg_key, mg.config['name'], setup, xpos, ypos))
+
     with h5py.File(hdf5_path, 'a') as f:
         ctl_grp = f.require_group('Control')
         pos_grp = ctl_grp.require_group('Positions')
-        
+
         # Store TOML configuration file
         config_grp = f.require_group('Configuration')
         with open(toml_path, 'r') as toml_file:
             bmotion_config_text = toml_file.read()
             config_grp.create_dataset('bmotion_config', data=np.bytes_(bmotion_config_text))
-        
-        # Save motion_list from each selected motion group directly under Control/Positions
-        for mg_key in selected_mg_keys:
-            mg = run_manager.mgs[mg_key]
-            mg_name = mg.config['name']
-            motion_list = mg.mb.motion_list
-            
-            # Create group for this motion group using the name as key directly under Positions
+
+        # Record exactly which subset/direction was used for this run.
+        selection_blob = json.dumps({
+            "mg_keys": [str(k) for k in selected_mg_keys],
+            "direction": {str(k): v for k, v in (ml_order or {}).items()},
+            "execution_order": execution_order,
+        })
+        config_grp.create_dataset('bmotion_selection', data=np.bytes_(selection_blob))
+
+        for mg_key, mg_name, setup, xpos, ypos in prepared:
             mg_group = pos_grp.create_group(mg_name)
             mg_group.attrs['name'] = mg_name
             mg_group.attrs['key'] = str(mg_key)
-            
-            # Store motion list values
-            ds = mg_group.create_dataset('motion_list', data=motion_list.values)
-            
-            # Create structured array to save actual achieved positions (like reference implementation)
-            dtype = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
-            mg_group.create_dataset('positions_array', shape=(total_shots,), dtype=dtype)
 
-        # No longer need the combined positions_array since each motion group has its own
+            setup_ds = mg_group.create_dataset(
+                'positions_setup_array', data=setup, dtype=_POSITION_DTYPE,
+            )
+            setup_ds.attrs['xpos'] = xpos
+            setup_ds.attrs['ypos'] = ypos
+
+            mg_group.create_dataset(
+                'positions_array', shape=(total_shots,), dtype=_POSITION_DTYPE,
+            )
 
 
-def select_motion_groups(rm: bmotion.actors.RunManager):
-    # Print and select from all available motion lists
-    if not rm.mgs:
-        raise RuntimeError("No motion groups found in TOML configuration")
-
-    print(f"\nAvailable motion groups ({len(rm.mgs)}):")
-    print(f"  Key : {'Name':<25} -- {'Size':<16}")
-    for mg_key, mg in rm.mgs.items():
-        motion_list_size = 0 if mg.mb.motion_list is None else mg.mb.motion_list.shape[0]
-        print(
-            f"{mg_key:>5} : {mg.config['name']:.25} -- {motion_list_size:6d} positions"
+def get_motion_list_size(rm: bmotion.actors.RunManager, mg_key) -> int:
+    mg = rm.mgs[mg_key]
+    if not isinstance(mg.mb.motion_list, xr.DataArray):
+        raise RuntimeError(
+            f"Selected motion group '{mg.config['name']}' motion list is invalid."
         )
-
-    # Prompt user to select a motion list
-    while True:
-        selection = input(
-            f"Select motion group(s) [^Key Column]:\n"
-            f"  A - for all\n"
-            f"  Space Separated Keys for each motion group (e.g. '1 3 5'): "
+    if mg.mb.motion_list.size == 0:
+        raise RuntimeError(
+            f"Selected motion group '{mg.config['name']}' has an empty motion list"
         )
-
-        if selection.startswith("'") or selection.startswith('"'):
-            selection = selection[1:]
-
-        if selection.endswith("'") or selection.endswith('"'):
-            selection = selection[:-1]
-
-        if selection == "A":
-            selection = list(rm.mgs.keys())
-            break
-
-        selection_items = selection.split()
-        initial_selection = selection_items
-        validated_selection = []
-        
-        for item in selection_items:
-            if item == "":
-                continue
-
-            # First try the item as-is (string key)
-            if item in rm.mgs:
-                validated_selection.append(item)
-                continue
-
-            # Then try converting to integer
-            try:
-                item_int = int(item)
-                if item_int in rm.mgs:
-                    validated_selection.append(item_int)
-                    continue
-                else:
-                    print(f"Motion Group key '{item}' not found in available groups.")
-                    validated_selection = None
-                    break
-            except ValueError:
-                print(f"Invalid motion group key '{item}'. Must be a valid key from the list above.")
-                validated_selection = None
-                break
-
-        if validated_selection is None or len(validated_selection) == 0:
-            print(f"Motion Group selection was invalid. Please SELECT AGAIN.\n")
-            continue
-        
-        selection = validated_selection
-        break
-
-    # Ensure selection is always a list, even for single selections
-    if not isinstance(selection, list):
-        selection = [selection]
-        
-    return selection
-
-
-def select_motion_list_order(rm: bmotion.actors.RunManager, order: Dict):
-    for mg_key in list(order.keys()):  # Convert keys to list to avoid changing dict during iteration
-        mg = rm.mgs[mg_key]
-
-        while True:
-            direction = input(
-                f"Motion list direction is forward for '{mg.config['name']}'.\n"
-                f"Press Enter to continue, or R + Enter to reverse: "
-            ).strip().upper()
-
-            if direction == "":
-                # Forward direction (default)
-                order[mg_key] = "forward"
-                print("Motion list direction is forward.\n")
-                break
-            elif direction == "R":
-                # Reverse direction
-                order[mg_key] = "backward"
-                print("Motion list direction is reversed.\n")
-                break
-            else:
-                print(
-                    f"Motion list direction selection was invalid '{direction}'.  "
-                    f"Please press Enter for forward or 'R' + Enter for reverse. TRY AGAIN...\n"
-                )
-                continue
-
-    return order
+    return int(mg.mb.motion_list.shape[0])
 
 
 def get_max_motion_list_size(rm: bmotion.actors.RunManager, mg_keys) -> int:
@@ -228,6 +195,121 @@ def record_bmotion_positions(
             dataset[shotnum - 1] = (shotnum, positions[0], positions[1])
 
 
+def _take_shots_at_position(
+    msa,
+    active_scopes,
+    hdf5_path: str,
+    run_manager: bmotion.actors.RunManager,
+    record_keys,
+    shot_num: int,
+    nshots: int,
+):
+    """Acquire nshots at the current position, recording positions only for
+    the motion groups in record_keys. Returns the next shot_num and the
+    timestamp of the most recent shot loop start (for ETA display)."""
+    acquisition_loop_start_time = time.time()
+    for n in range(nshots):
+        acquisition_loop_start_time = time.time()
+        print(f"{n}.", end=' ')
+        try:
+            single_shot_acquisition(msa, active_scopes, shot_num)
+            record_bmotion_positions(
+                hdf5_path=hdf5_path,
+                shotnum=shot_num,
+                rm=run_manager,
+                mg_keys=record_keys,
+            )
+        except (ValueError, RuntimeError) as e:
+            print(f'\nSkipping shot {shot_num} - {str(e)}')
+            with h5py.File(hdf5_path, 'a') as f:
+                for scope_name in msa.scope_ips:
+                    scope_group = f[scope_name]
+                    if f'shot_{shot_num}' not in scope_group:
+                        shot_group = scope_group.create_group(f'shot_{shot_num}')
+                        shot_group.attrs['skipped'] = True
+                        shot_group.attrs['skip_reason'] = str(e)
+                        shot_group.attrs['acquisition_time'] = time.ctime()
+                record_bmotion_positions(
+                    hdf5_path=hdf5_path,
+                    shotnum=shot_num,
+                    rm=run_manager,
+                    mg_keys=record_keys,
+                )
+        except Exception as e:
+            print(f'\nMotion failed for shot {shot_num} - {str(e)}')
+            with h5py.File(hdf5_path, 'a') as f:
+                for scope_name in msa.scope_ips:
+                    scope_group = f[scope_name]
+                    if f'shot_{shot_num}' not in scope_group:
+                        shot_group = scope_group.create_group(f'shot_{shot_num}')
+                        shot_group.attrs['skipped'] = True
+                        shot_group.attrs['skip_reason'] = f"Motion failed: {str(e)}"
+                        shot_group.attrs['acquisition_time'] = time.ctime()
+                record_bmotion_positions(
+                    hdf5_path=hdf5_path,
+                    shotnum=shot_num,
+                    rm=run_manager,
+                    mg_keys=record_keys,
+                )
+        finally:
+            shot_num += 1
+    return shot_num, acquisition_loop_start_time
+
+
+def _print_remaining(shot_num, total_shots, loop_start_time):
+    if shot_num > 1:
+        time_per_shot = time.time() - loop_start_time
+        remaining_shots = total_shots - shot_num
+        remaining_time = remaining_shots * time_per_shot
+        print(
+            f' | Remaining: {remaining_time / 3600:.2f}h '
+            f'({remaining_shots} shots)'
+        )
+    else:
+        print()
+
+
+def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
+    max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
+    shot_num = 1
+    record_keys = list(ml_order.keys())
+    for motion_index in range(max_ml_size):
+        print(f"\nMoving to position {motion_index + 1}/{max_ml_size}...")
+        move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
+
+        print("Current positions:")
+        for mg_key in ml_order:
+            mg = run_manager.mgs[mg_key]
+            print(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
+
+        shot_num, loop_start = _take_shots_at_position(
+            msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots,
+        )
+        _print_remaining(shot_num, total_shots, loop_start)
+
+
+def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
+    shot_num = 1
+    for mg_key, direction in ml_order.items():
+        mg = run_manager.mgs[mg_key]
+        ml_size = get_motion_list_size(run_manager, mg_key)
+        print(f"\n=== Starting motion group '{mg.config['name']}' "
+              f"(key={mg_key}, {ml_size} positions, {direction}) ===")
+
+        single_group_order = {mg_key: direction}
+        for motion_index in range(ml_size):
+            print(f"\n[{mg.config['name']}] Moving to position "
+                  f"{motion_index + 1}/{ml_size}...")
+            move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
+
+            print(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
+
+            shot_num, loop_start = _take_shots_at_position(
+                msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots,
+            )
+            _print_remaining(shot_num, total_shots, loop_start)
+
+
 def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
     print('Starting acquisition at', time.ctime())
 
@@ -239,23 +321,31 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
     print("✓")
 
     try:
-        selection = select_motion_groups(run_manager)
-
-        ml_order = dict(zip(selection, ["forward"] * len(selection)))
-        ml_order = select_motion_list_order(run_manager, ml_order)
-    except KeyboardInterrupt as err:
-        print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+        sel = resolve_bmotion_selection(config, run_manager)
+    except (ValueError, RuntimeError):
         run_manager.terminate()
-        raise KeyboardInterrupt from err
+        raise
+    selection = sel.mg_keys
+    ml_order = sel.direction
+    execution_order = sel.execution_order
+    print(f"Selected motion groups: {selection}")
+    print(f"Directions: {ml_order}")
+    print(f"Execution order: {execution_order}")
 
-    max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
+    if execution_order == "sequential":
+        per_group_sizes = [get_motion_list_size(run_manager, k) for k in ml_order]
+        total_positions = sum(per_group_sizes)
+        print(f"Per-group motion list sizes: {dict(zip(list(ml_order), per_group_sizes))}")
+        print(f"Total positions across all groups: {total_positions}")
+    else:
+        max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
+        total_positions = max_ml_size
+        print(f"Maximum motion list size is {max_ml_size}")
 
-    print(f"Maximum motion list size is {max_ml_size}")
     print(f"Number of shots per position: {nshots}")
-    total_shots = max_ml_size * nshots
+    total_shots = total_positions * nshots
     print(f"Total shots: {total_shots}")
 
-    # Start acquisition loop
     with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
         try:
             print("Initializing HDF5 file...", end='')
@@ -264,107 +354,23 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
 
             print("\nStarting initial acquisition...")
             active_scopes = msa.initialize_scopes()
-            if not active_scopes:
+            if msa.scope_ips and not active_scopes:
                 raise RuntimeError(
                     "No valid data found from any scope. Aborting acquisition."
                 )
 
-            # create position group in hdf5
             configure_bmotion_hdf5_group(
-                hdf5_path, total_shots, len(ml_order), toml_path, run_manager, list(ml_order.keys())
+                hdf5_path, total_shots, len(ml_order), toml_path, run_manager,
+                list(ml_order.keys()), ml_order=ml_order,
+                execution_order=execution_order,
             )
 
-            # Main acquisition loop
-            shot_num = 1  # 1-based shot numbering
-            for motion_index in range(max_ml_size):
-                print(
-                    f"\nMoving to position {motion_index + 1}/{max_ml_size}..."
-                )
-
-                move_to_index(
-                    index=motion_index,
-                    rm=run_manager,
-                    ml_order_dict=ml_order,
-                )
-
-                # print motion group positions
-                print("Current positions:")
-                for mg_key in ml_order:
-                    mg = run_manager.mgs[mg_key]
-                    print(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
-
-                # Record data and positions
-                for n in range(nshots):
-                    acquisition_loop_start_time = time.time()
-                    print(f"{n}.", end=' ')
-                    try:
-                        single_shot_acquisition(msa, active_scopes, shot_num)
-
-                        # Update positions_array with actual achieved position
-                        record_bmotion_positions(
-                            hdf5_path=hdf5_path,
-                            shotnum=shot_num,
-                            rm=run_manager,
-                            mg_keys=list(ml_order.keys()),
-                        )
-
-                    except (ValueError, RuntimeError) as e:
-                        print(f'\nSkipping shot {shot_num} - {str(e)}')
-
-                        # Create empty shot group with explanation
-                        with h5py.File(hdf5_path, 'a') as f:
-                            for scope_name in msa.scope_ips:
-                                scope_group = f[scope_name]
-                                # Check if shot group already exists
-                                if f'shot_{shot_num}' not in scope_group:
-                                    shot_group = scope_group.create_group(f'shot_{shot_num}')
-                                    shot_group.attrs['skipped'] = True
-                                    shot_group.attrs['skip_reason'] = str(e)
-                                    shot_group.attrs['acquisition_time'] = time.ctime()
-
-                            # Still update positions_array for skipped shots
-                            record_bmotion_positions(
-                                hdf5_path=hdf5_path,
-                                shotnum=shot_num,
-                                rm=run_manager,
-                                mg_keys=list(ml_order.keys()),
-                            )
-
-                    except Exception as e:
-                        print(f'\nMotion failed for shot {shot_num} - {str(e)}')
-
-                        # Create empty shot group with explanation
-                        with h5py.File(hdf5_path, 'a') as f:
-                            for scope_name in msa.scope_ips:
-                                scope_group = f[scope_name]
-                                # Check if shot group already exists
-                                if f'shot_{shot_num}' not in scope_group:
-                                    shot_group = scope_group.create_group(f'shot_{shot_num}')
-                                    shot_group.attrs['skipped'] = True
-                                    shot_group.attrs['skip_reason'] = f"Motion failed: {str(e)}"
-                                    shot_group.attrs['acquisition_time'] = time.ctime()
-
-                            # Still update positions_array for failed shots
-                            record_bmotion_positions(
-                                hdf5_path=hdf5_path,
-                                shotnum=shot_num,
-                                rm=run_manager,
-                                mg_keys=list(ml_order.keys()),
-                            )
-                    finally:
-                        shot_num += 1  # Always increment shot number
-
-                # Calculate and display remaining time
-                if shot_num > 1:
-                    time_per_shot = (time.time() - acquisition_loop_start_time)
-                    remaining_shots = total_shots - shot_num
-                    remaining_time = remaining_shots * time_per_shot
-                    print(
-                        f' | Remaining: {remaining_time / 3600:.2f}h '
-                        f'({remaining_shots} shots)'
-                    )
-                else:
-                    print()
+            if execution_order == "sequential":
+                _run_sequential(msa, active_scopes, hdf5_path, run_manager,
+                                ml_order, nshots, total_shots)
+            else:
+                _run_interleaved(msa, active_scopes, hdf5_path, run_manager,
+                                 ml_order, nshots, total_shots)
 
         except KeyboardInterrupt as err:
             print('\n______Halted due to Ctrl-C______', '  at', time.ctime())

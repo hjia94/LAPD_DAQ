@@ -31,7 +31,8 @@ LAPD_DAQ/
   pi_gpio/                   Raspberry Pi trigger/dropper client package
   legacy/                    Superseded scripts kept for reference
   notebooks/                 Scratch notebooks for scope and motor testing
-  tests/                     Mock-only automated tests
+  tests/                     Automated tests (mock by default, gated hardware checks) — see docs/tests.md
+  docs/                      Long-form documentation pages
   Data_Run.py                Transitional legacy-style standard acquisition script
   Data_Run_MultiScope_Camera.py
   Data_Run_bmotion.py
@@ -127,19 +128,9 @@ touching hardware.
    lapd-daq run --config experiment_config.txt --mode stationary --dry-run --output mock_stationary.hdf5
    ```
 
-4. Confirm the output:
-
-   Command Prompt:
-
-   ```cmd
-   python -m pytest tests/test_lapd_daq_framework.py
-   ```
-
-   PowerShell:
-
-   ```powershell
-   python -m pytest tests/test_lapd_daq_framework.py
-   ```
+4. Confirm the output by running the lapd_daq unit tests. See
+   [docs/tests.md](docs/tests.md#on-a-development-machine-no-hardware-connected)
+   for the full sequence.
 
 Expected HDF5 structure includes a root scope group such as `bdotscope`, a
 `time_array`, `shot_N/C1_data`, `shot_N/C1_header`, and run metadata under
@@ -283,7 +274,7 @@ having `[camera_config]` in the config does not affect stationary or grid runs.
 4. For dropper mode, add trigger settings:
 
    ```ini
-   [trigger]
+   [raspberry_pi]
    pi_host = 192.168.7.38
    pi_port = 54321
    ```
@@ -370,7 +361,7 @@ Important sections:
 - `[position]`: XY/XYZ grid parameters for `--mode grid`
 - `[motor_ips]`: motor controller IPs for direct grid motion
 - `[camera_config]`: Phantom camera settings, used only in camera/dropper modes
-- `[trigger]`: Raspberry Pi trigger settings for dropper mode
+- `[raspberry_pi]`: Raspberry Pi trigger settings for dropper mode
 
 Future EPICS-related PV fields may be added to the INI config during migration,
 but EPICS-native `.db`, `.dbd`, `.template`, `.substitutions`, and `st.cmd`
@@ -419,66 +410,10 @@ Use the existing `data-analysis/read/read_scope_data.py` helpers or
 
 ## Tests
 
-Automated tests use only fake/mock devices:
-
-Command Prompt:
-
-```cmd
-set PYTHONPATH=C:\Users\hjia9\Documents\GitHub\LAPD_DAQ\.venv\Lib\site-packages;%PYTHONPATH%
-python -m pytest tests/test_lapd_daq_framework.py
-```
-
-PowerShell:
-
-```powershell
-$env:PYTHONPATH = "C:\Users\hjia9\Documents\GitHub\LAPD_DAQ\.venv\Lib\site-packages;$env:PYTHONPATH"
-python -m pytest tests/test_lapd_daq_framework.py
-```
-
-The TRC replay compatibility test uses fixed files under `D:\data\raw data`
-when present and skips itself when the external fixtures are missing.
-
-## Hardware Diagnostic Checks
-
-Per-instrument hardware diagnostics live in
-[tests/test_hardware_instruments.py](tests/test_hardware_instruments.py). Run
-them only on the PC connected to the relevant instrument. Every check is
-skipped by default — opt in by editing the flags at the top of the file:
-
-- `RUN_SCOPE_CHECK` connects to one LeCroy scope and reads its time array.
-  Set `SCOPE_ALLOW_ACQUIRE = True` to arm and write one shot.
-- `RUN_MOTION_CHECK` connects to the motion controller and reads the current
-  probe position. Set `MOTION_TARGET = (x, y[, z])` **and**
-  `MOTION_ALLOW_MOVE = True` to command one move.
-- `RUN_CAMERA_CHECK` configures the Phantom camera. Set
-  `CAMERA_ALLOW_RECORD = True` to wait for a trigger and save one `.cine`.
-- `RUN_DATA_RUN_SCOPE_CHECK` runs the transitional `Data_Run.py` scope path
-  end-to-end against real scopes; ignores `[position]` and never initializes
-  motors.
-- `RUN_DATA_RUN_MOTION_CHECK` runs the transitional `Data_Run.py` motion path
-  end-to-end with real motors and fake delayed scope data. Requires
-  `MOTION_ALLOW_MOVE = True` so motors cannot move accidentally.
-
-All checks read connection info from the same `[scope_ips]` / `[motor_ips]`
-sections used by `Data_Run.py`. Point `EXPERIMENT_CONFIG_PATH` at the
-hardware PC's `experiment_config.txt`.
-
-Run a single check:
-
-```terminal
-pytest tests/test_hardware_instruments.py::ScopeHardwareCheck -v -s
-```
-
-Run all enabled hardware checks:
-
-```terminal
-pytest tests/test_hardware_instruments.py -v -s
-```
-
-For an end-to-end fake-device acquisition + HDF5 structure verification, use
-[tests/test_daq_framework_combined.py](tests/test_daq_framework_combined.py).
-Its top-of-file `*_MODE` flags also support `"real"` to run the full pipeline
-against real hardware.
+See [docs/tests.md](docs/tests.md) for the full test suite documentation:
+what each module covers, the recommended run sequence on a development
+machine vs. the hardware PC, and the gating flags for hardware-touching
+tests.
 
 ## EPICS Migration Path
 

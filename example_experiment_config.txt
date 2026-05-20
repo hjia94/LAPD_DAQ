@@ -1,62 +1,39 @@
 # Example experiment_config.txt for LAPD_DAQ
 #
-# Copy this file to experiment_config.txt and edit IP addresses before running.
-# The active defaults are intentionally small so the hardware diagnostic checks
-# can be run on the instrument PC without starting a full scan.
-#
-# Recommended first checks (edit flags at the top of the test file, then run):
-#
-#   Real scope, no motor movement:
-#     Set RUN_DATA_RUN_SCOPE_CHECK = True and EXPERIMENT_CONFIG_PATH in
-#     tests/test_hardware_instruments.py, then:
-#     pytest tests/test_hardware_instruments.py::DataRunScopeHardware -v -s
-#
-#   Real motor movement, fake delayed scope data:
-#     Set RUN_DATA_RUN_MOTION_CHECK = True and MOTION_ALLOW_MOVE = True in
-#     tests/test_hardware_instruments.py, then:
-#     pytest tests/test_hardware_instruments.py::DataRunMotionHardware -v -s
-#
-# WARNING: the motion check WILL move the configured motors when
-# MOTION_ALLOW_MOVE is True. Verify that the active [position] target below
-# is safe for the installed probe and current LAPD configuration first.
+# Copy this file and edit IP addresses for your data run.
+# The active defaults are intentionally small so the hardware diagnostic checks can be run on the instrument PC without starting a full scan.
+
 
 [nshots]
 # Keep diagnostics to one shot by default. Increase for a real acquisition.
 num_duplicate_shots = 1
 num_run_repeats = 1
 
-[position]
-# Safe diagnostic target for data-run-motion. This creates one position:
-# shot_1 at x=0 cm, y=0 cm. Change these values only after confirming the
-# target is safe for the installed probe and motor geometry.
-nx = 1
-ny = 1
-xmin = 0
-xmax = 0
-ymin = 0
-ymax = 0
+[bmotion]
+# Consumed only by Data_Run_bmotion.py;
+# Data_Run_bmotion.py uses a separate TOML file for actual motion plane and movement
+# Selects which motion groups from bmotion_config.toml
+# If this section is omitted entirely: all motion groups run forward.
+#
+# motion_groups accepts:
+#   - "all"                       -> every group in the TOML
+#   - comma- or space-separated keys, e.g. "0, 2, 5"  or  "P22 P29"
+#
+# direction accepts:
+#   - bare word "forward" / "backward" applied to ALL selected groups
+#   - per-key mapping: "0=forward, 2=backward, 5=forward"
+#   - keys not listed default to "forward"
+#
+# execution_order selects how multiple motion groups are run:
+#   - "interleaved" (default): every motion group advances together; at each
+#     motion-list index, every group moves to that index, then nshots are taken.
+#   - "sequential": one motion group runs its full scan to completion before
+#     the next motion group starts. Idle groups are not recorded during another
+#     group's phase.
+motion_groups = all
+direction = forward
+execution_order = interleaved
 
-# Example full XY scan values. Copy these over the diagnostic values above
-# when you are ready to run a real grid scan.
-# nx = 31
-# ny = 41
-# xmin = -15
-# xmax = 15
-# ymin = -20
-# ymax = 20
-
-# Example 3D extension.
-# nz = 11
-# zmin = -5
-# zmax = 5
-
-[motor_ips]
-# Direct motor-controller IPs used by --mode grid and data-run-motion.
-# Keep comments on separate lines; the transitional Data_Run parser does not
-# strip inline comments from values.
-x = 192.168.7.101
-y = 192.168.7.102
-# z = 192.168.7.103
 
 [experiment]
 description = LAPD_DAQ hardware diagnostic template
@@ -95,7 +72,7 @@ pre_trigger_frames = -500
 post_trigger_frames = 1000
 resolution = 256,256
 
-[trigger]
+[raspberry_pi]
 # Raspberry Pi trigger settings for dropper mode. Edit before use.
 pi_host = 192.168.7.38
 pi_port = 54321
@@ -107,7 +84,38 @@ pi_port = 54321
 # xstart = {"P16": -38, "P22": -18, "P29": -38, "P34": -38, "P42": -38}
 # xstop = {"P16": -38, "P22": 18, "P29": -38, "P34": -38, "P42": -38}
 
-# --- bmotion notes ---
-# Data_Run_bmotion.py uses a separate TOML file for motion groups, drives,
-# transforms, motion builders, and exclusion zones. Motor IPs for bmotion are
-# defined in that TOML file, not in [motor_ips].
+
+
+[position]
+# Programs the motor without using bmotion
+# Safe diagnostic target for data-run-motion. This creates one position:
+# shot_1 at x=0 cm, y=0 cm. Change these values only after confirming the
+# target is safe for the installed probe and motor geometry.
+nx = 1
+ny = 1
+xmin = 0
+xmax = 0
+ymin = 0
+ymax = 0
+
+# Example full XY scan values. Copy these over the diagnostic values above
+# when you are ready to run a real grid scan.
+# nx = 31
+# ny = 41
+# xmin = -15
+# xmax = 15
+# ymin = -20
+# ymax = 20
+
+# Example 3D extension.
+# nz = 11
+# zmin = -5
+# zmax = 5
+
+[motor_ips]
+# Direct motor-controller IPs used by --mode grid and data-run-motion.
+# Keep comments on separate lines; the transitional Data_Run parser does not
+# strip inline comments from values.
+x = 192.168.7.101
+y = 192.168.7.102
+# z = 192.168.7.103
