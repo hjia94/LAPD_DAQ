@@ -31,7 +31,7 @@ DEFAULT_FILE = r"D:\data\LAPD\00-LP-p21p29p41-Xline-test_2026-05-19.hdf5"
 
 # Plot toggles (independent on/off switches).
 SHOW_PLOT = True   # display figures interactively
-SAVE_PLOT = True   # write PNGs to a "plots/" subdir next to the data file
+SAVE_PLOT = False   # write PNGs to a "plots/" subdir next to the data file
 
 NON_SCOPE_GROUPS = {"Configuration", "Control"}  # root groups that aren't scopes
 WAVEDESC_BYTES = 346                              # LeCroy header size
