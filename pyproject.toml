@@ -15,7 +15,15 @@ dependencies = [
 
 [project.optional-dependencies]
 scope = [
-    "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git",
+    # lab_scopes is developed alongside this repo and shares a single checkout
+    # on the dev machine. Install it editable BEFORE installing this extra:
+    #     pip install -e ../lab_scopes
+    #     pip install -e ".[scope]"
+    # The bare requirement (no git URL) is satisfied by that editable install,
+    # so pip will not fetch a second copy. On a clean machine without the local
+    # source repo, install lab_scopes from git first instead:
+    #     pip install "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git"
+    "lab_scopes>=0.2.0",
     "pyvisa",
 ]
 bmotion = [

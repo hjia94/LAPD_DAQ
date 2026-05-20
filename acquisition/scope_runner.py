@@ -316,7 +316,7 @@ class MultiScopeAcquisition:
 
 
 def _lecroy_scope_class():
-    from drivers.LeCroy_Scope import LeCroy_Scope
+    from lab_scopes.lecroy import LeCroy_Scope
 
     return LeCroy_Scope
 

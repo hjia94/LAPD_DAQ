@@ -29,7 +29,7 @@ TODO: MultiscopeAquisition class getting initial time array needs to be optimize
 '''
 
 import numpy as np
-from drivers.LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE
+from lab_scopes.lecroy import LeCroy_Scope, WAVEDESC_SIZE
 import h5py
 import time
 import os
@@ -245,7 +245,8 @@ class MultiScopeAcquisition:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         
         # List of scripts to include
-        scripts = ['Data_Run.py', 'multi_scope_acquisition.py', 'LeCroy_Scope.py']
+        # LeCroy_Scope now lives in the external lab_scopes package, not this repo.
+        scripts = ['Data_Run.py', 'multi_scope_acquisition.py']
         
         for script in scripts:
             script_path = os.path.join(current_dir, script)
