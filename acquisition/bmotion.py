@@ -9,6 +9,8 @@ import xarray as xr
 
 from typing import Dict
 
+from tqdm import tqdm
+
 from .bmotion_config import resolve_bmotion_selection
 from .config import load_experiment_config
 from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
@@ -203,16 +205,14 @@ def _take_shots_at_position(
     record_keys,
     shot_num: int,
     nshots: int,
+    pbar,
 ):
     """Acquire nshots at the current position, recording positions only for
-    the motion groups in record_keys. Returns the next shot_num and the
-    timestamp of the most recent shot loop start (for ETA display)."""
-    acquisition_loop_start_time = time.time()
+    the motion groups in record_keys. Advances `pbar` once per shot and
+    returns the next shot_num."""
     for n in range(nshots):
-        acquisition_loop_start_time = time.time()
-        print(f"{n}.", end=' ')
         try:
-            single_shot_acquisition(msa, active_scopes, shot_num)
+            single_shot_acquisition(msa, active_scopes, shot_num, verbose=False)
             record_bmotion_positions(
                 hdf5_path=hdf5_path,
                 shotnum=shot_num,
@@ -220,7 +220,7 @@ def _take_shots_at_position(
                 mg_keys=record_keys,
             )
         except (ValueError, RuntimeError) as e:
-            print(f'\nSkipping shot {shot_num} - {str(e)}')
+            tqdm.write(f'Skipping shot {shot_num} - {str(e)}')
             with h5py.File(hdf5_path, 'a') as f:
                 for scope_name in msa.scope_ips:
                     scope_group = f[scope_name]
@@ -236,7 +236,7 @@ def _take_shots_at_position(
                     mg_keys=record_keys,
                 )
         except Exception as e:
-            print(f'\nMotion failed for shot {shot_num} - {str(e)}')
+            tqdm.write(f'Motion failed for shot {shot_num} - {str(e)}')
             with h5py.File(hdf5_path, 'a') as f:
                 for scope_name in msa.scope_ips:
                     scope_group = f[scope_name]
@@ -253,61 +253,49 @@ def _take_shots_at_position(
                 )
         finally:
             shot_num += 1
-    return shot_num, acquisition_loop_start_time
-
-
-def _print_remaining(shot_num, total_shots, loop_start_time):
-    if shot_num > 1:
-        time_per_shot = time.time() - loop_start_time
-        remaining_shots = total_shots - shot_num
-        remaining_time = remaining_shots * time_per_shot
-        print(
-            f' | Remaining: {remaining_time / 3600:.2f}h '
-            f'({remaining_shots} shots)'
-        )
-    else:
-        print()
+            pbar.update(1)
+    return shot_num
 
 
 def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
     max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
     shot_num = 1
     record_keys = list(ml_order.keys())
-    for motion_index in range(max_ml_size):
-        print(f"\nMoving to position {motion_index + 1}/{max_ml_size}...")
-        move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
+    with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
+        for motion_index in range(max_ml_size):
+            tqdm.write(f"\nMoving to position {motion_index + 1}/{max_ml_size}...")
+            move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
 
-        print("Current positions:")
-        for mg_key in ml_order:
-            mg = run_manager.mgs[mg_key]
-            print(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
+            tqdm.write("Current positions:")
+            for mg_key in ml_order:
+                mg = run_manager.mgs[mg_key]
+                tqdm.write(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
 
-        shot_num, loop_start = _take_shots_at_position(
-            msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots,
-        )
-        _print_remaining(shot_num, total_shots, loop_start)
+            shot_num = _take_shots_at_position(
+                msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots, pbar,
+            )
 
 
 def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
     shot_num = 1
-    for mg_key, direction in ml_order.items():
-        mg = run_manager.mgs[mg_key]
-        ml_size = get_motion_list_size(run_manager, mg_key)
-        print(f"\n=== Starting motion group '{mg.config['name']}' "
-              f"(key={mg_key}, {ml_size} positions, {direction}) ===")
+    with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
+        for mg_key, direction in ml_order.items():
+            mg = run_manager.mgs[mg_key]
+            ml_size = get_motion_list_size(run_manager, mg_key)
+            tqdm.write(f"\n=== Starting motion group '{mg.config['name']}' "
+                       f"(key={mg_key}, {ml_size} positions, {direction}) ===")
 
-        single_group_order = {mg_key: direction}
-        for motion_index in range(ml_size):
-            print(f"\n[{mg.config['name']}] Moving to position "
-                  f"{motion_index + 1}/{ml_size}...")
-            move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
+            single_group_order = {mg_key: direction}
+            for motion_index in range(ml_size):
+                tqdm.write(f"\n[{mg.config['name']}] Moving to position "
+                           f"{motion_index + 1}/{ml_size}...")
+                move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
 
-            print(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
+                tqdm.write(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
 
-            shot_num, loop_start = _take_shots_at_position(
-                msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots,
-            )
-            _print_remaining(shot_num, total_shots, loop_start)
+                shot_num = _take_shots_at_position(
+                    msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots, pbar,
+                )
 
 
 def run_acquisition_bmotion(hdf5_path, toml_path, config_path):

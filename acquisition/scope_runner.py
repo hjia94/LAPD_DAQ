@@ -270,14 +270,15 @@ class MultiScopeAcquisition:
                 print(f"Error closing scope {name}: {e}")
 
     # -- per-shot operations -------------------------------------------------
-    def acquire_shot(self, active_scopes, shot_num):
+    def acquire_shot(self, active_scopes, shot_num, verbose=True):
         """Acquire data from all active scopes for one shot."""
         all_data = {}
         failed_scopes = []
 
         for name in active_scopes:
             try:
-                print(f"Acquiring data from {name}...", end='')
+                if verbose:
+                    print(f"Acquiring data from {name}...", end='')
                 scope = self.scopes[name]
 
                 if active_scopes[name] == 0:
@@ -299,16 +300,19 @@ class MultiScopeAcquisition:
             except Exception as e:
                 print(f"Error acquiring from {name}: {e}")
                 failed_scopes.append(name)
-        print("✓")
+        if verbose:
+            print("✓")
         return all_data
 
-    def arm_scopes_for_trigger(self, active_scopes):
+    def arm_scopes_for_trigger(self, active_scopes, verbose=True):
         """Arm all scopes for trigger without waiting for completion (for parallel operation)."""
-        print("Arming scopes for trigger... ", end='')
+        if verbose:
+            print("Arming scopes for trigger... ", end='')
         for name in active_scopes:
             scope = self.scopes[name]
             scope.set_trigger_mode('SINGLE')
-        print("armed")
+        if verbose:
+            print("armed")
 
 
 def _lecroy_scope_class():
@@ -320,12 +324,13 @@ def _lecroy_scope_class():
 # =============================================================================
 # Per-shot orchestration (used by run_acquisition and external callers)
 # =============================================================================
-def single_shot_acquisition(msa, active_scopes, shot_num):
-    msa.arm_scopes_for_trigger(active_scopes)
-    all_data = msa.acquire_shot(active_scopes, shot_num)
+def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True):
+    msa.arm_scopes_for_trigger(active_scopes, verbose=verbose)
+    all_data = msa.acquire_shot(active_scopes, shot_num, verbose=verbose)
 
     if all_data:
-        print('Updating scope data to HDF5...')
+        if verbose:
+            print('Updating scope data to HDF5...')
         msa.update_scope_hdf5(all_data, shot_num)
     else:
         print(f"Warning: No valid data acquired at shot {shot_num}")

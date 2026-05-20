@@ -171,9 +171,9 @@ class BmotionLoopTests(unittest.TestCase):
             move_calls.append((index, dict(ml_order_dict)))
 
         def spy_take(msa, active_scopes, hdf5_path, run_manager,
-                     record_keys, shot_num, nshots_):
+                     record_keys, shot_num, nshots_, pbar):
             shot_calls.append((shot_num, list(record_keys)))
-            return shot_num + nshots_, 0.0
+            return shot_num + nshots_
 
         _orig_move = bmotion_module.move_to_index
         _orig_take = bmotion_module._take_shots_at_position
@@ -212,9 +212,9 @@ class BmotionLoopTests(unittest.TestCase):
             move_calls.append((index, dict(ml_order_dict)))
 
         def spy_take(msa, active_scopes, hdf5_path, run_manager,
-                     record_keys, shot_num, nshots_):
+                     record_keys, shot_num, nshots_, pbar):
             shot_calls.append((shot_num, list(record_keys)))
-            return shot_num + nshots_, 0.0
+            return shot_num + nshots_
 
         _orig_move = bmotion_module.move_to_index
         _orig_take = bmotion_module._take_shots_at_position
@@ -267,7 +267,7 @@ class BmotionLoopTests(unittest.TestCase):
         # Stub single_shot_acquisition (the module-local reference imported
         # at top of bmotion.py) to a no-op so we never touch real scopes.
         _orig_single = bmotion_module.single_shot_acquisition
-        bmotion_module.single_shot_acquisition = lambda msa, scopes, shot_num: None
+        bmotion_module.single_shot_acquisition = lambda msa, scopes, shot_num, verbose=True: None
         try:
             bmotion_module._run_sequential(
                 StubMSA({"FakeScope": "127.0.0.1"}), {}, hdf5_path, self.rm,
@@ -308,7 +308,7 @@ class BmotionLoopTests(unittest.TestCase):
 
         call_count = {"n": 0}
 
-        def flaky_acquire(msa, scopes, shot_num):
+        def flaky_acquire(msa, scopes, shot_num, verbose=True):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise ValueError("simulated scope timeout")
@@ -316,10 +316,11 @@ class BmotionLoopTests(unittest.TestCase):
         _orig_single = bmotion_module.single_shot_acquisition
         bmotion_module.single_shot_acquisition = flaky_acquire
         try:
-            new_shot_num, _ = bmotion_module._take_shots_at_position(
-                StubMSA({"FakeScope": "127.0.0.1"}), {}, hdf5_path,
-                self.rm, ["a"], shot_num=1, nshots=nshots,
-            )
+            with bmotion_module.tqdm(total=nshots) as pbar:
+                new_shot_num = bmotion_module._take_shots_at_position(
+                    StubMSA({"FakeScope": "127.0.0.1"}), {}, hdf5_path,
+                    self.rm, ["a"], shot_num=1, nshots=nshots, pbar=pbar,
+                )
         finally:
             bmotion_module.single_shot_acquisition = _orig_single
 
