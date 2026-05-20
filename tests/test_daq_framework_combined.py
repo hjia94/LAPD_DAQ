@@ -1,25 +1,22 @@
-"""End-to-end DAQ framework acquisition check.
+"""End-to-end DAQ framework acquisition check (fake devices only).
 
-Each instrument can be turned OFF, run with a FAKE device, or run against REAL
-hardware. Configure the MODE constants below and run:
+Drives ``lapd_daq.engine.AcquisitionRun.execute()`` through the full pipeline
+with fake devices and verifies the resulting HDF5 structure. This is the only
+test that exercises the engine's fake grid-mode ``execute()`` and its
+``Control/Positions/positions_array`` write.
+
+Real-hardware coverage lives elsewhere:
+  * real scopes / HDF5 reader compat -> tests/test_lapd_daq_compat.py + lab_scopes
+  * real bmotion runs -> tests/test_bmotion_hardware.py
+  * real instruments -> tests/test_hardware_instruments.py
+
+Run:
 
     pytest tests/test_daq_framework_combined.py -v -s
-
-The fake/off path drives ``lapd_daq.engine.AcquisitionRun.execute()`` through
-the full pipeline. The real-motion path mirrors a production data run: it
-calls ``acquisition.run_acquisition_bmotion`` directly with a bapsf_motion
-TOML config, matching ``tests/test_bmotion_hardware.py``. The two paths share
-HDF5 structural verification.
-
-REAL-motion runs require:
-  * ``BMOTION_TOML_PATH`` to exist on disk
-  * ``bapsf_motion`` and ``xarray`` installed
-  * ``BMOTION_ALLOW_MOVE = True`` (destructive-action gate)
 """
 
 from __future__ import annotations
 
-import configparser
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -38,34 +35,15 @@ from lapd_daq.devices.fakes import (
 from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
 
 # --------------------------------------------------------------------------- #
-# Instrument modes: "off", "fake", or "real".
-# Scope must be "fake" or "real" — the engine requires at least one scope.
-# When MOTION_MODE = "real" the run is routed through the bmotion path
-# (acquisition.run_acquisition_bmotion); scope/camera/raspberry-pi flags only
-# apply on the engine (fake/off motion) path.
+# Instrument modes: "off" or "fake". The scope must be "fake" — the engine
+# requires at least one scope.
 # --------------------------------------------------------------------------- #
 SCOPE_MODE = "fake"
 MOTION_MODE = "fake"
 CAMERA_MODE = "off"
 RASPBERRY_PI_MODE = "fake"
 
-# Real-hardware connection info (used only when the matching MODE is "real").
-REAL_SCOPE_IP = "192.168.1.100"
-REAL_SCOPE_TIMEOUT_S = 30.0
-REAL_PI_HOST = "192.168.7.38"
-REAL_PI_PORT = 54321
-
-# Real-motion (bmotion) configuration. Mirrors tests/test_bmotion_hardware.py.
-BMOTION_TOML_PATH = "bmotion_config.toml"
-BMOTION_NSHOTS = 1
-BMOTION_MOTION_GROUPS = "all"
-BMOTION_DIRECTION = "forward"
-BMOTION_EXECUTION_ORDER = "interleaved"
-# Destructive-action gate: required to be True before the real-motion path
-# will arm motors. Mirrors BMOTION_ALLOW_MOVE in test_bmotion_hardware.py.
-BMOTION_ALLOW_MOVE = False
-
-# Grid / acquisition parameters (used by the fake-motion engine path)
+# Grid / acquisition parameters
 NUM_DUPLICATE_SHOTS = 2
 GRID_NX = 2
 GRID_NY = 2
@@ -74,7 +52,7 @@ SCOPE_CHANNELS = ("C1", "C2")
 SCOPE_POINTS = 12
 
 # --------------------------------------------------------------------------- #
-VALID_MODES = ("off", "fake", "real")
+VALID_MODES = ("off", "fake")
 SCHEMA_VERSION = "0.1"
 
 
@@ -98,13 +76,7 @@ class RunPlan:
                 raise ValueError(f"{label}={value!r} must be one of {VALID_MODES}")
 
     @property
-    def uses_real_bmotion(self) -> bool:
-        return self.motion_mode == "real"
-
-    @property
     def run_mode(self) -> str:
-        if self.uses_real_bmotion:
-            return "bmotion"
         if self.motion_mode != "off":
             return "grid"
         if self.camera_mode != "off":
@@ -116,11 +88,6 @@ class RunPlan:
         if self.run_mode == "grid":
             return GRID_NX * GRID_NY * NUM_DUPLICATE_SHOTS
         return NUM_DUPLICATE_SHOTS
-
-    @property
-    def expected_scope_points(self) -> int | None:
-        """Sample count is only predictable for the fake scope."""
-        return SCOPE_POINTS if self.scope_mode == "fake" else None
 
     def summary(self) -> str:
         return (
@@ -136,20 +103,12 @@ class RunPlan:
 def _build_config_text(plan: RunPlan) -> str:
     sections: list[str] = [
         _ini_section("nshots", {
-            "num_duplicate_shots": str(
-                BMOTION_NSHOTS if plan.uses_real_bmotion else NUM_DUPLICATE_SHOTS
-            ),
+            "num_duplicate_shots": str(NUM_DUPLICATE_SHOTS),
             "num_run_repeats": "1",
         }),
         _ini_section("experiment", {"description": "Combined framework check"}),
     ]
-    if plan.uses_real_bmotion:
-        sections.append(_ini_section("bmotion", {
-            "motion_groups": BMOTION_MOTION_GROUPS,
-            "direction": BMOTION_DIRECTION,
-            "execution_order": BMOTION_EXECUTION_ORDER,
-        }))
-    elif plan.motion_mode == "fake":
+    if plan.motion_mode == "fake":
         sections.append(_ini_section("position", {
             "nx": str(GRID_NX),
             "ny": str(GRID_NY),
@@ -157,21 +116,15 @@ def _build_config_text(plan: RunPlan) -> str:
             "ymin": "-2", "ymax": "2",
         }))
     if plan.scope_mode != "off":
-        scope_ip = REAL_SCOPE_IP if plan.scope_mode == "real" else "127.0.0.1"
         sections.append(_ini_section("scopes", {SCOPE_NAME: "LeCroy scope under test"}))
         sections.append(_ini_section("channels", {
             f"{SCOPE_NAME}_{ch}": f"mock channel {ch}" for ch in SCOPE_CHANNELS
         }))
-        sections.append(_ini_section("scope_ips", {SCOPE_NAME: scope_ip}))
+        sections.append(_ini_section("scope_ips", {SCOPE_NAME: "127.0.0.1"}))
     if plan.camera_mode != "off":
         sections.append(_ini_section("camera_config", {
             "exposure_us": "40",
             "fps": "1000",
-        }))
-    if plan.raspberry_pi_mode == "real":
-        sections.append(_ini_section("raspberry_pi", {
-            "pi_host": REAL_PI_HOST,
-            "pi_port": str(REAL_PI_PORT),
         }))
     return "\n".join(sections) + "\n"
 
@@ -182,21 +135,11 @@ def _ini_section(name: str, items: dict[str, str]) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Device factories (real-hardware imports deferred to keep the file importable
-# on machines without the hardware packages installed).
+# Fake device factories
 # --------------------------------------------------------------------------- #
 def _build_scope(mode: str):
     if mode == "fake":
         return FakeScopeDevice(SCOPE_NAME, channels=SCOPE_CHANNELS, points=SCOPE_POINTS)
-    if mode == "real":
-        from lapd_daq.devices.lab_scopes import LabScopesLeCroyScopeAdapter
-
-        return LabScopesLeCroyScopeAdapter(
-            SCOPE_NAME,
-            REAL_SCOPE_IP,
-            description="LeCroy scope under test",
-            timeout=REAL_SCOPE_TIMEOUT_S,
-        )
     return None
 
 
@@ -209,29 +152,12 @@ def _build_motion(mode: str):
 def _build_camera(mode: str):
     if mode == "fake":
         return FakeCameraDevice()
-    if mode == "real":
-        from drivers.phantom_recorder import PhantomRecorder
-        from lapd_daq.devices.phantom import PhantomCameraAdapter
-
-        recorder = PhantomRecorder({
-            "exposure_us": 30,
-            "fps": 10000,
-            "pre_trigger_frames": -500,
-            "post_trigger_frames": 1000,
-            "resolution": (256, 256),
-        })
-        return PhantomCameraAdapter(recorder, experiment_name="combined_framework_check")
     return None
 
 
 def _build_raspberry_pi(mode: str):
     if mode == "fake":
         return FakeTriggerDevice()
-    if mode == "real":
-        from lapd_daq.devices.pi_gpio import PiGPIOTriggerAdapter
-        from pi_gpio.pi_client import TriggerClient
-
-        return PiGPIOTriggerAdapter(TriggerClient(REAL_PI_HOST, REAL_PI_PORT))
     return None
 
 
@@ -245,18 +171,9 @@ def _build_devices(plan: RunPlan) -> AcquisitionDevices:
     )
 
 
-def _have_bmotion_install() -> bool:
-    try:
-        import bapsf_motion  # noqa: F401
-        import xarray  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
 # --------------------------------------------------------------------------- #
 class CombinedFrameworkAcquisitionTest(unittest.TestCase):
-    """End-to-end acquisition + HDF5 structural verification."""
+    """End-to-end fake acquisition + HDF5 structural verification."""
 
     def setUp(self) -> None:
         self.plan = RunPlan(SCOPE_MODE, MOTION_MODE, CAMERA_MODE, RASPBERRY_PI_MODE)
@@ -274,28 +191,16 @@ class CombinedFrameworkAcquisitionTest(unittest.TestCase):
             pass
 
     def test_acquisition_runs_and_hdf5_structure_is_correct(self) -> None:
-        if self.plan.scope_mode == "off":
-            self.skipTest("Engine requires at least one scope; set SCOPE_MODE to 'fake' or 'real'.")
-
         print(f"\n[combined framework check] {self.plan.summary()}")
+        print(f"[combined framework check] expected shots = {self.plan.expected_shots}")
 
-        if self.plan.uses_real_bmotion:
-            self._maybe_skip_real_bmotion()
-            print(f"[combined framework check] driving bmotion path via "
-                  f"run_acquisition_bmotion({BMOTION_TOML_PATH!r})")
-            self._run_real_bmotion()
-            self.assertTrue(self.output_path.exists(), "HDF5 output file was not created")
-            self._verify_hdf5_bmotion()
-        else:
-            print(f"[combined framework check] expected shots = {self.plan.expected_shots}")
-            results = self._run_engine_acquisition()
-            self.assertEqual(len(results), self.plan.expected_shots)
-            self.assertTrue(self.output_path.exists(), "HDF5 output file was not created")
-            self._verify_hdf5_engine()
+        results = self._run_engine_acquisition()
+        self.assertEqual(len(results), self.plan.expected_shots)
+        self.assertTrue(self.output_path.exists(), "HDF5 output file was not created")
+        self._verify_hdf5_engine()
 
         print(f"[combined framework check] PASS -> {self.output_path}")
 
-    # ----- engine (fake / off motion) path -------------------------------- #
     def _run_engine_acquisition(self):
         config = load_run_config(
             self.config_path, mode=self.plan.run_mode, output_path=self.output_path
@@ -324,21 +229,11 @@ class CombinedFrameworkAcquisitionTest(unittest.TestCase):
         self.assertIn(f"shot_{expected_shots}", scope_group)
 
     def _check_scope_shot_channels(self, shot_group: h5py.Group) -> None:
-        channels = self._channels_to_check(shot_group)
-        expected_points = self.plan.expected_scope_points
-        for channel in channels:
+        for channel in SCOPE_CHANNELS:
             dataset = shot_group.get(f"{channel}_data")
             self.assertIsNotNone(dataset, f"{channel}_data missing in {shot_group.name}")
             self.assertGreater(dataset.shape[-1], 0, f"{channel}_data is empty")
-            if expected_points is not None:
-                self.assertEqual(dataset.shape[-1], expected_points)
-
-    def _channels_to_check(self, shot_group: h5py.Group) -> list[str] | tuple[str, ...]:
-        if self.plan.scope_mode == "fake":
-            return SCOPE_CHANNELS
-        return sorted(
-            name.removesuffix("_data") for name in shot_group.keys() if name.endswith("_data")
-        )
+            self.assertEqual(dataset.shape[-1], SCOPE_POINTS)
 
     def _check_positions(self, h5: h5py.File) -> None:
         positions = h5.get("Control/Positions/positions_array")
@@ -351,81 +246,6 @@ class CombinedFrameworkAcquisitionTest(unittest.TestCase):
         status = h5.get("Control/Run/shot_status")
         self.assertIsNotNone(status, "Control/Run/shot_status missing")
         self.assertEqual(len(status), self.plan.expected_shots)
-
-    # ----- real bmotion path ---------------------------------------------- #
-    def _maybe_skip_real_bmotion(self) -> None:
-        if not BMOTION_ALLOW_MOVE:
-            self.skipTest(
-                "BMOTION_ALLOW_MOVE is False — refusing to command motors "
-                "(set MOTION_MODE != 'real' for fake-motion engine path)"
-            )
-        if not _have_bmotion_install():
-            self.skipTest("bapsf_motion / xarray not installed on this machine")
-        if not Path(BMOTION_TOML_PATH).is_file():
-            self.skipTest(
-                f"Missing {BMOTION_TOML_PATH} in the current working directory"
-            )
-        # Real bmotion runs need real scopes (the legacy MultiScopeAcquisition
-        # path connects directly to scope_ips). Don't pretend a fake scope works.
-        if self.plan.scope_mode != "real":
-            self.skipTest(
-                "MOTION_MODE='real' (bmotion) requires SCOPE_MODE='real' — "
-                "acquisition.run_acquisition_bmotion drives the legacy "
-                "MultiScopeAcquisition which expects real scope IPs"
-            )
-
-    def _run_real_bmotion(self) -> None:
-        # Late import so the skip checks above fire before bapsf_motion is touched.
-        from acquisition import run_acquisition_bmotion
-
-        # Write the experiment_config to the tempdir but rewrite scope_ips from
-        # the on-disk config if the user wants to override. For now, the config
-        # we built has scope_ips populated from REAL_SCOPE_IP.
-        run_acquisition_bmotion(
-            str(self.output_path),
-            BMOTION_TOML_PATH,
-            str(self.config_path),
-        )
-
-    def _verify_hdf5_bmotion(self) -> None:
-        with h5py.File(self.output_path, "r") as h5:
-            self.assertIn(
-                "Configuration/bmotion_selection", h5,
-                "Configuration/bmotion_selection missing — bmotion run did not "
-                "record its selection blob"
-            )
-            self.assertIn(
-                "Control/Positions", h5,
-                "Control/Positions group missing"
-            )
-            mg_names = list(h5["Control/Positions"].keys())
-            self.assertTrue(
-                mg_names, "no Control/Positions/<mg> groups created"
-            )
-            # At least one motion group must have a populated positions_array.
-            any_active = False
-            for name in mg_names:
-                positions = h5.get(f"Control/Positions/{name}/positions_array")
-                if positions is not None and len(positions) > 0:
-                    if np.any(positions["shot_num"] > 0):
-                        any_active = True
-                        break
-            self.assertTrue(
-                any_active,
-                "no motion group recorded any active shots"
-            )
-
-            # Scope group must exist and have at least one shot.
-            self.assertIn(
-                SCOPE_NAME, h5,
-                f"Scope group {SCOPE_NAME!r} missing from bmotion run"
-            )
-            scope_group = h5[SCOPE_NAME]
-            shot_count = scope_group.attrs.get("shot_count", 0)
-            self.assertGreater(
-                int(shot_count), 0,
-                f"Scope group {SCOPE_NAME!r} has shot_count=0"
-            )
 
 
 if __name__ == "__main__":

@@ -19,8 +19,10 @@ project is built on ReadTheDocs.
 | [`test_lapd_daq_config.py`](#test_lapd_daq_configpy) | 2 | any PC | no | `lapd_daq` installed |
 | [`test_lapd_daq_engine.py`](#test_lapd_daq_enginepy) | 3 | any PC | no | `lapd_daq` installed |
 | [`test_lapd_daq_compat.py`](#test_lapd_daq_compatpy) | 4 | any PC* | no | `lab_scopes` for 1 test, TRC fixtures for 1 test |
-| [`test_daq_framework_combined.py`](#test_daq_framework_combinedpy) | 1 | any PC or hardware PC | configurable | `bapsf_motion` + `xarray` when `MOTION_MODE = "real"`; otherwise none |
-| [`test_hardware_instruments.py`](#test_hardware_instrumentspy) | 5 | hardware PC | **yes** (scope / motors / camera) | per-instrument |
+| [`test_daq_framework_combined.py`](#test_daq_framework_combinedpy) | 1 | any PC | no | none (fake devices only) |
+| [`test_hardware_scope.py`](#test_hardware_scopepy) | 2 | hardware PC | **yes** (scope) | per-instrument |
+| [`test_hardware_motion.py`](#test_hardware_motionpy) | 2 | hardware PC | **yes** (motors) | per-instrument |
+| [`test_hardware_camera.py`](#test_hardware_camerapy) | 1 | hardware PC | **yes** (camera) | per-instrument |
 | [`test_hardware_daq_check.py`](#test_hardware_daq_checkpy) | 5 | any PC | no | — |
 
 *`test_lapd_daq_compat.py` self-skips when `lab_scopes` or the TRC
@@ -32,7 +34,8 @@ test files import from them:
 | Helper | Purpose |
 |---|---|
 | [`_bmotion_stubs.py`](../tests/_bmotion_stubs.py) | `sys.modules` stubs for `bapsf_motion`/`xarray`, plus the `StubRunManager` / `StubMotionGroup` / `StubMSA` test doubles and HDF5 temp-file factories used by `test_bmotion_loops.py` |
-| [`_hardware_check_helpers.py`](../tests/_hardware_check_helpers.py) | Fake scope payloads, parsing utilities, and config-restriction helpers used by `test_hardware_instruments.py` |
+| [`_hardware_check_base.py`](../tests/_hardware_check_base.py) | Shared `HardwareCheckBase`: tempdir lifecycle + the run-flag / gate skip mechanism reused by the three `test_hardware_*` files and `test_bmotion_hardware.py` |
+| [`_hardware_check_helpers.py`](../tests/_hardware_check_helpers.py) | Fake scope payloads, parsing utilities, and config-restriction helpers used by `test_hardware_scope.py` / `test_hardware_motion.py` (and unit-tested by `test_hardware_daq_check.py`) |
 | [`_lapd_daq_fixtures.py`](../tests/_lapd_daq_fixtures.py) | Shared `CONFIG_TEXT` / `CAMERA_CONFIG_TEXT` INI strings used by all three `test_lapd_daq_*` files |
 
 ## Recommended run sequence
@@ -48,22 +51,23 @@ steps pass.
    ```
    Expected: **30 passed**.
 
-2. **lapd_daq unit tests** — requires the `lapd_daq` package installed
-   (`pip install -e .`).
+2. **lapd_daq unit tests** — run under the project venv `.venv`
+   (Python 3.11.5), which has `lab_scopes` (the sibling repo cloned at
+   `../lab_scopes`, installed as `lab-scopes`) and `matplotlib`.
    ```cmd
-   python -m unittest tests.test_lapd_daq_config tests.test_lapd_daq_engine tests.test_lapd_daq_compat
+   .venv\Scripts\python.exe -m unittest tests.test_lapd_daq_config tests.test_lapd_daq_engine tests.test_lapd_daq_compat
    ```
-   Expected: **6 passed, 3 may error** if `lab_scopes` /
-   `matplotlib` aren't installed on the dev box. These three errors
-   are environment-only and identical to running the same tests at
-   any prior commit.
+   Expected: **all pass, 0 errors**. (Running with a bare system Python
+   that lacks `lab_scopes` produces spurious errors — that's an
+   interpreter-selection mistake, not a real failure.)
 
 3. **Hardware-gated files (should all skip)** — these confirm the gating
    is wired up. Nothing should actually run.
    ```cmd
-   python -m unittest tests.test_bmotion_hardware
+   python -m unittest tests.test_bmotion_hardware tests.test_hardware_scope tests.test_hardware_motion tests.test_hardware_camera
    ```
-   Expected: **2 skipped** with messages pointing to `RUN_BMOTION_*_CHECK`.
+   Expected: **7 skipped** (2 bmotion + 5 instrument) with messages
+   pointing to their `RUN_*` flags.
 
 4. **End-to-end framework run with fakes** — drives `AcquisitionRun`
    through the full pipeline using only fake devices. Slowest of the
@@ -87,13 +91,10 @@ enabling only the flag you need.
    same machine.
 
 6. **Per-instrument hardware diagnostics** — see
-   [`test_hardware_instruments.py`](#test_hardware_instrumentspy) below.
-   Each subsystem (scope / motion / camera) has its own gate.
-
-7. **Combined framework against real hardware** — flip the mode flags at
-   the top of `test_daq_framework_combined.py` to `"real"` for the
-   instruments you want to exercise. Treat this as a final integration
-   check.
+   [`test_hardware_scope.py`](#test_hardware_scopepy),
+   [`test_hardware_motion.py`](#test_hardware_motionpy), and
+   [`test_hardware_camera.py`](#test_hardware_camerapy) below. Each
+   subsystem has its own run flag and destructive-action gate.
 
 :::{warning}
 Every hardware-gated test has both a `RUN_*_CHECK` flag and an
@@ -114,7 +115,7 @@ python -m pytest tests/ -v -k "not hardware"
 To select a single class or test:
 
 ```cmd
-python -m pytest tests/test_hardware_instruments.py::ScopeHardwareCheck -v -s
+python -m pytest tests/test_hardware_scope.py::ScopeHardwareCheck -v -s
 ```
 
 The `-s` flag is important for hardware tests — they print live status
@@ -318,16 +319,13 @@ python -m unittest tests.test_lapd_daq_compat -v
 
 ### `test_daq_framework_combined.py`
 
-**Subject:** end-to-end acquisition exercising the full pipeline — scope
-→ motion → camera → raspberry-pi trigger → HDF5 writer — with each
-device independently switchable between `"off"`, `"fake"`, and
-`"real"`. The fake/off-motion path drives `AcquisitionRun.execute()`;
-the real-motion path routes through
-[`acquisition.run_acquisition_bmotion`](../acquisition/bmotion.py) to
-match how a production data run actually looks.
+**Subject:** end-to-end acquisition through the engine pipeline with
+**fake devices only**. Drives `AcquisitionRun.execute()` and verifies the
+resulting HDF5 structure. This is the only test that exercises the engine's
+fake grid-mode `execute()` and its `Control/Positions/positions_array` write.
 
 **1 test** (`CombinedFrameworkAcquisitionTest.test_acquisition_runs_and_hdf5_structure_is_correct`)
-parameterised by the module-level mode flags:
+parameterised by the module-level mode flags (valid values: `"off"` / `"fake"`):
 ```python
 SCOPE_MODE        = "fake"
 MOTION_MODE       = "fake"
@@ -336,43 +334,19 @@ RASPBERRY_PI_MODE = "fake"
 ```
 
 The test:
-1. Builds an experiment_config.txt on the fly from the mode flags. When
-   `MOTION_MODE = "real"` it writes a `[bmotion]` section
-   (motion_groups / direction / execution_order) instead of `[position]`.
-2. Engine path (fake/off motion): builds an `AcquisitionDevices` bundle
-   with the chosen fake/real mix and runs `AcquisitionRun.execute()`.
-3. Bmotion path (real motion): calls `run_acquisition_bmotion(hdf5_path,
-   toml_path, config_path)` directly with `BMOTION_TOML_PATH`, exactly
-   like [`test_bmotion_hardware.py`](#test_bmotion_hardwarepy).
-4. Re-opens the HDF5 file and verifies the structure. Engine path:
-   schema version, scope group + `shot_count`, per-shot channel
-   datasets, `Control/Positions/positions_array` shot numbering, and
-   `Control/Run/shot_status` length. Bmotion path:
-   `Configuration/bmotion_selection`, at least one populated
-   `Control/Positions/<mg>/positions_array`, and a non-empty scope
-   group.
+1. Builds an `experiment_config.txt` on the fly from the mode flags
+   (a `[position]` grid section when `MOTION_MODE = "fake"`).
+2. Builds an `AcquisitionDevices` bundle of fake devices and runs
+   `AcquisitionRun.execute()`.
+3. Re-opens the HDF5 file and verifies: schema version, scope group +
+   `shot_count`, per-shot channel datasets, `Control/Positions/positions_array`
+   shot numbering, and `Control/Run/shot_status` length.
 
-**Default behavior:** all-fake — runs on any PC, takes <1 second,
-covers the engine's happy path.
-
-**Real-hardware mode:** flip `SCOPE_MODE` / `CAMERA_MODE` /
-`RASPBERRY_PI_MODE` to `"real"` to exercise individual instruments on
-the engine path. To exercise real motion, set `MOTION_MODE = "real"` —
-this requires a `bmotion_config.toml` at `BMOTION_TOML_PATH`,
-`bapsf_motion` + `xarray` installed, and the destructive-action gate
-`BMOTION_ALLOW_MOVE = True`. Real-motion runs also require
-`SCOPE_MODE = "real"` because `run_acquisition_bmotion` drives the
-legacy `MultiScopeAcquisition` which connects directly to scope IPs.
-Connection info for real devices is hard-coded in `REAL_SCOPE_IP`,
-`REAL_PI_HOST` / `REAL_PI_PORT`, and `BMOTION_TOML_PATH` at the top of
-the file.
-
-:::{warning}
-Setting `BMOTION_ALLOW_MOVE = True` commands real motors. Confirm the
-configured motion list is safe for the installed probe before flipping
-this flag. Same gate semantics as
-[`test_bmotion_hardware.py`](#test_bmotion_hardwarepy).
-:::
+Runs on any PC, takes <1 second. Real-hardware coverage lives elsewhere:
+real scopes / HDF5-reader compat in
+[`test_lapd_daq_compat.py`](#test_lapd_daq_compatpy), real bmotion runs in
+[`test_bmotion_hardware.py`](#test_bmotion_hardwarepy), and per-instrument
+diagnostics in the `test_hardware_*` files.
 
 **Run:**
 ```cmd
@@ -381,40 +355,66 @@ python -m unittest tests.test_daq_framework_combined -v
 
 ---
 
-### `test_hardware_instruments.py`
+### `test_hardware_scope.py`
 
-**Subject:** per-instrument hardware diagnostics for the legacy
-`Data_Run.py` path. Each test connects to **one** real instrument.
+**Subject:** per-instrument hardware diagnostics for the LeCroy scope.
+Each test connects to a real scope. All classes inherit
+[`HardwareCheckBase`](../tests/_hardware_check_base.py).
 
-**5 tests**, each in its own class, all inheriting `_HardwareCheckBase`:
+**2 tests:**
 
 | Class | Run flag | Destructive gate | What it does |
 |---|---|---|---|
 | `ScopeHardwareCheck` | `RUN_SCOPE_CHECK` | `SCOPE_ALLOW_ACQUIRE` | Connect to one LeCroy scope, read time array, optionally arm + write one shot |
-| `MotionHardwareCheck` | `RUN_MOTION_CHECK` | `MOTION_ALLOW_MOVE` (+ `MOTION_TARGET`) | Connect to motion controller, read probe position, optionally move to `MOTION_TARGET` |
-| `CameraHardwareCheck` | `RUN_CAMERA_CHECK` | `CAMERA_ALLOW_RECORD` | Configure Phantom camera, optionally wait for trigger + save `.cine` |
 | `DataRunScopeHardware` | `RUN_DATA_RUN_SCOPE_CHECK` | — | End-to-end `Data_Run.py` scope path (no motion) against real scopes |
-| `DataRunMotionHardware` | `RUN_DATA_RUN_MOTION_CHECK` | `MOTION_ALLOW_MOVE` | End-to-end `Data_Run.py` motion path with real motors + fake delayed scope |
 
-All flags default to `False`. All checks read connection info from the
+All flags default to `False`; connection info comes from
 `experiment_config.txt` at `EXPERIMENT_CONFIG_PATH`.
-
-:::{note}
-This file is the largest in the suite (465 lines, 5 test classes). It
-predates the cleanup that split the bmotion tests by subsystem. A
-future refactor could split it into `test_hardware_scope.py`,
-`test_hardware_motion.py`, `test_hardware_camera.py` and hoist
-`_HardwareCheckBase` into `_hardware_check_helpers.py`.
-:::
 
 **Run one check:**
 ```cmd
-python -m pytest tests/test_hardware_instruments.py::ScopeHardwareCheck -v -s
+python -m pytest tests/test_hardware_scope.py::ScopeHardwareCheck -v -s
 ```
 
-**Run all enabled checks:**
+---
+
+### `test_hardware_motion.py`
+
+**Subject:** per-instrument hardware diagnostics for the motion
+controller. All classes inherit
+[`HardwareCheckBase`](../tests/_hardware_check_base.py).
+
+**2 tests:**
+
+| Class | Run flag | Destructive gate | What it does |
+|---|---|---|---|
+| `MotionHardwareCheck` | `RUN_MOTION_CHECK` | `MOTION_ALLOW_MOVE` (+ `MOTION_TARGET`) | Connect to motion controller, read probe position, optionally move to `MOTION_TARGET` |
+| `DataRunMotionHardware` | `RUN_DATA_RUN_MOTION_CHECK` | `MOTION_ALLOW_MOVE` | End-to-end `Data_Run.py` motion path with real motors + fake delayed scope |
+
+`MOTION_ALLOW_MOVE` lives in this file and gates both classes. All flags
+default to `False`.
+
+**Run one check:**
 ```cmd
-python -m pytest tests/test_hardware_instruments.py -v -s
+python -m pytest tests/test_hardware_motion.py::MotionHardwareCheck -v -s
+```
+
+---
+
+### `test_hardware_camera.py`
+
+**Subject:** per-instrument hardware diagnostic for the Phantom camera.
+Inherits [`HardwareCheckBase`](../tests/_hardware_check_base.py).
+
+**1 test:**
+
+| Class | Run flag | Destructive gate | What it does |
+|---|---|---|---|
+| `CameraHardwareCheck` | `RUN_CAMERA_CHECK` | `CAMERA_ALLOW_RECORD` | Configure Phantom camera, optionally wait for trigger + save `.cine` |
+
+**Run:**
+```cmd
+python -m pytest tests/test_hardware_camera.py -v -s
 ```
 
 ---
@@ -441,10 +441,11 @@ python -m unittest tests.test_hardware_daq_check -v
 
 ## CI / automation notes
 
-The recommended pre-merge command for a dev machine:
+The recommended pre-merge command, run under the project venv `.venv`
+(Python 3.11.5 with `lab_scopes` + `matplotlib` installed):
 
 ```cmd
-python -m unittest ^
+.venv\Scripts\python.exe -m unittest ^
     tests.test_bmotion_config ^
     tests.test_bmotion_loops ^
     tests.test_bmotion_hardware ^
@@ -452,17 +453,23 @@ python -m unittest ^
     tests.test_lapd_daq_config ^
     tests.test_lapd_daq_engine ^
     tests.test_lapd_daq_compat ^
-    tests.test_daq_framework_combined
+    tests.test_daq_framework_combined ^
+    tests.test_hardware_scope ^
+    tests.test_hardware_motion ^
+    tests.test_hardware_camera
 ```
 
-This runs every test that doesn't require real hardware. On a clean
-checkout with the package installed in editable mode, expect:
+This runs the full suite (the hardware-gated files skip themselves).
+Under `.venv`, expect:
 
-- 42 tests run
-- 36 passed
-- 2 skipped (bmotion hardware checks, by design)
-- 3 errors only if `matplotlib` and/or `lab_scopes` aren't installed
-  (environment-only — same errors at every commit)
+- 50 tests run
+- 43 passed
+- 7 skipped (2 bmotion + 5 instrument hardware checks, by design)
+- 0 errors
+
+(Running with a bare system Python that lacks `lab_scopes` produces
+spurious errors in the `test_lapd_daq_*` group — that's an
+interpreter-selection mistake, not a real failure.)
 
 ## ReadTheDocs setup (future)
 

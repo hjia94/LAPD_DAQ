@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import configparser
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import h5py
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hardware_check_base import HardwareCheckBase
 
 
 # --------------------------------------------------------------------------- #
@@ -83,31 +87,31 @@ def _write_config_variant(src_config: Path, dst_config: Path, execution_order: s
         cp.write(f)
 
 
-class _BmotionHardwareBase(unittest.TestCase):
-    """Shared tempdir + flag-gating for bmotion end-to-end tests."""
+class _BmotionHardwareBase(HardwareCheckBase):
+    """Shared flag-gating + tempdir layout for bmotion end-to-end tests."""
 
     run_flag: bool = False
     label: str = "bmotion"
     execution_order: str = "interleaved"
 
-    def setUp(self) -> None:
-        if not self.run_flag:
-            self.skipTest(
-                f"{type(self).__name__} disabled "
-                f"(set its RUN_BMOTION_*_CHECK flag to True)"
-            )
-        if not BMOTION_ALLOW_MOVE:
-            self.skipTest(
-                "BMOTION_ALLOW_MOVE is False — refusing to command motors"
-            )
-        if not _have_bmotion_install():
-            self.skipTest("bapsf_motion / xarray not installed on this machine")
-        if not _have_required_files():
-            self.skipTest(
-                f"Missing {EXPERIMENT_CONFIG_PATH} or {BMOTION_TOML_PATH} "
-                f"in the current working directory"
-            )
+    def _run_flag_skip_message(self) -> str:
+        return (
+            f"{type(self).__name__} disabled "
+            f"(set its RUN_BMOTION_*_CHECK flag to True)"
+        )
 
+    def gate_checks(self) -> list[tuple[bool, str]]:
+        return [
+            (not BMOTION_ALLOW_MOVE,
+             "BMOTION_ALLOW_MOVE is False — refusing to command motors"),
+            (not _have_bmotion_install(),
+             "bapsf_motion / xarray not installed on this machine"),
+            (not _have_required_files(),
+             f"Missing {EXPERIMENT_CONFIG_PATH} or {BMOTION_TOML_PATH} "
+             f"in the current working directory"),
+        ]
+
+    def _allocate_tempdir(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp_dir = Path(self._tmp.name)
         self.output_path = self.tmp_dir / f"{self.label}_{self.execution_order}.hdf5"
@@ -116,13 +120,6 @@ class _BmotionHardwareBase(unittest.TestCase):
             Path(EXPERIMENT_CONFIG_PATH), self.config_path,
             execution_order=self.execution_order, nshots=BMOTION_NSHOTS,
         )
-
-    def tearDown(self) -> None:
-        try:
-            self._tmp.cleanup()
-        except (PermissionError, OSError):
-            # HDF5 file on Windows may still be locked briefly; non-fatal.
-            pass
 
     def _run(self) -> None:
         # Late import so the module-level skip messages above fire before

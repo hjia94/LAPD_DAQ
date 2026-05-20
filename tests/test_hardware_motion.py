@@ -1,65 +1,43 @@
-"""Hardware diagnostic tests for individual instruments.
+"""Hardware diagnostic tests for the motion controller.
 
-These tests connect to one real instrument at a time (LeCroy scope, motion
-controller, Phantom camera) through the lapd_daq adapter code. They are
-skipped by default so a normal `pytest` run on a developer machine stays
-green; opt in by editing the flags at the top of this file.
+Connects to the real motion controller through the lapd_daq adapter (and, for
+the Data_Run-style check, through the legacy acquisition path with fake scope
+data). Skipped by default so a normal run on a developer machine stays green;
+opt in by editing the flags at the top of this file.
 
-Two flag groups gate destructive actions:
-
-  - SCOPE_ALLOW_ACQUIRE    — required before scope arms and writes a shot.
-  - MOTION_ALLOW_MOVE      — required before any motor move is commanded.
-  - CAMERA_ALLOW_RECORD    — required before the camera waits for trigger.
-
-Run with:
-
-    pytest tests/test_hardware_instruments.py -v -s
-
-There are also `Data_Run`-style end-to-end tests (`DataRunScopeHardware`,
-`DataRunMotionHardware`) that exercise the legacy acquisition path with a
-real instrument and a fake counterpart.
+    pytest tests/test_hardware_motion.py -v -s
 """
 
 from __future__ import annotations
 
-import tempfile
+import sys
 import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 from lapd_daq.config import load_run_config
-from lapd_daq.devices.lab_scopes import LabScopesLeCroyScopeAdapter
 from lapd_daq.devices.legacy_motion import LegacyMotorAdapter
-from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.models import PlannedPosition, ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-import sys
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hardware_check_base import HardwareCheckBase
 from _hardware_check_helpers import (
     ensure_fake_scope_config,
     fake_scope_payload,
     fake_time_array,
-    restrict_scope_config,
     target_coordinates,
 )
 
 # --------------------------------------------------------------------------- #
-# Enable individual hardware checks here. Each is skipped unless True.
+# Enable individual checks here. Each is skipped unless True.
 # --------------------------------------------------------------------------- #
-RUN_SCOPE_CHECK = False
 RUN_MOTION_CHECK = False
-RUN_CAMERA_CHECK = False
-RUN_DATA_RUN_SCOPE_CHECK = False
 RUN_DATA_RUN_MOTION_CHECK = False
 
-# Safety gates — destructive actions are off by default even when the check
-# above is enabled. Flip explicitly to acquire / move / record.
-SCOPE_ALLOW_ACQUIRE = False
+# Safety gate — no motor move is commanded unless this is True.
 MOTION_ALLOW_MOVE = False
-CAMERA_ALLOW_RECORD = False
 
 # --------------------------------------------------------------------------- #
 # Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
@@ -67,23 +45,10 @@ CAMERA_ALLOW_RECORD = False
 # --------------------------------------------------------------------------- #
 EXPERIMENT_CONFIG_PATH = "experiment_config.txt"
 
-# Scope check
-SCOPE_NAME = None                # None = first scope in [scope_ips]
-SCOPE_CONNECT_TIMEOUT_S = 30.0
-SCOPE_SHOT_NUM = 1
-
 # Motion check
 MOTION_DIMENSION = "auto"        # "auto" | "xy" | "xyz"
 MOTION_TARGET = None             # e.g. (0.0, 0.0) or (0.0, 0.0, 0.0); None = read-only
 MOTION_SHOT_NUM = 1
-
-# Camera check
-CAMERA_EXPERIMENT_NAME = "hardware_camera_check"
-CAMERA_SHOT_NUM = 1
-
-# Data_Run-style scope check
-DATA_RUN_SCOPE_NAME = None       # None = use all scopes from [scope_ips]
-DATA_RUN_SCOPE_SHOTS = 1
 
 # Data_Run-style motion check (real motors, fake delayed scope)
 DATA_RUN_MOTION_MAX_SHOTS = 1
@@ -94,77 +59,7 @@ DATA_RUN_FAKE_POINTS = 16
 # --------------------------------------------------------------------------- #
 
 
-class _HardwareCheckBase(unittest.TestCase):
-    """Shared tempdir lifecycle and run-flag gating for hardware tests.
-
-    Subclasses set `run_flag` to the boolean controlling whether the test
-    runs. setUp skips before allocating resources.
-    """
-
-    run_flag: bool = False
-    label: str = "check"
-
-    def setUp(self) -> None:
-        if not self.run_flag:
-            self.skipTest(f"{type(self).__name__} disabled (set its run flag to True)")
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_dir = Path(self._tmp.name)
-        self.output_path = self.tmp_dir / f"{self.label}_check.hdf5"
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-
-# --------------------------------------------------------------------------- #
-class ScopeHardwareCheck(_HardwareCheckBase):
-    """Connect to one real LeCroy scope; optionally acquire one shot."""
-
-    run_flag = RUN_SCOPE_CHECK
-    label = "scope"
-
-    def test_scope_connects_and_optionally_acquires(self) -> None:
-        config = load_run_config(EXPERIMENT_CONFIG_PATH, mode="stationary", output_path=self.output_path)
-        scope_config = _select_scope(config, SCOPE_NAME)
-        config = replace(config, scopes=[scope_config])
-
-        scope = LabScopesLeCroyScopeAdapter(
-            scope_config.name,
-            scope_config.ip_address,
-            description=scope_config.description,
-            timeout=SCOPE_CONNECT_TIMEOUT_S,
-        )
-        print(f"\n[scope check] connecting to {scope_config.name} at {scope_config.ip_address}")
-        try:
-            scope.connect()
-            scope.initialize()
-            time_points = len(scope.time_array())
-            print(f"[scope check] initialized; {time_points} displayed time points")
-            self.assertGreater(time_points, 0, "scope reported no time points")
-
-            if not SCOPE_ALLOW_ACQUIRE:
-                print("[scope check] initialize-only PASS (set SCOPE_ALLOW_ACQUIRE=True to acquire)")
-                return
-
-            self._acquire_one_shot(scope, config)
-        finally:
-            scope.close()
-
-    def _acquire_one_shot(self, scope: LabScopesLeCroyScopeAdapter, config) -> None:
-        writer = HDF5RunWriter(config.output_path, config)
-        writer.initialize(
-            {scope.name: scope.metadata()},
-            {scope.name: scope.time_array()},
-            {"diagnostic": {"instrument": "scope", "scope_name": scope.name}},
-        )
-        scope.arm()
-        scope_shot = scope.acquire(SCOPE_SHOT_NUM)
-        writer.write_scope_shot(scope_shot, SCOPE_SHOT_NUM)
-        writer.finalize([ShotResult(plan=ShotPlan(shot_num=SCOPE_SHOT_NUM), scope_shots=[scope_shot])])
-        print(f"[scope check] acquisition PASS -> {config.output_path}")
-
-
-# --------------------------------------------------------------------------- #
-class MotionHardwareCheck(_HardwareCheckBase):
+class MotionHardwareCheck(HardwareCheckBase):
     """Connect to the real motion controller; optionally command one move."""
 
     run_flag = RUN_MOTION_CHECK
@@ -211,87 +106,7 @@ class MotionHardwareCheck(_HardwareCheckBase):
 
 
 # --------------------------------------------------------------------------- #
-class CameraHardwareCheck(_HardwareCheckBase):
-    """Connect to the Phantom camera; optionally record one .cine."""
-
-    run_flag = RUN_CAMERA_CHECK
-    label = "camera"
-
-    def test_camera_configures_and_optionally_records(self) -> None:
-        config = load_run_config(EXPERIMENT_CONFIG_PATH, mode="camera", output_path=self.output_path)
-        config = replace(config, scopes=[])
-
-        from drivers.phantom_recorder import PhantomRecorder
-
-        adapter = PhantomCameraAdapter(
-            PhantomRecorder(_camera_recorder_config(config)),
-            experiment_name=CAMERA_EXPERIMENT_NAME,
-            save_path=self.output_path.parent,
-        )
-        try:
-            adapter.connect()
-            print(f"\n[camera check] configured; metadata={adapter.metadata()}")
-
-            writer = HDF5RunWriter(self.output_path, config)
-            writer.initialize({}, {}, {"camera": adapter.metadata(), "diagnostic": {"instrument": "camera"}})
-
-            if not CAMERA_ALLOW_RECORD:
-                print("[camera check] configure-only PASS (set CAMERA_ALLOW_RECORD=True to record)")
-                writer.finalize(
-                    [ShotResult(plan=ShotPlan(shot_num=CAMERA_SHOT_NUM), message="configure-only camera check")]
-                )
-                return
-
-            self._record_one(adapter, writer)
-        finally:
-            adapter.close()
-
-    def _record_one(self, adapter: PhantomCameraAdapter, writer: HDF5RunWriter) -> None:
-        adapter.arm(CAMERA_SHOT_NUM)
-        camera_shot = adapter.complete(CAMERA_SHOT_NUM)
-        writer.write_camera_shot(camera_shot)
-        writer.finalize([ShotResult(plan=ShotPlan(shot_num=CAMERA_SHOT_NUM), camera_shot=camera_shot)])
-        print(f"[camera check] record PASS file={camera_shot.file_name} -> {self.output_path}")
-
-
-# --------------------------------------------------------------------------- #
-class DataRunScopeHardware(_HardwareCheckBase):
-    """Legacy Data_Run-style acquisition loop with real scopes, no motors."""
-
-    run_flag = RUN_DATA_RUN_SCOPE_CHECK
-    label = "data_run_scope"
-
-    def setUp(self) -> None:
-        super().setUp()
-        if DATA_RUN_SCOPE_SHOTS < 1:
-            self.fail("DATA_RUN_SCOPE_SHOTS must be at least 1")
-
-    def test_data_run_scope_path_writes_hdf5(self) -> None:
-        from acquisition.config import load_experiment_config
-        from acquisition.scope_runner import MultiScopeAcquisition, single_shot_acquisition
-        from acquisition import hdf5_writer
-
-        config, raw_config_text = load_experiment_config(EXPERIMENT_CONFIG_PATH)
-        if DATA_RUN_SCOPE_NAME:
-            restrict_scope_config(config, DATA_RUN_SCOPE_NAME)
-
-        print(f"\n[data-run-scope] output={self.output_path}")
-        with MultiScopeAcquisition(self.output_path, config, raw_config_text) as msa:
-            msa.initialize_hdf5_base()
-            active_scopes = msa.initialize_scopes()
-            self.assertTrue(active_scopes, "No valid data found from any scope")
-
-            for shot_num in range(1, DATA_RUN_SCOPE_SHOTS + 1):
-                print(f"[data-run-scope] shot {shot_num}/{DATA_RUN_SCOPE_SHOTS}")
-                single_shot_acquisition(msa, active_scopes, shot_num)
-
-            hdf5_writer.record_shot_count(self.output_path, msa.scope_ips, DATA_RUN_SCOPE_SHOTS)
-
-        print(f"[data-run-scope] PASS -> {self.output_path}")
-
-
-# --------------------------------------------------------------------------- #
-class DataRunMotionHardware(_HardwareCheckBase):
+class DataRunMotionHardware(HardwareCheckBase):
     """Legacy Data_Run-style acquisition loop with real motors and fake scope data."""
 
     run_flag = RUN_DATA_RUN_MOTION_CHECK
@@ -389,19 +204,6 @@ class DataRunMotionHardware(_HardwareCheckBase):
 # --------------------------------------------------------------------------- #
 # Module-level helpers
 # --------------------------------------------------------------------------- #
-def _select_scope(config, requested):
-    if not config.scopes:
-        raise RuntimeError("No scopes found in [scope_ips].")
-    if requested is None:
-        return config.scopes[0]
-    needle = requested.lower()
-    for scope in config.scopes:
-        if scope.name.lower() == needle:
-            return scope
-    available = ", ".join(scope.name for scope in config.scopes)
-    raise RuntimeError(f"Scope {requested!r} not found. Available: {available}")
-
-
 def _motion_dimension(config, requested: str, target) -> str:
     if requested != "auto":
         return requested
@@ -437,28 +239,6 @@ def _read_probe_position(controller):
     except Exception as exc:
         print(f"[motion check] could not read probe position: {exc}")
         return None
-
-
-def _camera_recorder_config(config) -> dict[str, object]:
-    params = dict(config.camera.parameters)
-    output_path = config.output_path
-    return {
-        "exposure_us": int(params.get("exposure_us", 30)),
-        "fps": int(params.get("fps", 10000)),
-        "pre_trigger_frames": int(params.get("pre_trigger_frames", -500)),
-        "post_trigger_frames": int(params.get("post_trigger_frames", 1000)),
-        "resolution": _resolution(params.get("resolution", (256, 256))),
-        "hdf5_file_path": str(output_path),
-        "save_path": str(output_path.parent),
-    }
-
-
-def _resolution(value) -> tuple[int, int]:
-    if isinstance(value, tuple):
-        return (int(value[0]), int(value[1]))
-    text = str(value).replace("x", ",")
-    first, second = (part.strip() for part in text.split(",", 1))
-    return (int(first), int(second))
 
 
 if __name__ == "__main__":

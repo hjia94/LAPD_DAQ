@@ -1,0 +1,56 @@
+"""Shared base class for hardware diagnostic tests.
+
+Provides the tempdir lifecycle and the run-flag/gate skip mechanism reused by
+the per-instrument hardware tests (test_hardware_scope/motion/camera) and the
+bmotion end-to-end checks (test_bmotion_hardware). Lives in a leading-underscore
+module so unittest discovery never collects the base class itself.
+
+Pure functions for those tests live in _hardware_check_helpers.py; this module
+is the one place that carries a unittest.TestCase subclass.
+"""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+
+class HardwareCheckBase(unittest.TestCase):
+    """Run-flag gating + tempdir lifecycle for hardware diagnostic tests.
+
+    Subclasses set ``run_flag`` (the boolean that enables the test) and
+    ``label`` (used in the temp HDF5 filename). Override ``gate_checks`` to add
+    extra skip conditions and ``_allocate_tempdir`` for a custom output layout.
+    """
+
+    run_flag: bool = False
+    label: str = "check"
+
+    def gate_checks(self) -> list[tuple[bool, str]]:
+        """Extra (should_skip, message) pairs, evaluated in order after the
+        run_flag check and before tempdir allocation."""
+        return []
+
+    def setUp(self) -> None:
+        if not self.run_flag:
+            self.skipTest(self._run_flag_skip_message())
+        for should_skip, message in self.gate_checks():
+            if should_skip:
+                self.skipTest(message)
+        self._allocate_tempdir()
+
+    def _run_flag_skip_message(self) -> str:
+        return f"{type(self).__name__} disabled (set its run flag to True)"
+
+    def _allocate_tempdir(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.output_path = self.tmp_dir / f"{self.label}_check.hdf5"
+
+    def tearDown(self) -> None:
+        try:
+            self._tmp.cleanup()
+        except (PermissionError, OSError):
+            # HDF5 file on Windows may still be locked briefly; non-fatal.
+            pass
