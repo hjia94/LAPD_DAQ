@@ -19,7 +19,7 @@ project is built on ReadTheDocs.
 | [`test_lapd_daq_config.py`](#test_lapd_daq_configpy) | 2 | any PC | no | `lapd_daq` installed |
 | [`test_lapd_daq_engine.py`](#test_lapd_daq_enginepy) | 3 | any PC | no | `lapd_daq` installed |
 | [`test_lapd_daq_compat.py`](#test_lapd_daq_compatpy) | 4 | any PC* | no | `lab_scopes` for 1 test, TRC fixtures for 1 test |
-| [`test_daq_framework_combined.py`](#test_daq_framework_combinedpy) | 1 | any PC or hardware PC | configurable | full hardware stack only when `*_MODE = "real"` |
+| [`test_daq_framework_combined.py`](#test_daq_framework_combinedpy) | 1 | any PC or hardware PC | configurable | `bapsf_motion` + `xarray` when `MOTION_MODE = "real"`; otherwise none |
 | [`test_hardware_instruments.py`](#test_hardware_instrumentspy) | 5 | hardware PC | **yes** (scope / motors / camera) | per-instrument |
 | [`test_hardware_daq_check.py`](#test_hardware_daq_checkpy) | 5 | any PC | no | — |
 
@@ -73,7 +73,7 @@ steps pass.
    ```
    Expected: **1 passed** with the top-of-file mode flags at their
    defaults (`SCOPE_MODE="fake"`, `MOTION_MODE="fake"`,
-   `CAMERA_MODE="off"`, `TRIGGER_MODE="fake"`).
+   `CAMERA_MODE="off"`, `RASPBERRY_PI_MODE="fake"`).
 
 ### On the hardware PC
 
@@ -318,36 +318,61 @@ python -m unittest tests.test_lapd_daq_compat -v
 
 ### `test_daq_framework_combined.py`
 
-**Subject:** end-to-end `AcquisitionRun.execute()` exercising the full
-pipeline — scope → motion → camera → trigger → HDF5 writer — with each
+**Subject:** end-to-end acquisition exercising the full pipeline — scope
+→ motion → camera → raspberry-pi trigger → HDF5 writer — with each
 device independently switchable between `"off"`, `"fake"`, and
-`"real"`.
+`"real"`. The fake/off-motion path drives `AcquisitionRun.execute()`;
+the real-motion path routes through
+[`acquisition.run_acquisition_bmotion`](../acquisition/bmotion.py) to
+match how a production data run actually looks.
 
 **1 test** (`CombinedFrameworkAcquisitionTest.test_acquisition_runs_and_hdf5_structure_is_correct`)
 parameterised by the module-level mode flags:
 ```python
-SCOPE_MODE   = "fake"
-MOTION_MODE  = "fake"
-CAMERA_MODE  = "off"
-TRIGGER_MODE = "fake"
+SCOPE_MODE        = "fake"
+MOTION_MODE       = "fake"
+CAMERA_MODE       = "off"
+RASPBERRY_PI_MODE = "fake"
 ```
 
 The test:
-1. Builds an experiment_config.txt on the fly from the mode flags.
-2. Builds an `AcquisitionDevices` bundle with the chosen fake/real
-   mix.
-3. Runs the full acquisition.
-4. Re-opens the HDF5 file and verifies: schema version, scope group +
-   `shot_count`, per-shot channel datasets, `Control/Positions/positions_array`
-   shot numbering (when motion is on), and `Control/Run/shot_status`
-   length.
+1. Builds an experiment_config.txt on the fly from the mode flags. When
+   `MOTION_MODE = "real"` it writes a `[bmotion]` section
+   (motion_groups / direction / execution_order) instead of `[position]`.
+2. Engine path (fake/off motion): builds an `AcquisitionDevices` bundle
+   with the chosen fake/real mix and runs `AcquisitionRun.execute()`.
+3. Bmotion path (real motion): calls `run_acquisition_bmotion(hdf5_path,
+   toml_path, config_path)` directly with `BMOTION_TOML_PATH`, exactly
+   like [`test_bmotion_hardware.py`](#test_bmotion_hardwarepy).
+4. Re-opens the HDF5 file and verifies the structure. Engine path:
+   schema version, scope group + `shot_count`, per-shot channel
+   datasets, `Control/Positions/positions_array` shot numbering, and
+   `Control/Run/shot_status` length. Bmotion path:
+   `Configuration/bmotion_selection`, at least one populated
+   `Control/Positions/<mg>/positions_array`, and a non-empty scope
+   group.
 
 **Default behavior:** all-fake — runs on any PC, takes <1 second,
 covers the engine's happy path.
 
-**Real-hardware mode:** flip any `*_MODE` to `"real"`. Connection info
-for real devices is hard-coded in `REAL_SCOPE_IP`, `REAL_MOTOR_IPS`,
-etc. at the top of the file.
+**Real-hardware mode:** flip `SCOPE_MODE` / `CAMERA_MODE` /
+`RASPBERRY_PI_MODE` to `"real"` to exercise individual instruments on
+the engine path. To exercise real motion, set `MOTION_MODE = "real"` —
+this requires a `bmotion_config.toml` at `BMOTION_TOML_PATH`,
+`bapsf_motion` + `xarray` installed, and the destructive-action gate
+`BMOTION_ALLOW_MOVE = True`. Real-motion runs also require
+`SCOPE_MODE = "real"` because `run_acquisition_bmotion` drives the
+legacy `MultiScopeAcquisition` which connects directly to scope IPs.
+Connection info for real devices is hard-coded in `REAL_SCOPE_IP`,
+`REAL_PI_HOST` / `REAL_PI_PORT`, and `BMOTION_TOML_PATH` at the top of
+the file.
+
+:::{warning}
+Setting `BMOTION_ALLOW_MOVE = True` commands real motors. Confirm the
+configured motion list is safe for the installed probe before flipping
+this flag. Same gate semantics as
+[`test_bmotion_hardware.py`](#test_bmotion_hardwarepy).
+:::
 
 **Run:**
 ```cmd
