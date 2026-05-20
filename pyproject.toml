@@ -17,6 +17,7 @@ dependencies = [
 scope = [
     "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git",
     "pyvisa",
+    "scipy",
 ]
 bmotion = [
     "bapsf-motion",
