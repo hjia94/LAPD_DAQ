@@ -16,12 +16,15 @@ import numpy as np
 
 # Files captured into the `source_code` HDF5 attribute for reproducibility.
 # Paths are resolved relative to the repository root at write time.
+#
+# The LeCroy scope driver now lives in the external `lab_scopes` package
+# rather than this repo; its source is captured separately by
+# `_lab_scopes_source()` so reproducibility is preserved.
 _SOURCE_FILES = (
     'Data_Run.py',
     'acquisition/scope_runner.py',
     'acquisition/hdf5_writer.py',
     'acquisition/config.py',
-    'drivers/LeCroy_Scope.py',
 )
 
 
@@ -46,7 +49,32 @@ def read_source_files():
         except Exception as e:
             print(f"Warning: Could not read {relpath}: {str(e)}")
             contents[relpath] = f"Error reading file: {str(e)}"
+    contents.update(_lab_scopes_source())
     return contents
+
+
+def _lab_scopes_source():
+    """Capture the lab_scopes LeCroy driver source for reproducibility.
+
+    The driver is an installed package dependency, so record both its
+    version and the on-disk source of the scope module.
+    """
+    result = {}
+    try:
+        from importlib.metadata import version
+
+        result['lab_scopes (version)'] = version('lab_scopes')
+    except Exception as e:
+        result['lab_scopes (version)'] = f"Error reading version: {str(e)}"
+    try:
+        from lab_scopes.lecroy import scope as _scope_mod
+
+        with open(_scope_mod.__file__, 'r') as f:
+            result['lab_scopes/lecroy/scope.py'] = f.read()
+    except Exception as e:
+        print(f"Warning: Could not read lab_scopes scope source: {str(e)}")
+        result['lab_scopes/lecroy/scope.py'] = f"Error reading file: {str(e)}"
+    return result
 
 
 def write_experiment_metadata(save_path, description, source_code,

@@ -26,7 +26,8 @@ import time
 import os.path
 import sys
 import threading
-from LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE, Fake_Scope
+from lab_scopes.lecroy import LeCroy_Scope, WAVEDESC_SIZE
+from lab_scopes.lecroy.scope import Fake_Scope
 from Motor_Control_2D import Motor_Control_2D
 import pickle
 
@@ -188,9 +189,10 @@ def Acquire_Scope_Data(ifn, get_positions, get_channel_description, ip_addresses
 	#
 	#============================
 	# list of files to include in the HDF5 data file
+	from lab_scopes.lecroy import scope as _lecroy_scope_mod
 	src_files = [sys.argv[0],
-				__file__,           # ASSUME this file is in the same directory as the next two:
-				os.path.dirname(__file__)+os.sep+'LeCroy_Scope.py',
+				__file__,           # ASSUME this file is in the same directory as Motor_Control_2D.py:
+				_lecroy_scope_mod.__file__,   # LeCroy driver now lives in the lab_scopes package
 				os.path.dirname(__file__)+os.sep+'Motor_Control_2D.py'
 			   ]
 	#for testing, list these:
@@ -360,9 +362,10 @@ def Acquire_Scope_Data(ifn, get_positions, get_channel_description, ip_addresses
 
 def Acquire_Scope_Data_raw(ifn, get_positions, get_channel_description, ip_addresses, disk_folder, exp_name):
 
+	from lab_scopes.lecroy import scope as _lecroy_scope_mod
 	src_files = [sys.argv[0],
-				__file__,           # ASSUME this file is in the same directory as the next two:
-				os.path.dirname(__file__)+os.sep+'LeCroy_Scope.py',
+				__file__,           # ASSUME this file is in the same directory as Motor_Control_2D.py:
+				_lecroy_scope_mod.__file__,   # LeCroy driver now lives in the lab_scopes package
 				os.path.dirname(__file__)+os.sep+'Motor_Control_2D.py'
 			   ]
 	#for testing, list these:
@@ -548,9 +551,10 @@ def Acquire_hdf5_from_disk(ifn, disk_folder, get_positions, ip_addresses, get_ch
 	still need to connect to the scope for simpilicity, #todo remove the required connection to the scope 
 	"""
 
+	from lab_scopes.lecroy import scope as _lecroy_scope_mod
 	src_files = [sys.argv[0],
-				__file__,           # ASSUME this file is in the same directory as the next two:
-				os.path.dirname(__file__)+os.sep+'LeCroy_Scope.py',
+				__file__,           # ASSUME this file is in the same directory as Motor_Control_2D.py:
+				_lecroy_scope_mod.__file__,   # LeCroy driver now lives in the lab_scopes package
 				os.path.dirname(__file__)+os.sep+'Motor_Control_2D.py'
 			   ]
 	#for testing, list these:

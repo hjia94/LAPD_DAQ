@@ -45,12 +45,37 @@ LAPD_DAQ/
 
 Use Python 3.10 or newer.
 
+> **Use a standalone Python, not Anaconda/conda.** Mixing `pip` and `conda`
+> causes "installed but not importable" failures: a bare `pip install` can land
+> packages in conda's base environment while your acquisition runs under a
+> different interpreter, so `lab_scopes` (and other deps) appear missing.
+>
+> On each PC:
+> 1. Install Python from [python.org](https://www.python.org/downloads/windows/)
+>    (3.11 or 3.12 recommended), 64-bit.
+> 2. If Anaconda is installed, stop it from hijacking every shell:
+>    `conda config --set auto_activate_base false`, then reopen the terminal.
+> 3. Build the venv from the standalone Python (e.g.
+>    `C:\Python312\python.exe -m venv .venv`), activate it, and **always use
+>    `python -m pip ...`** (never bare `pip`) so installs go into the venv.
+>
+> Verify the environment is self-consistent before running — all three must
+> point inside `.venv`:
+> ```powershell
+> python -c "import sys; print(sys.executable)"
+> python -c "import lab_scopes; print(lab_scopes.__file__)"
+> pip -V
+> ```
+
+Replace `C:\Python312\python.exe` below with the path to your standalone
+Python (see the note above); the rest is the same on every PC.
+
 Command Prompt:
 
 ```cmd
 git clone https://github.com/hjia94/LAPD_DAQ.git
 cd LAPD_DAQ
-python -m venv .venv
+C:\Python312\python.exe -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install -e .
 ```
@@ -60,31 +85,46 @@ PowerShell:
 ```powershell
 git clone https://github.com/hjia94/LAPD_DAQ.git
 cd LAPD_DAQ
-python -m venv .venv
+C:\Python312\python.exe -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install -e .
 ```
 
-Install optional hardware extras only on machines that need them:
+Install optional hardware extras only on machines that need them. Each name in
+the brackets is a separate group; combine them comma-separated (no spaces) to
+install several at once, e.g. a PC running both scope acquisition and bapsf
+motion:
 
 Command Prompt:
 
 ```cmd
-REM LeCroy scope control through lab_scopes and PyVISA
+REM LeCroy scope control (lab_scopes + PyVISA)
 python -m pip install -e ".[scope]"
 
-REM bapsf_motion workflows
+REM bapsf_motion workflows (bapsf-motion + xarray)
 python -m pip install -e ".[bmotion]"
+
+REM both at once
+python -m pip install -e ".[scope,bmotion]"
+
+REM Jupyter for the notebooks/ examples
+python -m pip install -e ".[dev]"
 ```
 
 PowerShell:
 
 ```powershell
-# LeCroy scope control through lab_scopes and PyVISA
+# LeCroy scope control (lab_scopes + PyVISA)
 python -m pip install -e ".[scope]"
 
-# bapsf_motion workflows
+# bapsf_motion workflows (bapsf-motion + xarray)
 python -m pip install -e ".[bmotion]"
+
+# both at once
+python -m pip install -e ".[scope,bmotion]"
+
+# Jupyter for the notebooks/ examples
+python -m pip install -e ".[dev]"
 ```
 
 The `camera` extra is intentionally empty because the Phantom camera SDK and

@@ -38,7 +38,7 @@ _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from drivers.LeCroy_Scope import LeCroy_Scope, WAVEDESC_SIZE, EXPANDED_TRACE_NAMES
+from lab_scopes.lecroy import LeCroy_Scope, WAVEDESC_SIZE, EXPANDED_TRACE_NAMES
 from spectrometer_controller import spectrometer
 
 
@@ -171,9 +171,10 @@ class scope_data:
 		============================
 		list of files to include in the HDF5 data file
 		'''
+		from lab_scopes.lecroy import scope as _lecroy_scope_mod
 		src_files = [sys.argv[0],
 					__file__,
-					os.path.join(os.path.dirname(__file__), '..', 'LeCroy_Scope.py')]
+					_lecroy_scope_mod.__file__]   # LeCroy driver now lives in the lab_scopes package
 		print('Files to record in the hdf5 archive:')
 		print('       invoking file      =', src_files[0])
 		print('       this file          =', src_files[1])
