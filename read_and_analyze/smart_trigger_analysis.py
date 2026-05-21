@@ -44,7 +44,9 @@ import os
 
 import numpy as np
 
-from lab_scopes.io.hdf5 import read_hdf5_scope_data, read_hdf5_scope_tarr
+from lab_scopes.io.hdf5 import (
+    open_hdf5_readonly, read_hdf5_scope_data, read_hdf5_scope_tarr,
+)
 try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _position_for_shot, _scope_groups, _shot_numbers,
@@ -354,8 +356,6 @@ def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=No
     y, kind, math, holdoff_us, n_events, nominal, events`` (``events`` is the
     detector's per-event list).
     """
-    import h5py
-
     scope = SCOPE if scope is None else scope
     channels = CHANNELS if channels is None else channels
     shots = SHOTS if shots is None else shots
@@ -367,7 +367,7 @@ def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=No
     kinds = list(DETECTORS) if kinds is None else list(kinds)
 
     records = []
-    with h5py.File(path, "r") as f:
+    with open_hdf5_readonly(path) as f:
         positions = read_positions(f)
         scopes = [scope] if scope else _scope_groups(f)
 
@@ -459,7 +459,6 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
     with show/save). Saves one PNG per scope to a ``plots/`` subdir next to the
     data file. Returns the saved paths.
     """
-    import h5py
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
 
@@ -484,7 +483,7 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
         os.makedirs(plots_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(path))[0]
 
-    with h5py.File(path, "r") as f:
+    with open_hdf5_readonly(path) as f:
         positions = read_positions(f)
         scopes = [scope] if scope else _scope_groups(f)
 
