@@ -45,6 +45,28 @@ LAPD_DAQ/
 
 Use Python 3.10 or newer.
 
+> **Use a standalone Python, not Anaconda/conda.** Mixing `pip` and `conda`
+> causes "installed but not importable" failures: a bare `pip install` can land
+> packages in conda's base environment while your acquisition runs under a
+> different interpreter, so `lab_scopes` (and other deps) appear missing.
+>
+> On each PC:
+> 1. Install Python from [python.org](https://www.python.org/downloads/windows/)
+>    (3.11 or 3.12 recommended), 64-bit.
+> 2. If Anaconda is installed, stop it from hijacking every shell:
+>    `conda config --set auto_activate_base false`, then reopen the terminal.
+> 3. Build the venv from the standalone Python (e.g.
+>    `C:\Python312\python.exe -m venv .venv`), activate it, and **always use
+>    `python -m pip ...`** (never bare `pip`) so installs go into the venv.
+>
+> Verify the environment is self-consistent before running — all three must
+> point inside `.venv`:
+> ```powershell
+> python -c "import sys; print(sys.executable)"
+> python -c "import lab_scopes; print(lab_scopes.__file__)"
+> pip -V
+> ```
+
 Command Prompt:
 
 ```cmd

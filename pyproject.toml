@@ -11,6 +11,8 @@ dependencies = [
     "h5py",
     "numpy",
     "tqdm",
+    "scipy",       # motion.Motor_Control (scipy.optimize) is imported on the core path
+    "matplotlib",  # plotting in motion/obstacle_avoidance and notebooks
 ]
 
 [project.optional-dependencies]
@@ -26,12 +28,16 @@ scope = [
     # copy, so re-apply the editable install when needed.
     "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git",
     "pyvisa",
+    "pyvisa-py",   # pure-Python VISA backend for the legacy PyVISA path
 ]
 bmotion = [
     "bapsf-motion",
     "xarray",
 ]
 camera = []
+dev = [
+    "jupyter",     # running the notebooks/ examples
+]
 
 [project.scripts]
 lapd-daq = "lapd_daq.cli:main"
