@@ -28,20 +28,21 @@ def _build_setup_array(mg):
     (non-2D, non-(x,y) axes, non-rectangular grids).
     """
     name = mg.config['name']
-    ml = mg.mb.motion_list.values
-    N, M = ml.shape
+    ml = mg.mb.motion_list
+    arr = ml.values
+    N, M = arr.shape
     axis_labels = tuple(str(s).lower() for s in ml.coords['space'].values)
     if axis_labels != ('x', 'y'):
         raise RuntimeError(
             f"bmotion expects axis labels ('x','y'); motion group '{name}' has {axis_labels}"
         )
-    xpos = np.unique(ml[:, 0])
-    ypos = np.unique(ml[:, 1])
-    
+    xpos = np.unique(arr[:, 0])
+    ypos = np.unique(arr[:, 1])
+
     setup = np.zeros(N, dtype=_POSITION_DTYPE)
     setup['shot_num'] = np.arange(1, N + 1)
-    setup['x'] = ml[:, 0]
-    setup['y'] = ml[:, 1]
+    setup['x'] = arr[:, 0]
+    setup['y'] = arr[:, 1]
     return setup, xpos, ypos
 
 
@@ -162,6 +163,26 @@ def move_to_index(
     time.sleep(.5)
     while rm.is_moving:
         time.sleep(.5)
+
+    # disable all motors
+    for mg in rm.mgs.values():
+        mg.drive.send_command('disable')
+    
+    # all_motors_set = False
+    # wait_until = datetime.now() + timedelta(seconds=5)
+    # while not all_motors_set:
+    #     sleep(0.05)
+
+    #     for mg in rm.mgs.values():
+    #         sleep(0.05)
+    #         motor_enabled_state = [
+    #             ax.motor.status["enabled"] is state for ax in mg.drive.axes
+    #         ]
+    #         all_motors_set = all(motor_enabled_state)
+
+    #     if wait_until > datetime.now():
+    #         # timeout
+    #         all_motors_set = True
 
 
 def record_bmotion_positions(
