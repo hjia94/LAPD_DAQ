@@ -1,199 +1,184 @@
-# `read_and_analyze` — reading & validating bmotion HDF5 data
+# `read_and_analyze` — inspect & analyze bmotion HDF5 data
 
-Tools for inspecting the HDF5 files produced by **`Data_Run_bmotion.py`**. After a
-run you can confirm the file is well-formed (groups, datasets, dtypes, probe
-positions all present and consistent) and visually check that the stored traces,
-decoded back to voltage, match what the oscilloscope displayed.
-
-All low-level reading/decoding is delegated to the **`lab_scopes`** library
-(`lab_scopes.io.hdf5`). This package only adds a *validator*, a console *summary*,
-and *trace plotting* on top of it.
-
-> **Audience:** anyone who just acquired data with `Data_Run_bmotion.py` and wants
-> a quick "is my file OK and does it look right?" check before analysis.
+Tools for inspecting and analyzing the HDF5 files produced by
+**`Data_Run_bmotion.py`** (a probe stepped over an XY grid, repeat shots per
+position). All low-level reading/decoding is delegated to the **`lab_scopes`**
+library (`lab_scopes.io.hdf5`); this package adds validation, filtering, and
+several analysis/plot views on top.
 
 ---
 
-## 1. One-time setup
+## Setup (once)
 
-The reader needs `lab_scopes` installed **into the same Python interpreter** you run
-the script with, including its `hdf5` and `plot` extras (h5py + matplotlib):
-
-```bash
-pip install -e "C:/Users/hjia9/Documents/GitHub/lab_scopes[hdf5,plot]"
-```
-
-> ⚠️ Use `python -m pip install ...` if `pip` on your PATH points at a different
-> interpreter than the `python` you run the script with. Verify with:
->
-> ```bash
-> python -c "import lab_scopes, h5py, matplotlib; print('ok')"
-> ```
-
-`lab_scopes` is also declared as LAPD_DAQ's optional `scope` dependency
-(`pyproject.toml`), so `pip install -e ".[scope]"` from the repo root works too.
-
-The fluctuation analysis ([§8](#8-fluctuation-analysis-flattestmost-reproducible-window))
-additionally needs **`scipy`** (Gaussian smoothing). It is part of the `scope`
-extra; install standalone if needed:
+Install `lab_scopes` into the **same interpreter** you run with, plus `scipy`
+(used by the filtering/analysis modules):
 
 ```bash
+python -m pip install -e "C:/Users/hjia9/Documents/GitHub/lab_scopes[hdf5,plot]"
 python -m pip install scipy
 ```
 
+`lab_scopes` is also LAPD_DAQ's optional `scope` dependency, so
+`pip install -e ".[scope]"` from the repo root works too. Verify with
+`python -c "import lab_scopes, h5py, matplotlib, scipy; print('ok')"`.
+
+Run every module **from the LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`.
+
 ---
 
-## 2. Quick start (command line)
+## The modules
 
-Run as a module **from the LAPD_DAQ repository root**:
-
-```bash
-# Summary + validation report + plots (uses the built-in default file)
-python -m read_and_analyze.read_bmotion_data
-
-# Point it at your own file
-python -m read_and_analyze.read_bmotion_data "D:\data\LAPD\my_run_2026-05-19.hdf5"
-
-# Report only, no figures
-python -m read_and_analyze.read_bmotion_data <file.hdf5> --no-show --no-save
-
-# Plot specific scope / channels / shots
-python -m read_and_analyze.read_bmotion_data <file.hdf5> \
-    --scope lpscope --channels C1 C2 --shots 1 250 510
-```
-
-A run prints three things in order:
-
-1. **Summary** — file size, scopes, channel descriptions, shot count, motion grid.
-2. **Validation report** — one `[PASS]` / `[WARN]` / `[FAIL]` line per check.
-3. **Plots** — one figure per scope (saved and/or shown, see below).
-
-The process exit code is `0` when no checks failed and `1` when any `[FAIL]` is
-present, so it can be used in scripts.
-
-### Command-line options
-
-| Option | Default | Effect |
+| Module | What it does | Run |
 |---|---|---|
-| `path` (positional) | built-in `DEFAULT_FILE` | HDF5 file to inspect |
-| `--no-show` | off | Do not display plots (overrides `SHOW_PLOT`) |
-| `--no-save` | off | Do not save plots (overrides `SAVE_PLOT`) |
-| `--scope NAME` | all scopes | Restrict plotting to one scope group |
-| `--channels C1 C2 …` | all channels | Channels to plot |
-| `--shots 1 250 510` | first / middle / last | Shot numbers to overlay |
+| [`read_bmotion_data.py`](../read_bmotion_data.py) | Validates the file (groups, dtypes, positions, sampled traces) and overlays raw voltage traces per scope. Prints a summary + `PASS`/`WARN`/`FAIL` report (exit code `1` on any `FAIL`). | `python -m read_and_analyze.read_bmotion_data [file.hdf5]` |
+| [`filter_data.py`](../filter_data.py) | Shows the denoising pipeline — raw vs median vs median+Gaussian — on a sample trace, so you can tune the filter. Owns the shared filtering helpers other modules reuse. | `python -m read_and_analyze.filter_data` |
+| [`fluctuation_analysis.py`](../fluctuation_analysis.py) | Finds, per position, the **flattest / most reproducible** time window (see [below](#fluctuation-analysis)). Prints a best-first table + a score/overlay figure. | `python -m read_and_analyze.fluctuation_analysis` |
+| [`plot_xy_map.py`](../plot_xy_map.py) | Reduces each grid position's trace to one scalar (mean over a time range, or value at one instant) and renders a **2D XY map** (`imshow`, optional contours). Falls back to a line plot for 1D scans. | `python -m read_and_analyze.plot_xy_map` |
+| [`smart_trigger_analysis.py`](../smart_trigger_analysis.py) | Replays a LeCroy scope's **SmartTriggers** post-hoc (see [below](#smarttrigger-scan)) and reports which events would have triggered. Prints a per-shot table + a per-shot scan figure. | `python -m read_and_analyze.smart_trigger_analysis` |
+
+`read_bmotion_data` is the only one with a CLI. Its options:
+`--no-show` / `--no-save` (override plot toggles), `--scope NAME`,
+`--channels C1 C2`, `--shots 1 250 510`. All other modules are configured by
+editing constants (below) — there is no command line.
 
 ---
 
-## 3. Plot output toggles
+## Where the constants live
 
-Two switches at the top of
-[`read_bmotion_data.py`](../read_bmotion_data.py) control plotting globally:
+Every user-changeable knob is a constant in one of **two files**. Edit the file,
+re-run the module.
 
-```python
-SHOW_PLOT = True   # display figures interactively
-SAVE_PLOT = True   # write PNGs to a "plots/" subdirectory next to the data file
-```
+### `analysis_config.py` — shared across all modules
 
-They are **independent** — turn either on or off. Flip a constant to change the
-default for every run, or override per run with `--no-show` / `--no-save`.
-
-When saving is on, figures are written next to the data file:
-
-```
-D:\data\LAPD\my_run_2026-05-19.hdf5
-D:\data\LAPD\plots\my_run_2026-05-19_<scope>.png   ← one PNG per scope, 150 dpi
-```
-
-The `plots/` directory is created automatically if it does not exist.
-
----
-
-## 4. Using it as a library
-
-The same functions are importable for use in notebooks or other scripts:
+[`analysis_config.py`](../analysis_config.py) holds the knobs every module reads,
+plus the module-specific analysis knobs. Editing one value here changes it
+everywhere it applies.
 
 ```python
-from read_and_analyze import (
-    print_summary, validate_file, plot_traces, read_positions,
-)
+# SHARED — used by every module
+DATA_FILE    = r"D:\data\LAPD\my_run.hdf5"  # the HDF5 file to analyze
+SELECT_SCOPE = "lpscope"   # scope to analyze; None = all scopes
+SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels
+SHOW_PLOT    = True        # display figures interactively
+SAVE_PLOT    = False       # write PNGs to a "plots/" subdir next to the data file
+MED_SIZE     = 5           # median-filter width in SAMPLES (spike removal); 1 = off
+GAUSS_SIGMA  = 20          # Gaussian smoothing width in SAMPLES; 0 = off
+POS_TOL      = 0.5         # group repeat shots within this many mm
 
-path = r"D:\data\LAPD\my_run_2026-05-19.hdf5"
+# FLUCTUATION — fluctuation_analysis.py only
+FLUCT_WINDOW_US   = 10.0   # window width (us) slid across the record
+FLUCT_SIGNAL_FRAC = 0      # window |mean| must exceed this fraction of the position's peak
 
-print_summary(path)                       # console overview
-
-ok, report = validate_file(path)          # programmatic validation
-for line in report:
-    print(line)
-assert ok, "file failed validation"
-
-# Save plots without opening windows (e.g. on a headless machine / batch job)
-saved = plot_traces(path, show=False, save=True)
-print("wrote:", saved)
+# XY_MAP — plot_xy_map.py only
+XY_MODE         = "range"  # "range" = mean over [T_START_US, T_END_US]; "step" = value at T_STEP_US
+XY_T_START_US   = 4000.0   # range start (us)
+XY_T_END_US     = 4500.0   # range end (us)
+XY_T_STEP_US    = 100.0    # snapshot time (us), used when XY_MODE == "step"
+XY_SHOW_CONTOUR = False    # overlay contour lines
+XY_N_CONTOURS   = 8        # contour count when XY_SHOW_CONTOUR is True
+XY_CMAP         = "viridis"
 ```
 
-### Public API
+> The SmartTrigger scan keeps its **own** plot toggles in `smart_trigger_config.py`
+> (`SHOW_PLOT`/`SAVE_PLOT`); the shared toggles above drive the other four modules.
+> `read_bmotion_data` can also override its toggles per-run with `--no-show`/`--no-save`.
 
-| Function | Returns | Purpose |
-|---|---|---|
-| `print_summary(path)` | `None` (prints) | File size, scopes, channel descriptions, shot count, motion grid. |
-| `validate_file(path)` | `(ok: bool, report: list[str])` | Structural/format checks; `ok` is `False` if any `[FAIL]`. |
-| `plot_traces(path, scope=None, channels=None, shots=None, show=None, save=None)` | `list[str]` (saved PNG paths) | Overlay traces per scope; `show`/`save` default to the module toggles. |
-| `read_positions(f, mg_name=None)` | `dict` | Probe-position metadata from `/Control/Positions`. **Takes an open `h5py.File`**, not a path. |
-| `find_quiet_window(path, scope=None, channels=None, window_us=None, gauss_sigma=None, signal_frac=None)` | `list[dict]` | Per (scope, channel, position): the least-fluctuating window. See [§8](#8-fluctuation-analysis-flattestmost-reproducible-window). |
-| `plot_quiet_window(path, ..., show=None, save=None)` | `list[str]` (saved PNG paths) | Score-vs-position + best-window overlay; toggles like `plot_traces`. |
+### `smart_trigger_config.py` — SmartTrigger scan only
 
-`read_positions` returns, per motion group, a dict with keys
-`name, key, xpos, ypos, setup_array, positions_array`:
+[`smart_trigger_config.py`](../smart_trigger_config.py) imports
+`DATA_FILE`/`SELECT_SCOPE`/`SELECT_CHAN`/`MED_SIZE`/`GAUSS_SIGMA` from
+`analysis_config.py`, then adds the scan-specific knobs, grouped per trigger mode:
 
 ```python
-import h5py
-from read_and_analyze import read_positions
+SHOW_PLOT  = False; SAVE_PLOT = True   # this module's own plot toggles
+SHOTS      = None    # None = sample shots (first/mid/last per position); or e.g. [12, 57]
+HOLDOFF_US = 3000    # ignore the record before this time (us); mimics trigger holdoff
+MATH       = None    # None, or "derivative" / "integral" / "abs" (preprocess before detection)
 
-with h5py.File(path, "r") as f:
-    pos = read_positions(f)                 # {motion_group_name: info}
-    for name, info in pos.items():
-        print(name, "x:", info["xpos"])     # unique grid X positions
-        print("recorded:", info["positions_array"]["x"][:5])  # actual encoder X
-```
-
-For reading the actual voltage traces, use `lab_scopes` directly — the reader
-builds on these:
-
-```python
-from lab_scopes.io.hdf5 import read_hdf5_scope_data, read_hdf5_scope_tarr
-
-with h5py.File(path, "r") as f:
-    volts, dt, t0 = read_hdf5_scope_data(f, "lpscope", "C1", shot_number=1)
-    tarr = read_hdf5_scope_tarr(f, "lpscope")   # seconds
+# one block per trigger mode (levels are fractions of each trace's min..max span;
+# EXCL_DELTA = the +/- band beyond which a measured value is flagged):
+GLITCH_THRESH_FRAC = 0.5;  GLITCH_HYST_FRAC = 0.05; GLITCH_EXCL_DELTA = 0.25
+RUNT_LO_FRAC = 0.3;        RUNT_HI_FRAC = 0.7
+SLEW_LO_FRAC = 0.1;        SLEW_HI_FRAC = 0.9;      SLEW_EXCL_DELTA = 0.25
+INTERVAL_THRESH_FRAC = 0.5; INTERVAL_HYST_FRAC = 0.05; INTERVAL_EXCL_DELTA = 0.25
 ```
 
 ---
 
-## 5. What the validator checks
+## Plot output
 
-`validate_file` walks the file and tags each check `PASS` / `WARN` / `FAIL`:
+`SHOW_PLOT` / `SAVE_PLOT` are independent. When saving is on, PNGs go in a
+`plots/` subdir next to the data file (created automatically), one per scope (or
+per scope/channel for the XY map), at 150 dpi — e.g.
+`D:\data\LAPD\plots\my_run_<scope>.png`.
 
-- **Root attributes** — `description`, `creation_time`, `source_code` present.
+---
+
+## Fluctuation analysis
+
+For each position, scores every candidate window by two terms, both relative to
+the window mean (so large steady signal beats small noisy signal):
+
+- **temporal flatness** — `(max − min) / |mean|` of the position's mean trace;
+- **shot-to-shot reproducibility** — `std-across-shots / |mean|` of the per-shot
+  window means.
+
+Their sum is the **score**; the lowest wins per (scope, channel, position). Only
+windows with `|mean| > FLUCT_SIGNAL_FRAC × peak` qualify, so the quiet pre-plasma
+region can't trivially win. Traces are denoised (median `MED_SIZE` → Gaussian
+`GAUSS_SIGMA`) first. Output: a best-first table (position, window-center time,
+`flat_rel`, `scat_rel`, `score`, mean V) and
+`plots/<base>_<scope>_fluctuation.png`.
+
+> On a short window (e.g. 10 µs ≈ 13 samples at an 800 ns base) the signal is
+> nearly flat, so reproducibility usually dominates the ranking.
+
+---
+
+## SmartTrigger scan
+
+Replays a LeCroy scope's **SmartTriggers** over recorded traces, reporting the
+events each *would* have caught. Crossing levels are derived **per trace** from
+its own min..max span (the software analog of *Find Level*), so the detectors
+work at any absolute scale; nominal widths/periods use the **median** of the
+measured population (robust against the outliers being hunted). The four
+detectors are pure functions of `(volts, tarr)`:
+
+- **Glitch/Width** — flags pulses narrower than `nominal × (1 − GLITCH_EXCL_DELTA)`.
+- **Runt** — flags excursions that cross `RUNT_LO_FRAC` but never reach `RUNT_HI_FRAC`.
+- **Slew rate** — flags edges whose lo↔hi transition time is outside `nominal × (1 ± SLEW_EXCL_DELTA)`.
+- **Interval** — flags periods between rising edges outside `nominal × (1 ± INTERVAL_EXCL_DELTA)`.
+
+Two scope-like preprocessing knobs apply first: **`MATH`** (run derivative /
+integral / abs, like triggering off a Math trace) and **`HOLDOFF_US`** (ignore
+the record before a given time). Traces are denoised before detection. Output: a
+table per (scope, channel, shot, kind) with the nominal and flagged-event count,
+and `plots/<base>_<scope>_smart_triggers.png` (one panel per shot showing the
+scanned signal, derived levels, holdoff band, and a shaded span per event colored
+by kind).
+
+---
+
+## What the validator checks
+
+`read_bmotion_data` tags each check `PASS` / `WARN` / `FAIL`:
+
+- **Root attrs** — `description`, `creation_time`, `source_code`.
 - **`/Configuration`** — `experiment_config`, `bmotion_config`, `bmotion_selection`
-  datasets present; `bmotion_selection` parses as JSON.
-- **`/Control/Positions/<motion_group>`** — `positions_setup_array` and
-  `positions_array` present with the expected structured dtype
-  `(shot_num, x, y)`; `xpos` / `ypos` grid attributes present; `positions_array`
-  fully populated, `shot_num` monotonic, recorded positions within the grid.
-- **Each scope** — `time_array` present; `shot_*` groups present.
-- **Sampled traces** (first / middle / last shot, plus the first skipped shot) —
-  each `C*_data` has a matching 346-byte `C*_header`, data dtype is `int16`,
-  the WAVEDESC decodes, the time array length matches the trace length, and the
+  present; `bmotion_selection` parses as JSON.
+- **`/Control/Positions/<motion_group>`** — setup/positions arrays with dtype
+  `(shot_num, x, y)`; `xpos`/`ypos` grid attrs; array fully populated, `shot_num`
+  monotonic, positions within the grid.
+- **Each scope** — `time_array` and `shot_*` groups present.
+- **Sampled traces** (first/middle/last + first skipped) — each `C*_data` has a
+  346-byte `C*_header`, dtype `int16`, the WAVEDESC decodes, lengths match, and
   decoded voltage is finite.
 
-`WARN` means "unexpected but readable" (e.g. a reconstructed time base); `FAIL`
-means the file is malformed in a way that breaks downstream reading.
+`WARN` = unexpected but readable; `FAIL` = malformed in a way that breaks reading.
 
 ---
 
-## 6. Expected HDF5 layout (reference)
-
-Files written by `Data_Run_bmotion.py` look like:
+## Expected HDF5 layout (reference)
 
 ```
 /                                 attrs: description, creation_time, source_code
@@ -213,184 +198,29 @@ Files written by `Data_Run_bmotion.py` look like:
         └── C<k>_header           void, 346-byte LeCroy WAVEDESC
 ```
 
-Voltage is recovered as `raw_int16 * vertical_gain - vertical_offset`, with the
-gain/offset taken from the per-channel WAVEDESC header (handled by `lab_scopes`).
+Voltage = `raw_int16 × vertical_gain − vertical_offset`, gain/offset from the
+per-channel WAVEDESC header (handled by `lab_scopes`).
 
 ---
 
-## 7. Troubleshooting
+## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `ModuleNotFoundError: No module named 'lab_scopes'` | Not installed in the interpreter you ran with. Re-run the setup step using `python -m pip install ...`. |
-| `ModuleNotFoundError: No module named 'read_and_analyze'` | Run from the **LAPD_DAQ repo root** (so the package is importable), e.g. `python -m read_and_analyze.read_bmotion_data`. |
-| `Install lab-scopes[hdf5] to use HDF5 reader helpers` | The `hdf5` extra (h5py) is missing — reinstall with `[hdf5,plot]`. |
-| Plot window never appears | `SHOW_PLOT` is `False` or `--no-show` was passed; or you are on a headless machine (use `--no-show --no-save` off → just `save`). |
-| A shot reports as *skipped* | The acquisition marked it (`skipped=True`); the validator counts this as a `PASS` and plotting omits it. |
-| `ModuleNotFoundError: No module named 'scipy'` | The fluctuation analysis needs scipy. Run `python -m pip install scipy` in the same interpreter. |
-| Fluctuation table says *no valid windows* | The signal never exceeded `SIGNAL_FRAC × peak` at any position — lower `SIGNAL_FRAC` or check the file actually has plasma signal. |
+| `No module named 'lab_scopes'` / `'scipy'` | Not installed in the interpreter you ran with. Re-run setup with `python -m pip install ...`. |
+| `No module named 'read_and_analyze'` | Run from the **LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`. |
+| `Install lab-scopes[hdf5] ...` | The `hdf5` extra (h5py) is missing — reinstall with `[hdf5,plot]`. |
+| Plot window never appears | `SHOW_PLOT=False`, `--no-show`, or a headless machine — use `SAVE_PLOT=True` instead. |
+| A shot reports as *skipped* | The acquisition marked it; the validator counts it `PASS` and plotting omits it. |
+| Fluctuation table says *no valid windows* | Signal never exceeded `FLUCT_SIGNAL_FRAC × peak` — lower it, or check the file has plasma signal. |
 
 ---
 
-## 8. Fluctuation analysis — flattest/most-reproducible window
-
-[`fluctuation_analysis.py`](../fluctuation_analysis.py) answers a different
-question than the reader: **for each probe position, which short time window has
-the least fluctuation?** The filtering pipeline it relies on (and a sample-trace
-view of each filter stage) lives in
-[`filter_data.py`](../filter_data.py). "Least fluctuation" combines two things, both relative
-to the window mean so large steady signal beats small noisy signal:
-
-- **temporal flatness** — `(max − min) / |mean|` of the position's mean trace
-  over the window (signal doesn't change much *across* the window in time);
-- **shot-to-shot reproducibility** — `std-across-shots / |mean|` of the per-shot
-  window means (repeat shots agree).
-
-Their sum is the **score**; the lowest-score window wins per (scope, channel,
-position). Only windows where `|mean| > SIGNAL_FRAC × peak` are considered, so
-the search can't trivially pick the quiet pre-plasma region.
-
-Each raw trace is first **denoised in time** by `filter_data._filter_trace`: a
-median filter (`MED_SIZE` samples) removes spikes, then
-`scipy.ndimage.gaussian_filter1d` (width `GAUSS_SIGMA` samples) strips residual
-high-frequency noise, before the metrics are computed. To eyeball the effect of
-each stage on a sample trace, run
-`python -m read_and_analyze.filter_data`.
-
-### Run it
-
-There is **no command line** — all knobs are constants at the top of the two
-files. Filtering / file-selection knobs live in `filter_data.py`:
-
-```python
-DEFAULT_FILE = r"D:\data\LAPD\my_run.hdf5"
-SCOPE        = None    # None = all scopes; or e.g. "lpscope"
-CHANNELS     = None    # None = all channels; or e.g. ["C1", "C3"]
-MED_SIZE     = 5       # Median filter width in SAMPLES (spike removal); 1 = off
-GAUSS_SIGMA  = 5.0     # Gaussian time-smoothing width in SAMPLES; 0 = off
-SHOW_PLOT    = True
-SAVE_PLOT    = True
-```
-
-and the analysis-only knobs live in `fluctuation_analysis.py`:
-
-```python
-WINDOW_US    = 10.0    # window width (microseconds); rounds up to whole samples
-SIGNAL_FRAC  = 0.2     # window mean must exceed this fraction of the position's peak |mean|
-```
-
-Edit those, then run from the LAPD_DAQ repo root:
-
-```bash
-python -m read_and_analyze.fluctuation_analysis   # table + 4-panel analysis figure
-python -m read_and_analyze.filter_data            # raw / median / median+gaussian sample traces
-```
-
-It prints a per-position table sorted best-first (position, window-center time in
-ms, `flat_rel`, `scat_rel`, `score`, window mean voltage) and writes
-`plots/<base>_<scope>_fluctuation.png` (score-vs-position on top, the best
-position's repeat shots with the chosen window shaded on the bottom).
-
-> A 10 µs window on the test file's 800 ns timebase is 13 samples. At that
-> sampling the signal is nearly flat over the window, so `scat_rel`
-> (reproducibility) usually dominates the score — i.e. the ranking is effectively
-> "which position is most shot-to-shot reproducible."
-
-### As a library
-
-```python
-from read_and_analyze import find_quiet_window, plot_quiet_window
-
-recs = find_quiet_window(path, scope="lpscope", channels=["C3"])
-best = recs[0]   # sorted best (lowest score) first
-print(best["x"], best["t_center"], best["score"])
-
-plot_quiet_window(path, show=False, save=True)   # headless
-```
-
----
-
-## 9. SmartTrigger scan — "what would have triggered?"
-
-[`smart_trigger_analysis.py`](../smart_trigger_analysis.py) replays a LeCroy
-oscilloscope's **SmartTriggers** over the already-recorded traces. On the bench
-those fire live on anomalies in a signal's timing/amplitude parameters; here we
-scan each trace post-hoc and report the events a SmartTrigger *would* have
-caught. The four trigger types are each a separate, pure function of
-`(volts, tarr)` — unit-testable and reusable on their own:
-
-- **`detect_glitch`** — measures every positive-pulse width; nominal = median
-  width; flags pulses narrower than `nominal × (1 − EXCL_DELTA)` (the tutorial's
-  Glitch `<` hunt).
-- **`detect_runt`** — flags excursions that cross the lower level (`RUNT_LO_FRAC`)
-  but never reach the upper level (`RUNT_HI_FRAC`) before returning.
-- **`detect_slew`** — measures each edge's lo↔hi transition time; flags edges
-  outside `nominal × (1 ± EXCL_DELTA)` (too slow / too fast).
-- **`detect_interval`** — measures the period between successive rising edges;
-  flags periods outside `nominal × (1 ± EXCL_DELTA)` (e.g. the long interval
-  after a missed/runt cycle).
-
-Crossing levels are derived **per trace** from that trace's own (min..max) span
-(the software analog of the scope's *Find Level*), so the detectors work on
-Isat/Vfloat signals at any absolute scale. Nominals come from the **median** of
-the measured population, robust against the rare outliers being hunted.
-
-Two scope-like preprocessing knobs apply before detection:
-
-- **`MATH`** — run a waveform-math op (`"derivative"` / `"integral"` / `"abs"`)
-  on the filtered trace first, mimicking triggering off a scope **Math** trace.
-- **`HOLDOFF_US`** — ignore the record before this time (µs from t=0), mimicking
-  trigger **holdoff**.
-
-Traces are denoised through `filter_data`'s median→Gaussian pipeline before
-detection so spike noise doesn't create false crossings.
-
-### Run it
-
-No command line — knobs are constants at the top of the file (it also reuses the
-filtering / file-selection knobs from `filter_data.py`):
-
-```python
-SHOTS        = None    # None = sample shots (first/middle/last per position); or e.g. [12, 57]
-HOLDOFF_US   = 0.0     # ignore the record before this time (us); mimics trigger holdoff
-MATH         = None    # None, or "derivative" / "integral" / "abs"
-THRESH_FRAC  = 0.5     # main crossing level (fraction of the trace's span)
-EXCL_DELTA   = 0.25    # |value - nominal|/nominal beyond this is anomalous
-# plus RUNT_LO/HI_FRAC, SLEW_LO/HI_FRAC, HYST_FRAC
-```
-
-Then from the LAPD_DAQ repo root:
-
-```bash
-python -m read_and_analyze.smart_trigger_analysis   # table + per-shot scan figure
-```
-
-It prints a table per (scope, channel, shot, kind) with the measured nominal and
-flagged-event count (plus per-kind totals), and writes
-`plots/<base>_<scope>_smart_triggers.png` — one panel per scanned shot showing
-the scanned signal, the derived crossing levels, the holdoff band, and a shaded
-span per detected event colored by kind.
-
-### As a library
-
-```python
-from read_and_analyze import analyze_smart_triggers, plot_smart_triggers, detect_glitch
-
-recs = analyze_smart_triggers(path, scope="lpscope", channels=["C1"], shots=[12, 57])
-for r in recs:
-    print(r["channel"], r["shot"], r["kind"], r["n_events"])
-
-# the detectors stand alone on any (volts, tarr):
-res = detect_glitch(volts, tarr)            # {"events": [...], "nominal": ..., "n": ...}
-
-plot_smart_triggers(path, math="derivative", show=False, save=True)   # headless
-```
-
----
-
-*Generated as documentation for the `read_and_analyze` package on the
-`feature/read-analyze-data` branch. Keep in sync with
+*Documentation for the `read_and_analyze` package. Keep in sync with
+[`analysis_config.py`](../analysis_config.py) and
+[`smart_trigger_config.py`](../smart_trigger_config.py) (all user knobs),
 [`read_bmotion_data.py`](../read_bmotion_data.py),
 [`filter_data.py`](../filter_data.py),
-[`fluctuation_analysis.py`](../fluctuation_analysis.py), and
+[`fluctuation_analysis.py`](../fluctuation_analysis.py),
+[`plot_xy_map.py`](../plot_xy_map.py), and
 [`smart_trigger_analysis.py`](../smart_trigger_analysis.py).*

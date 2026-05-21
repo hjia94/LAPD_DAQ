@@ -38,17 +38,20 @@ except ImportError:  # fallback when run directly from inside the folder
     )
 
 # --------------------------------------------------------------------------------------
-# Knobs shared with the analysis module (no CLI — edit here)
+# Knobs (no CLI). User-changeable values live in analysis_config.py; they are
+# imported here and re-exported under the historical names so the sibling
+# analysis modules can keep doing `from filter_data import SCOPE, MED_SIZE, ...`.
 # --------------------------------------------------------------------------------------
-DEFAULT_FILE = r"D:\data\LAPD\00-LP-p21p29p41-Xline-test_2026-05-19.hdf5"
-SCOPE        = "lpscope"    # None = all scopes; or e.g. "lpscope"
-CHANNELS     = ["C1"]    # None = all channels; or e.g. ["C1", "C3"]
-MED_SIZE     = 5       # Median filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
-GAUSS_SIGMA  = 20     # Gaussian time-smoothing width in SAMPLES, applied after the median (high-freq noise)
-SHOW_PLOT    = True    # display the figure interactively
-SAVE_PLOT    = False    # write a PNG to a "plots/" subdir next to the data file
-
-_POS_TOL = 0.5         # round (x, y) to this (mm) so encoder float noise groups cleanly
+try:  # works as a package (python -m read_and_analyze.filter_data)
+    from read_and_analyze.analysis_config import (
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
+    )
+except ImportError:  # fallback when run directly from inside the folder
+    from analysis_config import (
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
+    )
 
 
 # ======================================================================================
@@ -202,13 +205,13 @@ def plot_sample_traces(path, scope=None, channels=None,
 
                     # Overlay all three stages on the same panel, one color per channel,
                     # increasing alpha so the final filtered trace reads on top.
-                    color = f"C{ci}"
+
                     pre = f"{ch} (shot {shot_used})"
-                    ax.plot(tarr * 1e3, raw, lw=0.6, color=color, alpha=0.25,
+                    ax.plot(tarr * 1e3, raw, lw=0.6, color='r', alpha=0.25,
                             label=f"{pre} raw")
-                    ax.plot(tarr * 1e3, med, lw=0.7, color=color, alpha=0.5,
+                    ax.plot(tarr * 1e3, med, lw=0.7, color='g', alpha=0.5,
                             label=f"{pre} +median")
-                    ax.plot(tarr * 1e3, full, lw=1.1, color=color, alpha=1.0,
+                    ax.plot(tarr * 1e3, full, lw=1.1, color='b', alpha=1.0,
                             label=f"{pre} +median+gaussian")
 
                 ax.set_title(f"x={x:.1f}, y={y:.1f}", fontsize=10, loc="left")

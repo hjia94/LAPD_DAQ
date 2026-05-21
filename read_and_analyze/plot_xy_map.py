@@ -35,38 +35,29 @@ try:  # works as a package (python -m read_and_analyze.plot_xy_map)
         read_positions, _scope_groups, _shot_numbers, _channel_names,
     )
     from read_and_analyze.filter_data import (
-        DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, _POS_TOL,
         _as_list, _shots_by_position, load_filtered_traces,
+    )
+    from read_and_analyze.analysis_config import (
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
+        XY_MODE as MODE, XY_T_START_US as T_START_US, XY_T_END_US as T_END_US,
+        XY_T_STEP_US as T_STEP_US, XY_SHOW_CONTOUR as SHOW_CONTOUR,
+        XY_N_CONTOURS as N_CONTOURS, XY_CMAP as CMAP,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
     )
     from filter_data import (
-        DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, _POS_TOL,
         _as_list, _shots_by_position, load_filtered_traces,
     )
-
-# --------------------------------------------------------------------------------------
-# Knobs (no CLI -- edit here)
-# --------------------------------------------------------------------------------------
-SCOPE        = "lpscope"   # None = all scopes; or e.g. "lpscope"
-CHANNELS     = ["C3"]      # None = all channels; or e.g. ["C1", "C3"]
-# Filtering (same meaning as filter_data); set MED_SIZE=1 / GAUSS_SIGMA=0 to disable.
-# Imported defaults are reused; override here if you want this map filtered differently.
-
-# --- 2D-map-specific knobs ---
-MODE         = "range"     # "range" = mean over [T_START_US, T_END_US]; "step" = value at T_STEP_US
-T_START_US   = 4000.0         # window start (us), used when MODE == "range"
-T_END_US     = 4500.0       # window end   (us), used when MODE == "range"
-T_STEP_US    = 100.0        # snapshot time (us), used when MODE == "step"
-
-SHOW_CONTOUR = False       # overlay contour lines on top of the image
-N_CONTOURS   = 8           # number of contour levels when SHOW_CONTOUR is True
-CMAP         = "viridis"   # imshow colormap
-
-SHOW_PLOT    = True        # display the figure interactively
-SAVE_PLOT    = False       # write a PNG to a "plots/" subdir next to the data file
+    from analysis_config import (
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
+        XY_MODE as MODE, XY_T_START_US as T_START_US, XY_T_END_US as T_END_US,
+        XY_T_STEP_US as T_STEP_US, XY_SHOW_CONTOUR as SHOW_CONTOUR,
+        XY_N_CONTOURS as N_CONTOURS, XY_CMAP as CMAP,
+    )
 
 
 # ======================================================================================

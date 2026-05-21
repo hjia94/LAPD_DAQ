@@ -2,25 +2,42 @@
 """
 Configuration knobs for :mod:`read_and_analyze.smart_trigger_analysis`.
 
-All settings for the SmartTrigger scan live here, grouped by trigger mode so
-each detector can be tuned independently. Edit the values and re-run
+Every user-changeable setting for the SmartTrigger scan lives here -- nothing
+needs to be edited in ``smart_trigger_analysis.py``. The knobs are grouped into
+clearly separated sections: input/output, trace selection & filtering,
+preprocessing, then one section per trigger mode so each detector can be tuned
+independently. Edit the values and re-run
 ``python -m read_and_analyze.smart_trigger_analysis`` -- there is no command
-line. Filtering / file-selection knobs (DEFAULT_FILE, SCOPE, CHANNELS,
-MED_SIZE, GAUSS_SIGMA) still live in ``filter_data.py`` and are shared.
+line.
 
 Levels are fractions of each trace's own (min..max) span (the software analog of
 the scope's "Find Level"), so they are dimensionless and work on signals of any
 absolute scale. EXCL_DELTA is the exclusion band: a measured value is flagged
 when ``|value - nominal| / nominal`` exceeds it.
 
+The shared knobs (input file, filtering window) come from
+``analysis_config.py`` so there is a single source of truth; this file adds the
+SmartTrigger-specific ones.
+
 Created May.2026
 @author: Jia Han
 """
 
+try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
+    from read_and_analyze.analysis_config import (
+        DATA_FILE, MED_SIZE, GAUSS_SIGMA,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS,
+    )
+except ImportError:  # fallback when run directly from inside the folder
+    from analysis_config import (
+        DATA_FILE, MED_SIZE, GAUSS_SIGMA,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS,
+    )
+
 # ======================================================================================
-# General -- input file, run scope, output, and shared preprocessing
+# General -- output and preprocessing
+# (DATA_FILE / SCOPE / CHANNELS / MED_SIZE / GAUSS_SIGMA come from analysis_config above)
 # ======================================================================================
-DATA_FILE  = r"D:\data\LAPD\00-LP-p21p29p41-Xline-test_2026-05-19.hdf5"  # HDF5 file to scan
 SHOW_PLOT  = False   # display the figure interactively
 SAVE_PLOT  = True    # write a PNG to a "plots/" subdir next to the data file
 SHOTS      = None    # None = sample shots (first/middle/last per position); or e.g. [12, 57]

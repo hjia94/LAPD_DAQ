@@ -51,7 +51,6 @@ try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
         _channel_names, _sample_shots,
     )
     from read_and_analyze.filter_data import (
-        SCOPE, CHANNELS, MED_SIZE, GAUSS_SIGMA,
         _as_list, _filter_trace,
     )
 except ImportError:  # fallback when run directly from inside the folder
@@ -60,7 +59,6 @@ except ImportError:  # fallback when run directly from inside the folder
         _channel_names, _sample_shots,
     )
     from filter_data import (
-        SCOPE, CHANNELS, MED_SIZE, GAUSS_SIGMA,
         _as_list, _filter_trace,
     )
 
@@ -72,7 +70,11 @@ except ImportError:  # fallback when run directly from inside the folder
     import smart_trigger_config as cfg
 
 # General knobs hoisted to module level for convenience / backwards compat.
-DEFAULT_FILE = cfg.DATA_FILE   # input HDF5 file (lives in smart_trigger_config, not filter_data)
+DEFAULT_FILE = cfg.DATA_FILE   # input HDF5 file (shared via analysis_config)
+SCOPE       = cfg.SCOPE
+CHANNELS    = cfg.CHANNELS
+MED_SIZE    = cfg.MED_SIZE
+GAUSS_SIGMA = cfg.GAUSS_SIGMA
 SHOW_PLOT  = cfg.SHOW_PLOT
 SAVE_PLOT  = cfg.SAVE_PLOT
 SHOTS      = cfg.SHOTS

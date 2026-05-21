@@ -37,25 +37,25 @@ try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
         read_positions, _scope_groups, _shot_numbers, _channel_names,
     )
     from read_and_analyze.filter_data import (
-        DEFAULT_FILE, SCOPE, CHANNELS, MED_SIZE, GAUSS_SIGMA,
-        SHOW_PLOT, SAVE_PLOT, _POS_TOL,
         _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
+    )
+    from read_and_analyze.analysis_config import (
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
+        FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
     )
     from filter_data import (
-        DEFAULT_FILE, SCOPE, CHANNELS, MED_SIZE, GAUSS_SIGMA,
-        SHOW_PLOT, SAVE_PLOT, _POS_TOL,
         _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
     )
-
-# --------------------------------------------------------------------------------------
-# Analysis-only knobs (filtering knobs live in filter_data)
-# --------------------------------------------------------------------------------------
-WINDOW_US    = 10.0    # analysis window width (microseconds)
-SIGNAL_FRAC  = 0     # window mean must exceed this fraction of the position's peak |mean|
+    from analysis_config import (
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
+        FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
+    )
 
 
 # ======================================================================================

@@ -26,12 +26,16 @@ from lab_scopes.io.hdf5 import (
     read_scope_channel_descriptions,
 )
 
-# Default file so the script runs with no arguments during development.
-DEFAULT_FILE = r"D:\data\LAPD\00-LP-p21p29p41-Xline-test_2026-05-19.hdf5"
-
-# Plot toggles (independent on/off switches).
-SHOW_PLOT = True   # display figures interactively
-SAVE_PLOT = False   # write PNGs to a "plots/" subdir next to the data file
+# User-changeable knobs live in analysis_config.py (single source of truth);
+# imported here under the historical names so the rest of the module is unchanged.
+try:  # works as a package (python -m read_and_analyze.read_bmotion_data)
+    from read_and_analyze.analysis_config import (
+        DATA_FILE as DEFAULT_FILE, SHOW_PLOT, SAVE_PLOT,
+    )
+except ImportError:  # fallback when run directly from inside the folder
+    from analysis_config import (
+        DATA_FILE as DEFAULT_FILE, SHOW_PLOT, SAVE_PLOT,
+    )
 
 NON_SCOPE_GROUPS = {"Configuration", "Control"}  # root groups that aren't scopes
 WAVEDESC_BYTES = 346                              # LeCroy header size
