@@ -22,8 +22,12 @@ _FLUCTUATION_NAMES = (
     "find_quiet_window",
     "plot_quiet_window",
 )
+_FILTER_NAMES = (
+    "plot_sample_traces",
+    "load_filtered_traces",
+)
 
-__all__ = [*_READER_NAMES, *_FLUCTUATION_NAMES]
+__all__ = [*_READER_NAMES, *_FLUCTUATION_NAMES, *_FILTER_NAMES]
 
 
 def __getattr__(name):
@@ -31,6 +35,9 @@ def __getattr__(name):
         from . import read_bmotion_data
         return getattr(read_bmotion_data, name)
     if name in _FLUCTUATION_NAMES:
-        from . import analysis_fluctuation
-        return getattr(analysis_fluctuation, name)
+        from . import fluctuation_analysis
+        return getattr(fluctuation_analysis, name)
+    if name in _FILTER_NAMES:
+        from . import filter_data
+        return getattr(filter_data, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -2,21 +2,22 @@
 """
 Find, per probe position, the time window with the least fluctuation.
 
-For each grid position the repeat shots are grouped, denoised in time (a median
-filter to remove spikes, then a Gaussian to smooth high-freq noise), then a
-fixed-width window is slid
-across the record to find where the signal is both:
+For each grid position the repeat shots are grouped and denoised in time (see
+:mod:`read_and_analyze.filter_data`), then a fixed-width window is slid across
+the record to find where the signal is both:
   * flat in time          -> small (max-min)/|mean| of the per-position mean trace
   * reproducible per shot  -> small std-across-shots / |mean| of the window mean
 restricted to windows where there is actual signal (|mean| above a fraction of
 the position's peak). The two relative terms are summed into a score; the
 lowest-score window wins for each (scope, channel, position).
 
-Reading/decoding is delegated to ``lab_scopes.io.hdf5``; position/shot helpers
-are reused from the sibling :mod:`read_and_analyze.read_bmotion_data`.
+Filtering, shot grouping, and trace loading are imported from
+:mod:`read_and_analyze.filter_data`; reading/decoding is delegated to
+``lab_scopes.io.hdf5``.
 
-There is NO command line; all knobs are the constants below. Run with:
-    python -m read_and_analyze.analysis_fluctuation
+There is NO command line; all knobs are the constants below (filtering knobs
+live in ``filter_data``). Run with:
+    python -m read_and_analyze.fluctuation_analysis
 Edit DEFAULT_FILE / the constants to change the file or parameters.
 
 Setup (once):  python -m pip install scipy
@@ -29,81 +30,32 @@ import math
 import os
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, median_filter
 
 from lab_scopes.io.hdf5 import read_hdf5_scope_data, read_hdf5_scope_tarr
-try:  # works as a package (python -m read_and_analyze.analysis_fluctuation)
+try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
     from read_and_analyze.read_bmotion_data import (
-        read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
+        read_positions, _scope_groups, _shot_numbers, _channel_names,
+    )
+    from read_and_analyze.filter_data import (
+        DEFAULT_FILE, SCOPE, CHANNELS, MED_SIZE, GAUSS_SIGMA,
+        SHOW_PLOT, SAVE_PLOT, _POS_TOL,
+        _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
-        read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
+        read_positions, _scope_groups, _shot_numbers, _channel_names,
+    )
+    from filter_data import (
+        DEFAULT_FILE, SCOPE, CHANNELS, MED_SIZE, GAUSS_SIGMA,
+        SHOW_PLOT, SAVE_PLOT, _POS_TOL,
+        _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
     )
 
 # --------------------------------------------------------------------------------------
-# Knobs (no CLI — edit here)
+# Analysis-only knobs (filtering knobs live in filter_data)
 # --------------------------------------------------------------------------------------
-DEFAULT_FILE = r"D:\data\LAPD\00-LP-p21p29p41-Xline-test_2026-05-19.hdf5"
-SCOPE        = "lpscope"    # None = all scopes; or e.g. "lpscope"
-CHANNELS     = ["C3"]    # None = all channels; or e.g. ["C1", "C3"]
 WINDOW_US    = 10.0    # analysis window width (microseconds)
-MED_SIZE     = 5       # Median filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
-GAUSS_SIGMA  = 20     # Gaussian time-smoothing width in SAMPLES, applied after the median (high-freq noise)
 SIGNAL_FRAC  = 0     # window mean must exceed this fraction of the position's peak |mean|
-SHOW_PLOT    = True    # display the figure interactively
-SAVE_PLOT    = False    # write a PNG to a "plots/" subdir next to the data file
-
-_POS_TOL = 0.5         # round (x, y) to this (mm) so encoder float noise groups cleanly
-
-
-# ======================================================================================
-# Filtering
-# ======================================================================================
-
-def _filter_trace(volts, med_size, gauss_sigma):
-    """Denoise one trace along time: median filter first (removes spikes/outliers),
-    then a Gaussian (smooths residual high-freq noise). A med_size of 1 or a
-    gauss_sigma of 0 disables that stage."""
-    v = np.asarray(volts, dtype=float)
-    if med_size and med_size > 1:
-        v = median_filter(v, size=int(med_size))
-    if gauss_sigma and gauss_sigma > 0:
-        v = gaussian_filter1d(v, gauss_sigma)
-    return v
-
-
-def _as_list(channels):
-    """Accept None, a single channel string, or a sequence; return None or a list."""
-    if channels is None:
-        return None
-    if isinstance(channels, str):
-        return [channels]
-    return list(channels)
-
-
-# ======================================================================================
-# Grouping
-# ======================================================================================
-
-def _shots_by_position(f, scope, positions):
-    """Map each grid position to its non-skipped repeat shots.
-
-    Returns ``{(x, y): [shot_num, ...]}`` with (x, y) rounded to ``_POS_TOL`` so
-    repeat shots at the same nominal position group together.
-    """
-    sg = f[scope]
-    groups = {}
-    for s in _shot_numbers(sg):
-        shot = sg.get(f"shot_{s}")
-        if shot is not None and shot.attrs.get("skipped", False):
-            continue
-        pos = _position_for_shot(positions, s)
-        if pos is None:
-            continue
-        key = (round(pos[0] / _POS_TOL) * _POS_TOL, round(pos[1] / _POS_TOL) * _POS_TOL)
-        groups.setdefault(key, []).append(s)
-    return groups
 
 
 # ======================================================================================
@@ -201,15 +153,7 @@ def _add_gradient_term(f, scope, recs, by_pos, tarr, med_size, gauss_sigma):
 def _best_window_for_position(f, scope, ch, x, y, shots, tarr, w, med_size, gauss_sigma, signal_frac):
     """Slide a length-``w`` window over one position's shots; return the best record."""
     # Stack the repeat-shot traces (filtered along time), dropping length mismatches.
-    rows = []
-    for s in shots:
-        try:
-            volts, _dt, _t0 = read_hdf5_scope_data(f, scope, ch, s)
-        except Exception:
-            continue
-        if len(volts) != len(tarr):
-            continue
-        rows.append(_filter_trace(volts, med_size, gauss_sigma))
+    rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
     if len(rows) < 2:  # need >= 2 shots to measure shot-to-shot scatter
         return None
 
@@ -262,15 +206,7 @@ def _cv_curve(traces, mean_trace, tarr, w):
 def _cv_curve_for_position(f, scope, ch, shots, tarr, w, med_size, gauss_sigma):
     """Return (window-center times, cv_shots per window) for one position, or
     (None, None) if it has too few usable shots."""
-    rows = []
-    for s in shots:
-        try:
-            volts, _dt, _t0 = read_hdf5_scope_data(f, scope, ch, s)
-        except Exception:
-            continue
-        if len(volts) != len(tarr):
-            continue
-        rows.append(_filter_trace(volts, med_size, gauss_sigma))
+    rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
     if len(rows) < 2:
         return None, None
     traces = np.vstack(rows)
@@ -281,18 +217,10 @@ def _cv_curve_for_position(f, scope, ch, shots, tarr, w, med_size, gauss_sigma):
 def _profile_value(f, scope, ch, shots, tarr, i0, i1, med_size, gauss_sigma):
     """Mean filtered signal over the fixed sample window [i0:i1], averaged across
     a position's repeat shots. Returns None if no usable shots."""
-    vals = []
-    for s in shots:
-        try:
-            volts, _dt, _t0 = read_hdf5_scope_data(f, scope, ch, s)
-        except Exception:
-            continue
-        if len(volts) != len(tarr):
-            continue
-        vf = _filter_trace(volts, med_size, gauss_sigma)
-        vals.append(float(vf[i0:i1].mean()))
-    if not vals:
+    rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
+    if not rows:
         return None
+    vals = [float(vf[i0:i1].mean()) for vf in rows]
     return float(np.mean(vals))
 
 
@@ -437,14 +365,8 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
             # --- bottom: best (lowest-score) position, repeat shots + shaded window ---
             key = (round(best["x"] / _POS_TOL) * _POS_TOL,
                    round(best["y"] / _POS_TOL) * _POS_TOL)
-            for s in by_pos.get(key, []):
-                try:
-                    volts, _dt, _t0 = read_hdf5_scope_data(f, sc, best["channel"], s)
-                except Exception:
-                    continue
-                if len(volts) != len(tarr):
-                    continue
-                vf = _filter_trace(volts, med_size, gauss_sigma)
+            for vf in load_filtered_traces(f, sc, best["channel"], by_pos.get(key, []),
+                                           tarr, med_size, gauss_sigma):
                 ax_trace.plot(tarr * 1e3, vf, lw=0.7, alpha=0.7)
             ax_trace.axvspan(best["t_start"] * 1e3, best["t_end"] * 1e3,
                              color="orange", alpha=0.3, label="chosen window")

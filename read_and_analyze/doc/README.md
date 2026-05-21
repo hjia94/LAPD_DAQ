@@ -234,9 +234,11 @@ gain/offset taken from the per-channel WAVEDESC header (handled by `lab_scopes`)
 
 ## 8. Fluctuation analysis — flattest/most-reproducible window
 
-[`analysis_fluctuation.py`](../analysis_fluctuation.py) answers a different
+[`fluctuation_analysis.py`](../fluctuation_analysis.py) answers a different
 question than the reader: **for each probe position, which short time window has
-the least fluctuation?** "Least fluctuation" combines two things, both relative
+the least fluctuation?** The filtering pipeline it relies on (and a sample-trace
+view of each filter stage) lives in
+[`filter_data.py`](../filter_data.py). "Least fluctuation" combines two things, both relative
 to the window mean so large steady signal beats small noisy signal:
 
 - **temporal flatness** — `(max − min) / |mean|` of the position's mean trace
@@ -248,29 +250,40 @@ Their sum is the **score**; the lowest-score window wins per (scope, channel,
 position). Only windows where `|mean| > SIGNAL_FRAC × peak` are considered, so
 the search can't trivially pick the quiet pre-plasma region.
 
-Each raw trace is first **smoothed in time** with `scipy.ndimage.gaussian_filter1d`
-(width `GAUSS_SIGMA` samples) to strip high-frequency noise before the metrics
-are computed.
+Each raw trace is first **denoised in time** by `filter_data._filter_trace`: a
+median filter (`MED_SIZE` samples) removes spikes, then
+`scipy.ndimage.gaussian_filter1d` (width `GAUSS_SIGMA` samples) strips residual
+high-frequency noise, before the metrics are computed. To eyeball the effect of
+each stage on a sample trace, run
+`python -m read_and_analyze.filter_data`.
 
 ### Run it
 
-There is **no command line** — all knobs are constants at the top of the file:
+There is **no command line** — all knobs are constants at the top of the two
+files. Filtering / file-selection knobs live in `filter_data.py`:
 
 ```python
 DEFAULT_FILE = r"D:\data\LAPD\my_run.hdf5"
 SCOPE        = None    # None = all scopes; or e.g. "lpscope"
 CHANNELS     = None    # None = all channels; or e.g. ["C1", "C3"]
-WINDOW_US    = 10.0    # window width (microseconds); rounds up to whole samples
-GAUSS_SIGMA  = 5.0     # Gaussian time-smoothing width in SAMPLES
-SIGNAL_FRAC  = 0.2     # window mean must exceed this fraction of the position's peak |mean|
+MED_SIZE     = 5       # Median filter width in SAMPLES (spike removal); 1 = off
+GAUSS_SIGMA  = 5.0     # Gaussian time-smoothing width in SAMPLES; 0 = off
 SHOW_PLOT    = True
 SAVE_PLOT    = True
+```
+
+and the analysis-only knobs live in `fluctuation_analysis.py`:
+
+```python
+WINDOW_US    = 10.0    # window width (microseconds); rounds up to whole samples
+SIGNAL_FRAC  = 0.2     # window mean must exceed this fraction of the position's peak |mean|
 ```
 
 Edit those, then run from the LAPD_DAQ repo root:
 
 ```bash
-python -m read_and_analyze.analysis_fluctuation
+python -m read_and_analyze.fluctuation_analysis   # table + 4-panel analysis figure
+python -m read_and_analyze.filter_data            # raw / median / median+gaussian sample traces
 ```
 
 It prints a per-position table sorted best-first (position, window-center time in
@@ -299,5 +312,6 @@ plot_quiet_window(path, show=False, save=True)   # headless
 
 *Generated as documentation for the `read_and_analyze` package on the
 `feature/read-analyze-data` branch. Keep in sync with
-[`read_bmotion_data.py`](../read_bmotion_data.py) and
-[`analysis_fluctuation.py`](../analysis_fluctuation.py).*
+[`read_bmotion_data.py`](../read_bmotion_data.py),
+[`filter_data.py`](../filter_data.py), and
+[`fluctuation_analysis.py`](../fluctuation_analysis.py).*
