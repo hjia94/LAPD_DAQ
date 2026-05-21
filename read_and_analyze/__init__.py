@@ -26,8 +26,16 @@ _FILTER_NAMES = (
     "plot_sample_traces",
     "load_filtered_traces",
 )
+_SMART_NAMES = (
+    "analyze_smart_triggers",
+    "plot_smart_triggers",
+    "detect_glitch",
+    "detect_runt",
+    "detect_slew",
+    "detect_interval",
+)
 
-__all__ = [*_READER_NAMES, *_FLUCTUATION_NAMES, *_FILTER_NAMES]
+__all__ = [*_READER_NAMES, *_FLUCTUATION_NAMES, *_FILTER_NAMES, *_SMART_NAMES]
 
 
 def __getattr__(name):
@@ -40,4 +48,7 @@ def __getattr__(name):
     if name in _FILTER_NAMES:
         from . import filter_data
         return getattr(filter_data, name)
+    if name in _SMART_NAMES:
+        from . import smart_trigger_analysis
+        return getattr(smart_trigger_analysis, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

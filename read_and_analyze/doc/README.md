@@ -310,8 +310,87 @@ plot_quiet_window(path, show=False, save=True)   # headless
 
 ---
 
+## 9. SmartTrigger scan — "what would have triggered?"
+
+[`smart_trigger_analysis.py`](../smart_trigger_analysis.py) replays a LeCroy
+oscilloscope's **SmartTriggers** over the already-recorded traces. On the bench
+those fire live on anomalies in a signal's timing/amplitude parameters; here we
+scan each trace post-hoc and report the events a SmartTrigger *would* have
+caught. The four trigger types are each a separate, pure function of
+`(volts, tarr)` — unit-testable and reusable on their own:
+
+- **`detect_glitch`** — measures every positive-pulse width; nominal = median
+  width; flags pulses narrower than `nominal × (1 − EXCL_DELTA)` (the tutorial's
+  Glitch `<` hunt).
+- **`detect_runt`** — flags excursions that cross the lower level (`RUNT_LO_FRAC`)
+  but never reach the upper level (`RUNT_HI_FRAC`) before returning.
+- **`detect_slew`** — measures each edge's lo↔hi transition time; flags edges
+  outside `nominal × (1 ± EXCL_DELTA)` (too slow / too fast).
+- **`detect_interval`** — measures the period between successive rising edges;
+  flags periods outside `nominal × (1 ± EXCL_DELTA)` (e.g. the long interval
+  after a missed/runt cycle).
+
+Crossing levels are derived **per trace** from that trace's own (min..max) span
+(the software analog of the scope's *Find Level*), so the detectors work on
+Isat/Vfloat signals at any absolute scale. Nominals come from the **median** of
+the measured population, robust against the rare outliers being hunted.
+
+Two scope-like preprocessing knobs apply before detection:
+
+- **`MATH`** — run a waveform-math op (`"derivative"` / `"integral"` / `"abs"`)
+  on the filtered trace first, mimicking triggering off a scope **Math** trace.
+- **`HOLDOFF_US`** — ignore the record before this time (µs from t=0), mimicking
+  trigger **holdoff**.
+
+Traces are denoised through `filter_data`'s median→Gaussian pipeline before
+detection so spike noise doesn't create false crossings.
+
+### Run it
+
+No command line — knobs are constants at the top of the file (it also reuses the
+filtering / file-selection knobs from `filter_data.py`):
+
+```python
+SHOTS        = None    # None = sample shots (first/middle/last per position); or e.g. [12, 57]
+HOLDOFF_US   = 0.0     # ignore the record before this time (us); mimics trigger holdoff
+MATH         = None    # None, or "derivative" / "integral" / "abs"
+THRESH_FRAC  = 0.5     # main crossing level (fraction of the trace's span)
+EXCL_DELTA   = 0.25    # |value - nominal|/nominal beyond this is anomalous
+# plus RUNT_LO/HI_FRAC, SLEW_LO/HI_FRAC, HYST_FRAC
+```
+
+Then from the LAPD_DAQ repo root:
+
+```bash
+python -m read_and_analyze.smart_trigger_analysis   # table + per-shot scan figure
+```
+
+It prints a table per (scope, channel, shot, kind) with the measured nominal and
+flagged-event count (plus per-kind totals), and writes
+`plots/<base>_<scope>_smart_triggers.png` — one panel per scanned shot showing
+the scanned signal, the derived crossing levels, the holdoff band, and a shaded
+span per detected event colored by kind.
+
+### As a library
+
+```python
+from read_and_analyze import analyze_smart_triggers, plot_smart_triggers, detect_glitch
+
+recs = analyze_smart_triggers(path, scope="lpscope", channels=["C1"], shots=[12, 57])
+for r in recs:
+    print(r["channel"], r["shot"], r["kind"], r["n_events"])
+
+# the detectors stand alone on any (volts, tarr):
+res = detect_glitch(volts, tarr)            # {"events": [...], "nominal": ..., "n": ...}
+
+plot_smart_triggers(path, math="derivative", show=False, save=True)   # headless
+```
+
+---
+
 *Generated as documentation for the `read_and_analyze` package on the
 `feature/read-analyze-data` branch. Keep in sync with
 [`read_bmotion_data.py`](../read_bmotion_data.py),
-[`filter_data.py`](../filter_data.py), and
-[`fluctuation_analysis.py`](../fluctuation_analysis.py).*
+[`filter_data.py`](../filter_data.py),
+[`fluctuation_analysis.py`](../fluctuation_analysis.py), and
+[`smart_trigger_analysis.py`](../smart_trigger_analysis.py).*
