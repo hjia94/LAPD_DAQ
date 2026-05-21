@@ -58,10 +58,26 @@ def init_acquire_from_scope(scope, scope_name):
             - is_sequence: 0 for RealTime mode, 1 for sequence mode
             - time_array: Time array for the scope
     """
+    import traceback
+
     time_array = None
     is_sequence = None
 
     traces = scope.displayed_traces()
+
+    # Distinguish "scope reports no displayed traces" (nothing to acquire,
+    # e.g. no channel turned ON / armed) from "every displayed trace errored".
+    # Both end up returning (None, None), but the cause is different and the
+    # generic "no valid data" message hides which one happened.
+    if not traces:
+        print(
+            f"Warning: {scope_name} reports no displayed traces "
+            f"(valid_trace_names={scope.valid_trace_names!r}). "
+            f"Nothing to acquire - is a channel turned ON and the scope armed?"
+        )
+        return None, None
+
+    failures = []  # (trace, "ExcType: message") for every trace that errored
 
     for tr in traces:
         try:
@@ -81,12 +97,26 @@ def init_acquire_from_scope(scope, scope_name):
             break
 
         except Exception as e:
-            print(f"Error initializing {tr} from {scope_name}: {e}")
+            # Surface the real cause: the first failure gets a full traceback
+            # so the underlying lab_scopes error (e.g. LeCroyNoDataError,
+            # NotImplementedError, transport timeout) is visible in the log.
+            if not failures:
+                print(
+                    f"Error initializing {tr} from {scope_name}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                traceback.print_exc()
+            failures.append(f"{tr}: {type(e).__name__}: {e}")
             continue
 
     # Check if we got valid data
     if is_sequence is None or time_array is None:
-        print(f"Warning: Could not get valid data from any trace on {scope_name}")
+        print(
+            f"Warning: Could not get valid data from any trace on {scope_name}. "
+            f"Tried {len(traces)} displayed trace(s); all failed:"
+        )
+        for f in failures:
+            print(f"    - {f}")
         return None, None
 
     return is_sequence, time_array
