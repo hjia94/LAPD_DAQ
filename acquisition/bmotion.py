@@ -28,33 +28,20 @@ def _build_setup_array(mg):
     (non-2D, non-(x,y) axes, non-rectangular grids).
     """
     name = mg.config['name']
-    ml = mg.mb.motion_list
-    arr = np.asarray(ml.values, dtype=np.float64)
-    if arr.ndim != 2:
-        raise RuntimeError(
-            f"bmotion motion group '{name}' has motion_list of ndim={arr.ndim}; expected 2."
-        )
-    N, M = arr.shape
-    if M != 2:
-        raise RuntimeError(
-            f"bmotion currently supports 2D motion only; motion group '{name}' has M={M}"
-        )
+    ml = mg.mb.motion_list.values
+    N, M = ml.shape
     axis_labels = tuple(str(s).lower() for s in ml.coords['space'].values)
     if axis_labels != ('x', 'y'):
         raise RuntimeError(
             f"bmotion expects axis labels ('x','y'); motion group '{name}' has {axis_labels}"
         )
-    xpos = np.unique(arr[:, 0])
-    ypos = np.unique(arr[:, 1])
-    if len(xpos) * len(ypos) != N:
-        raise RuntimeError(
-            f"bmotion requires a rectangular grid; motion group '{name}' "
-            f"has N={N} but len(xpos)*len(ypos)={len(xpos) * len(ypos)}"
-        )
+    xpos = np.unique(ml[:, 0])
+    ypos = np.unique(ml[:, 1])
+    
     setup = np.zeros(N, dtype=_POSITION_DTYPE)
     setup['shot_num'] = np.arange(1, N + 1)
-    setup['x'] = arr[:, 0]
-    setup['y'] = arr[:, 1]
+    setup['x'] = ml[:, 0]
+    setup['y'] = ml[:, 1]
     return setup, xpos, ypos
 
 
