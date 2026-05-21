@@ -34,9 +34,9 @@ logging.basicConfig(
 '''
 User set following
 '''
-exp_name = '11-Bdot-p20p28-Xline(forward)-He1kG300G-5900A'  # experiment name
+exp_name = '03-LP-p21p29p41-Xline-Helium'  # experiment name
 date = datetime.date.today()
-base_path = r"E:\Shadow data\Energetic_Electron_Ring\AUG2025"
+base_path = r"E:\Shadow data\Pat"
 hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
 config_path = os.path.join(base_path, 'experiment_config.txt')
 toml_path = os.path.join(base_path, 'bmotion_config.toml')
