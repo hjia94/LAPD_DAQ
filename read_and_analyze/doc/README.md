@@ -70,10 +70,10 @@ FLUCT_WINDOW_US   = 10.0   # window width (us) slid across the record
 FLUCT_SIGNAL_FRAC = 0      # window |mean| must exceed this fraction of the position's peak
 
 # XY_MAP — plot_xy_map.py only
-XY_MODE         = "range"  # "range" = mean over [T_START_US, T_END_US]; "step" = value at T_STEP_US
-XY_T_START_US   = 4000.0   # range start (us)
-XY_T_END_US     = 4500.0   # range end (us)
-XY_T_STEP_US    = 100.0    # snapshot time (us), used when XY_MODE == "step"
+XY_MODE         = "range"  # "range" = mean over [T_START_MS, T_END_MS]; "step" = value at T_STEP_MS
+XY_T_START_MS   = 4.0      # range start (ms)
+XY_T_END_MS     = 4.5      # range end (ms)
+XY_T_STEP_MS    = 0.1      # snapshot time (ms), used when XY_MODE == "step"
 XY_SHOW_CONTOUR = False    # overlay contour lines
 XY_N_CONTOURS   = 8        # contour count when XY_SHOW_CONTOUR is True
 XY_CMAP         = "viridis"
@@ -95,12 +95,13 @@ SHOTS      = None    # None = sample shots (first/mid/last per position); or e.g
 HOLDOFF_US = 3000    # ignore the record before this time (us); mimics trigger holdoff
 MATH       = None    # None, or "derivative" / "integral" / "abs" (preprocess before detection)
 
-# one block per trigger mode (levels are fractions of each trace's min..max span;
-# EXCL_DELTA = the +/- band beyond which a measured value is flagged):
-GLITCH_THRESH_FRAC = 0.5;  GLITCH_HYST_FRAC = 0.05; GLITCH_EXCL_DELTA = 0.25
-RUNT_LO_FRAC = 0.3;        RUNT_HI_FRAC = 0.7
-SLEW_LO_FRAC = 0.1;        SLEW_HI_FRAC = 0.9;      SLEW_EXCL_DELTA = 0.25
-INTERVAL_THRESH_FRAC = 0.5; INTERVAL_HYST_FRAC = 0.05; INTERVAL_EXCL_DELTA = 0.25
+# one block per trigger mode. Levels are ABSOLUTE VOLTS; width/slew/interval
+# limits are NANOSECONDS. A value OUTSIDE [min, max] is flagged; a None bound
+# disables that side:
+GLITCH_LEVEL = 0.5; GLITCH_HYST = 0.05; GLITCH_MIN_WIDTH_NS = None; GLITCH_MAX_WIDTH_NS = 100.0
+RUNT_LO = 0.3;      RUNT_HI = 0.7
+SLEW_LO = 0.1;      SLEW_HI = 0.9;      SLEW_MIN_NS = None; SLEW_MAX_NS = 50.0
+INTERVAL_LEVEL = 0.5; INTERVAL_HYST = 0.05; INTERVAL_MIN_NS = None; INTERVAL_MAX_NS = None
 ```
 
 ---
@@ -138,16 +139,16 @@ region can't trivially win. Traces are denoised (median `MED_SIZE` → Gaussian
 ## SmartTrigger scan
 
 Replays a LeCroy scope's **SmartTriggers** over recorded traces, reporting the
-events each *would* have caught. Crossing levels are derived **per trace** from
-its own min..max span (the software analog of *Find Level*), so the detectors
-work at any absolute scale; nominal widths/periods use the **median** of the
-measured population (robust against the outliers being hunted). The four
-detectors are pure functions of `(volts, tarr)`:
+events each *would* have caught. Crossing levels are given in **absolute volts**
+and width/slew/interval limits in **nanoseconds** (matching the scope's front
+panel); a measured value is flagged when it falls **outside** the `[min, max]`
+band for that detector (a `None` bound disables that side). The four detectors
+are pure functions of `(volts, tarr)`:
 
-- **Glitch/Width** — flags pulses narrower than `nominal × (1 − GLITCH_EXCL_DELTA)`.
-- **Runt** — flags excursions that cross `RUNT_LO_FRAC` but never reach `RUNT_HI_FRAC`.
-- **Slew rate** — flags edges whose lo↔hi transition time is outside `nominal × (1 ± SLEW_EXCL_DELTA)`.
-- **Interval** — flags periods between rising edges outside `nominal × (1 ± INTERVAL_EXCL_DELTA)`.
+- **Glitch/Width** — flags pulses whose width is outside `[GLITCH_MIN_WIDTH_NS, GLITCH_MAX_WIDTH_NS]`.
+- **Runt** — flags excursions that cross `RUNT_LO` (V) but never reach `RUNT_HI` (V).
+- **Slew rate** — flags edges whose `SLEW_LO`↔`SLEW_HI` transition time is outside `[SLEW_MIN_NS, SLEW_MAX_NS]`.
+- **Interval** — flags periods between rising edges outside `[INTERVAL_MIN_NS, INTERVAL_MAX_NS]`.
 
 Two scope-like preprocessing knobs apply first: **`MATH`** (run derivative /
 integral / abs, like triggering off a Math trace) and **`HOLDOFF_US`** (ignore

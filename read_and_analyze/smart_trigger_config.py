@@ -4,18 +4,19 @@ Configuration knobs for :mod:`read_and_analyze.smart_trigger_analysis`.
 
 Every user-changeable setting for the SmartTrigger scan lives here -- nothing
 needs to be edited in ``smart_trigger_analysis.py``. The knobs are grouped into
-clearly separated sections: input/output, trace selection & filtering,
-preprocessing, then one section per trigger mode so each detector can be tuned
-independently. Edit the values and re-run
-``python -m read_and_analyze.smart_trigger_analysis`` -- there is no command
-line.
+clearly separated sections: input/output, preprocessing, then one section per
+trigger mode so each detector can be tuned independently. Edit the values and
+re-run ``python -m read_and_analyze.smart_trigger_analysis`` -- there is no
+command line.
 
-Levels are fractions of each trace's own (min..max) span (the software analog of
-the scope's "Find Level"), so they are dimensionless and work on signals of any
-absolute scale. EXCL_DELTA is the exclusion band: a measured value is flagged
-when ``|value - nominal| / nominal`` exceeds it.
+Levels are given in **absolute volts** (the same units as the recorded trace),
+matching how you would dial a level on the scope's front panel. Width / slew /
+interval limits are given in **nanoseconds** (ns), matching the scope's
+SmartTrigger time settings (HOLDOFF stays in microseconds, as before). A
+measured value is flagged when it falls OUTSIDE the [min, max] bounds you set
+for that detector; leave a bound at ``None`` to disable that side.
 
-The shared knobs (input file, filtering window) come from
+The shared knobs (input file, scope/channel, filtering) come from
 ``analysis_config.py`` so there is a single source of truth; this file adds the
 SmartTrigger-specific ones.
 
@@ -45,28 +46,38 @@ HOLDOFF_US = 3000    # ignore the record before this time (us from t=0); mimics 
 MATH       = None    # None = filtered trace as-is; or "derivative" / "integral" / "abs"
 
 # ======================================================================================
-# Glitch / Width trigger -- flag pulses NARROWER than the nominal width
+# Glitch / Width trigger -- flag pulses whose width is OUTSIDE [min, max]
+#   A pulse is the span between a rising and the next falling crossing of
+#   GLITCH_LEVEL (with GLITCH_HYST as the debounce band, both in volts).
+#   Set a bound to None to disable that side (e.g. only catch glitches that are
+#   too NARROW by setting GLITCH_MAX_WIDTH_NS = None).
 # ======================================================================================
-GLITCH_THRESH_FRAC = 0.5    # pulse-measuring level (fraction of the trace's span)
-GLITCH_HYST_FRAC   = 0.05   # hysteresis band (fraction of span) to debounce noisy crossings
-GLITCH_EXCL_DELTA  = 0.25   # flag a pulse when its width < nominal*(1 - this)
+GLITCH_LEVEL        = 0.1    # pulse-measuring level in VOLTS
+GLITCH_HYST         = 0.05   # hysteresis band in VOLTS to debounce noisy crossings
+GLITCH_MIN_WIDTH_NS = 10000   # flag pulses NARROWER than this (ns); None = no lower bound
+GLITCH_MAX_WIDTH_NS = None  # flag pulses WIDER than this (ns); None = no upper bound
 
 # ======================================================================================
-# Runt trigger -- flag pulses that cross LO but never reach HI
+# Runt trigger -- flag pulses that cross LO but never reach HI (both in volts)
 # ======================================================================================
-RUNT_LO_FRAC = 0.3    # lower level (fraction of span); a runt crosses this...
-RUNT_HI_FRAC = 0.7    # ...but never reaches this upper level before returning
+RUNT_LO = 0.1    # lower level in VOLTS; a runt crosses this...
+RUNT_HI = 0.2    # ...but never reaches this upper level (VOLTS) before returning
 
 # ======================================================================================
-# Slew-rate trigger -- flag edges whose LO<->HI transition time is off-nominal
+# Slew-rate trigger -- flag edges whose LO<->HI transition time is OUTSIDE [min, max]
+#   Levels in volts; transition-time bounds in ns. Set a bound to None to
+#   disable that side.
 # ======================================================================================
-SLEW_LO_FRAC   = 0.1    # lower level for the transition (fraction of span)
-SLEW_HI_FRAC   = 0.9    # upper level for the transition (fraction of span)
-SLEW_EXCL_DELTA = 0.25  # flag an edge when its transition time is outside nominal*(1 +/- this)
+SLEW_LO        = 0.1    # lower level in VOLTS for the transition
+SLEW_HI        = 0.9    # upper level in VOLTS for the transition
+SLEW_MIN_NS    = None   # flag edges FASTER than this LO<->HI time (ns); None = no lower bound
+SLEW_MAX_NS    = 50.0   # flag edges SLOWER than this LO<->HI time (ns); None = no upper bound
 
 # ======================================================================================
-# Interval trigger -- flag periods between rising edges that are off-nominal
+# Interval trigger -- flag periods between rising edges that are OUTSIDE [min, max]
+#   Edge level / hysteresis in volts; period bounds in ns.
 # ======================================================================================
-INTERVAL_THRESH_FRAC = 0.5   # rising-edge level (fraction of span)
-INTERVAL_HYST_FRAC   = 0.05  # hysteresis band (fraction of span)
-INTERVAL_EXCL_DELTA  = 0.25  # flag a period when it is outside nominal*(1 +/- this)
+INTERVAL_LEVEL   = 0.5    # rising-edge level in VOLTS
+INTERVAL_HYST    = 0.05   # hysteresis band in VOLTS
+INTERVAL_MIN_NS  = None   # flag periods SHORTER than this (ns); None = no lower bound
+INTERVAL_MAX_NS  = None   # flag periods LONGER than this (ns); None = no upper bound

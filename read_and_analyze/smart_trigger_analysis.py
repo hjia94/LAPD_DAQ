@@ -9,12 +9,12 @@ recorded in the bmotion HDF5 file, so this module runs a post-hoc "what would
 have triggered" pass: it scans each trace and reports the events a SmartTrigger
 would have caught.
 
-Crossing levels are derived **per trace** from that trace's own (min..max) span
-(the software analog of the scope's "Find Level"), so the detectors work on
-Isat/Vfloat signals of any absolute scale. Nominal width/period come from the
-**median** of the measured population on the trace (robust against the rare
-outliers we are hunting), mirroring the tutorial's "accumulate measurements,
-read the mean".
+Crossing levels are given in **absolute volts** (the same units as the recorded
+trace), matching how you would dial a level on the scope's front panel. Width /
+slew / interval limits are given in **nanoseconds** and a measured value is
+flagged when it falls OUTSIDE the [min, max] bounds set for that detector
+(either bound may be ``None`` to disable that side) -- the digital analog of the
+scope's SmartTrigger time settings.
 
 Each SmartTrigger type is a separate, pure function of ``(volts, tarr)`` so they
 are unit-testable without HDF5 and reusable on their own:
@@ -124,16 +124,22 @@ def _holdoff_slice(volts, tarr, holdoff_us):
 
 
 # ======================================================================================
-# Level / edge primitives shared by the detectors
+# Edge primitives shared by the detectors
 # ======================================================================================
 
-def _levels(volts, *fracs):
-    """Map fractional levels onto a trace's (min..max) span; return absolute
-    levels. ``_levels(v, 0.1, 0.9)`` -> (lo, hi) at 10% / 90% of the span."""
-    v = np.asarray(volts, dtype=float)
-    vmin, vmax = float(np.min(v)), float(np.max(v))
-    span = vmax - vmin
-    return tuple(vmin + frac * span for frac in fracs)
+def _ns_to_s(value_ns):
+    """Convert a nanosecond bound to seconds; pass ``None`` through unchanged."""
+    return None if value_ns is None else value_ns * 1e-9
+
+
+def _outside(value_s, min_s, max_s):
+    """True when ``value_s`` falls outside the [min_s, max_s] band; a ``None``
+    bound disables that side."""
+    if min_s is not None and value_s < min_s:
+        return True
+    if max_s is not None and value_s > max_s:
+        return True
+    return False
 
 
 def _interp_cross(tarr, volts, i, level):
@@ -197,41 +203,43 @@ def _result(events, nominal):
             "n": len(events)}
 
 
-def detect_glitch(volts, tarr, thresh_frac=None, hyst_frac=None, excl_delta=None):
-    """Glitch hunt: flag positive pulses whose width is BELOW the nominal width.
+def detect_glitch(volts, tarr, level=None, hyst=None, min_width_ns=None, max_width_ns=None):
+    """Glitch / width hunt: flag positive pulses whose width is OUTSIDE the
+    [min, max] bounds.
 
-    Pulses are measured at the main level (``thresh_frac`` of the span, with a
-    ``hyst_frac`` hysteresis band). Nominal = median pulse width; a pulse is a
-    glitch when its width < ``nominal*(1-excl_delta)`` -- the tutorial's
-    Glitch ``<`` condition. Returns the uniform detector dict.
+    Pulses are measured at ``level`` volts (with a ``hyst`` volt hysteresis band).
+    A pulse is flagged when its width is below ``min_width_ns`` or above
+    ``max_width_ns`` (either may be ``None`` to disable that side). ``nominal`` in
+    the result is the median measured width, for reference only. Returns the
+    uniform detector dict.
     """
-    thresh_frac = cfg.GLITCH_THRESH_FRAC if thresh_frac is None else thresh_frac
-    hyst_frac = cfg.GLITCH_HYST_FRAC if hyst_frac is None else hyst_frac
-    excl_delta = cfg.GLITCH_EXCL_DELTA if excl_delta is None else excl_delta
+    level = cfg.GLITCH_LEVEL if level is None else level
+    hyst = cfg.GLITCH_HYST if hyst is None else hyst
+    if min_width_ns is None:
+        min_width_ns = cfg.GLITCH_MIN_WIDTH_NS
+    if max_width_ns is None:
+        max_width_ns = cfg.GLITCH_MAX_WIDTH_NS
 
-    mid, = _levels(volts, thresh_frac)
-    half = (_levels(volts, hyst_frac)[0] - _levels(volts, 0.0)[0])  # hyst band in volts
-    lo, hi = mid - half, mid + half
+    lo, hi = level - hyst, level + hyst
     rising, falling = _edges(volts, tarr, lo, hi)
     pulses = _pulses(rising, falling)
-    if len(pulses) < 2:
+    if not pulses:
         return _result([], None)
     widths = np.array([p[2] for p in pulses], dtype=float)
     nominal = float(np.median(widths))
-    floor = nominal * (1.0 - excl_delta)
+    min_s, max_s = _ns_to_s(min_width_ns), _ns_to_s(max_width_ns)
     events = [{"t_start": ts, "t_end": te, "value": w, "kind": "glitch"}
-              for (ts, te, w) in pulses if w < floor]
+              for (ts, te, w) in pulses if _outside(w, min_s, max_s)]
     return _result(events, nominal)
 
 
-def detect_runt(volts, tarr, lo_frac=None, hi_frac=None):
+def detect_runt(volts, tarr, lo=None, hi=None):
     """Runt: flag excursions that cross the LO level but never reach HI before
-    returning below LO. ``lo_frac``/``hi_frac`` set the two levels as fractions
-    of the span. Event spans the LO-up to the matching LO-down crossing.
+    returning below LO. ``lo``/``hi`` are the two levels in VOLTS. Event spans
+    the LO-up to the matching LO-down crossing.
     """
-    lo_frac = cfg.RUNT_LO_FRAC if lo_frac is None else lo_frac
-    hi_frac = cfg.RUNT_HI_FRAC if hi_frac is None else hi_frac
-    lo, hi = _levels(volts, lo_frac, hi_frac)
+    lo = cfg.RUNT_LO if lo is None else lo
+    hi = cfg.RUNT_HI if hi is None else hi
 
     v = np.asarray(volts, dtype=float)
     events = []
@@ -259,15 +267,18 @@ def detect_runt(volts, tarr, lo_frac=None, hi_frac=None):
     return _result(events, None)
 
 
-def detect_slew(volts, tarr, lo_frac=None, hi_frac=None, excl_delta=None):
+def detect_slew(volts, tarr, lo=None, hi=None, min_ns=None, max_ns=None):
     """Slew rate: measure each edge's LO<->HI transition time; flag edges whose
-    transition time is OUTSIDE ``nominal*(1 +/- excl_delta)`` (slow or fast edge).
-    Nominal = median transition time over all rising and falling edges.
+    transition time is OUTSIDE the [min, max] bounds (faster than ``min_ns`` or
+    slower than ``max_ns``; either may be ``None``). ``lo``/``hi`` are levels in
+    VOLTS. ``nominal`` in the result is the median transition time, for reference.
     """
-    lo_frac = cfg.SLEW_LO_FRAC if lo_frac is None else lo_frac
-    hi_frac = cfg.SLEW_HI_FRAC if hi_frac is None else hi_frac
-    excl_delta = cfg.SLEW_EXCL_DELTA if excl_delta is None else excl_delta
-    lo, hi = _levels(volts, lo_frac, hi_frac)
+    lo = cfg.SLEW_LO if lo is None else lo
+    hi = cfg.SLEW_HI if hi is None else hi
+    if min_ns is None:
+        min_ns = cfg.SLEW_MIN_NS
+    if max_ns is None:
+        max_ns = cfg.SLEW_MAX_NS
 
     v = np.asarray(volts, dtype=float)
     transitions = []  # (t_start, t_end, dt)
@@ -285,37 +296,39 @@ def detect_slew(volts, tarr, lo_frac=None, hi_frac=None, excl_delta=None):
             t_lo = _interp_cross(tarr, v, i, lo)
             transitions.append((last_hi, t_lo, t_lo - last_hi))
             last_hi = None
-    if len(transitions) < 2:
+    if not transitions:
         return _result([], None)
     dts = np.array([t[2] for t in transitions], dtype=float)
     nominal = float(np.median(dts))
-    lo_b, hi_b = nominal * (1.0 - excl_delta), nominal * (1.0 + excl_delta)
+    min_s, max_s = _ns_to_s(min_ns), _ns_to_s(max_ns)
     events = [{"t_start": float(ts), "t_end": float(te), "value": float(d), "kind": "slew"}
-              for (ts, te, d) in transitions if d < lo_b or d > hi_b]
+              for (ts, te, d) in transitions if _outside(d, min_s, max_s)]
     return _result(events, nominal)
 
 
-def detect_interval(volts, tarr, thresh_frac=None, hyst_frac=None, excl_delta=None):
-    """Interval: measure the period between successive rising edges at the main
-    level; flag periods OUTSIDE ``nominal*(1 +/- excl_delta)`` (e.g. the long
-    interval after a missed/runt cycle). Nominal = median period.
+def detect_interval(volts, tarr, level=None, hyst=None, min_ns=None, max_ns=None):
+    """Interval: measure the period between successive rising edges at ``level``
+    volts; flag periods OUTSIDE the [min, max] bounds (shorter than ``min_ns`` or
+    longer than ``max_ns``; either may be ``None``). ``nominal`` in the result is
+    the median period, for reference.
     """
-    thresh_frac = cfg.INTERVAL_THRESH_FRAC if thresh_frac is None else thresh_frac
-    hyst_frac = cfg.INTERVAL_HYST_FRAC if hyst_frac is None else hyst_frac
-    excl_delta = cfg.INTERVAL_EXCL_DELTA if excl_delta is None else excl_delta
+    level = cfg.INTERVAL_LEVEL if level is None else level
+    hyst = cfg.INTERVAL_HYST if hyst is None else hyst
+    if min_ns is None:
+        min_ns = cfg.INTERVAL_MIN_NS
+    if max_ns is None:
+        max_ns = cfg.INTERVAL_MAX_NS
 
-    mid, = _levels(volts, thresh_frac)
-    half = (_levels(volts, hyst_frac)[0] - _levels(volts, 0.0)[0])
-    lo, hi = mid - half, mid + half
+    lo, hi = level - hyst, level + hyst
     rising, _falling = _edges(volts, tarr, lo, hi)
-    if len(rising) < 3:  # need >= 2 periods to have a meaningful median
+    if len(rising) < 2:  # need >= 1 period to measure
         return _result([], None)
     periods = np.diff(rising)
     nominal = float(np.median(periods))
-    lo_b, hi_b = nominal * (1.0 - excl_delta), nominal * (1.0 + excl_delta)
+    min_s, max_s = _ns_to_s(min_ns), _ns_to_s(max_ns)
     events = []
     for k, p in enumerate(periods):
-        if p < lo_b or p > hi_b:
+        if _outside(p, min_s, max_s):
             events.append({"t_start": float(rising[k]), "t_end": float(rising[k + 1]),
                            "value": float(p), "kind": "interval"})
     return _result(events, nominal)
@@ -419,8 +432,12 @@ def _print_table(records):
     holdoff = next((r["holdoff_us"] for r in records), HOLDOFF_US)
     print(f"math={math}   holdoff={holdoff:g} us   "
           f"median={MED_SIZE:g} samples   gauss_sigma={GAUSS_SIGMA:g} samples")
-    print(f"excl_delta: glitch={cfg.GLITCH_EXCL_DELTA:g}  slew={cfg.SLEW_EXCL_DELTA:g}  "
-          f"interval={cfg.INTERVAL_EXCL_DELTA:g}")
+
+    def _bnd(lo, hi):  # format an [min, max] ns band, "-" for an open side
+        return f"[{'-' if lo is None else f'{lo:g}'}, {'-' if hi is None else f'{hi:g}'}] ns"
+    print(f"bounds: glitch width={_bnd(cfg.GLITCH_MIN_WIDTH_NS, cfg.GLITCH_MAX_WIDTH_NS)}  "
+          f"slew={_bnd(cfg.SLEW_MIN_NS, cfg.SLEW_MAX_NS)}  "
+          f"interval={_bnd(cfg.INTERVAL_MIN_NS, cfg.INTERVAL_MAX_NS)}")
     print("-" * 92)
     if not records:
         print("(no traces scanned)")
@@ -517,11 +534,12 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
                 # Full math trace for context; detection happens on the gated slice.
                 ax.plot(tarr * 1e3, sig_full, lw=0.8, color="0.4", alpha=0.9)
 
-                # Derived crossing levels (computed on the scanned slice).
-                mid, = _levels(sig, cfg.GLITCH_THRESH_FRAC)
-                r_lo, r_hi = _levels(sig, cfg.RUNT_LO_FRAC, cfg.RUNT_HI_FRAC)
-                for lvl, name in ((mid, "thresh"), (r_lo, "runt lo"), (r_hi, "runt hi")):
-                    ax.axhline(lvl, color="0.7", lw=0.6, ls="--")
+                # Configured crossing levels (absolute volts). Only meaningful
+                # when no math transform is active, since the levels are in the
+                # original V scale -- skip the guide lines for math traces.
+                if not math:
+                    for lvl in (cfg.GLITCH_LEVEL, cfg.RUNT_LO, cfg.RUNT_HI):
+                        ax.axhline(lvl, color="0.7", lw=0.6, ls="--")
 
                 if holdoff_us and holdoff_us > 0:
                     ax.axvspan(tarr[0] * 1e3, holdoff_us * 1e-3,
