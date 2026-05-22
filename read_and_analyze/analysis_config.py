@@ -34,13 +34,13 @@ Created May.2026
 DATA_FILE   = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"  # HDF5 file to analyze
 
 SELECT_SCOPE = "lpscope"   # scope to analyze; None = all scopes (shared by every module)
-SELECT_CHAN  = ["C3"]      # channels to analyze; None = all channels (shared by every module)
+SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels (shared by every module)
 
 SHOW_PLOT   = False  # display figures interactively (shared by every module)
 SAVE_PLOT   = True  # write PNGs to a "plots/" subdir next to the data file (shared by every module)
 
-MED_SIZE    = 1    # median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
-GAUSS_SIGMA = 0   # Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
+MED_SIZE    = 5    # median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
+GAUSS_SIGMA = 20   # Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
 
 POS_TOL     = 0.5  # round (x, y) to this many mm so encoder float-noise groups repeat shots cleanly
 
@@ -55,14 +55,14 @@ FLUCT_SIGNAL_FRAC = 0           # window mean must exceed this fraction of the p
 # ======================================================================================
 # XY_MAP -- plot_xy_map.py: 2D XY-plane map of a reduced scalar per grid position
 # ======================================================================================
-XY_MODE         = "range"     # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
+XY_MODE         = "step"     # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
 XY_T_START_MS   = 10.0         # window start (ms), used when XY_MODE == "range"
-XY_T_END_MS     = 11         # window end   (ms), used when XY_MODE == "range"
-XY_T_STEP_MS    = [4.0, 4.2, 4.4]  # snapshot time(s) in ms for "step" mode; one panel per time.
+XY_T_END_MS     = 22         # window end   (ms), used when XY_MODE == "range"
+XY_T_STEP_MS    = [10.0, 12, 14, 16, 18, 20]  # snapshot time(s) in ms for "step" mode; one panel per time.
                                    # A single float (e.g. 4.0) is also accepted -> one panel.
 
 XY_SHOT_INDEX   = 0           # which shot (0-based) per position to map; no shot averaging yet
 
-XY_SHOW_CONTOUR = True       # overlay contour lines on top of the image
+XY_SHOW_CONTOUR = False       # overlay contour lines on top of the image
 XY_N_CONTOURS   = 8           # number of contour levels when XY_SHOW_CONTOUR is True
-XY_CMAP         = "viridis"   # imshow colormap
+XY_CMAP         = "rainbow"   # imshow colormap
