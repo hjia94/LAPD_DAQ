@@ -2,22 +2,28 @@
 """
 2D XY-plane maps of the probe-motion (bmotion) signal.
 
-For a bmotion run the probe steps over an XY grid. This module reduces each grid
-position's filtered trace to a single scalar -- either the **mean over a time
-range** or the **value at one time step** -- and renders the result as a 2D image
-(``imshow``) with the probe grid on the axes, optionally with contour lines on
-top. It complements the time-domain views in
-:mod:`read_and_analyze.read_bmotion_data` (overlaid traces) and
-:mod:`read_and_analyze.filter_data` (raw vs filtered).
+For a bmotion run the probe steps over an XY *plane*. This module reduces each
+grid position to a single scalar -- either the **mean over a time range** or the
+**value at one time step** -- and renders the result as a 2D image (``imshow``)
+with the probe grid on the axes, optionally with contour lines on top. It
+complements the time-domain views in :mod:`read_and_analyze.read_bmotion_data`
+(overlaid traces) and :mod:`read_and_analyze.filter_data` (raw vs filtered).
 
-Filtering, shot grouping, and trace loading are imported from
-:mod:`read_and_analyze.filter_data`; position/shot helpers from
-:mod:`read_and_analyze.read_bmotion_data`; reading/decoding from
-``lab_scopes.io.hdf5``.
+Reconstruction follows the proven LAPD analysis pattern (see
+``data-analysis/ucla-lapd/Mar-2026/Mar2026_IV.py``): traces are read **in
+acquisition order**, the per-position shots form a stack, a reducer turns that
+stack into one scalar per position, and the per-position values are simply
+``reshape((ny, nx))`` -- no encoder-position binning. The motion list is acquired
+x-fastest with y descending, so row 0 of the reshaped array is max-y; we render
+with ``origin='upper'`` and ``contour`` on ``meshgrid(xpos, ypos)`` so the image
+and contour align exactly (no half-cell offset).
 
-There is NO command line; all knobs are the constants below. Run with:
+Only **planes** are supported; line scans (one axis with a single position) are
+skipped.
+
+There is NO command line; all knobs live in :mod:`read_and_analyze.analysis_config`.
+Run with:
     python -m read_and_analyze.plot_xy_map
-Edit DEFAULT_FILE / the constants to change the file or parameters.
 
 Setup (once):  python -m pip install scipy
 
@@ -29,45 +35,41 @@ import os
 
 import numpy as np
 
-try:  # progress bar over the per-position filtering loop; optional dependency
+try:  # progress bar over the per-position loop; optional dependency
     from tqdm import tqdm
 except ImportError:  # fall back to a no-op pass-through if tqdm isn't installed
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-from lab_scopes.io.hdf5 import open_hdf5_readonly, read_hdf5_scope_tarr
+from lab_scopes.io.hdf5 import open_hdf5_readonly, read_hdf5_scope_data, read_hdf5_scope_tarr
 try:  # works as a package (python -m read_and_analyze.plot_xy_map)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
     )
-    from read_and_analyze.filter_data import (
-        _as_list, _shots_by_position, load_filtered_traces,
-    )
+    from read_and_analyze.filter_data import _as_list, _filter_trace
     from read_and_analyze.analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
-        XY_N_CONTOURS as N_CONTOURS, XY_CMAP as CMAP,
+        XY_N_CONTOURS as N_CONTOURS, XY_CMAP as CMAP, XY_SHOT_INDEX as SHOT_INDEX,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
     )
-    from filter_data import (
-        _as_list, _shots_by_position, load_filtered_traces,
-    )
+    from filter_data import _as_list, _filter_trace
     from analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
-        XY_N_CONTOURS as N_CONTOURS, XY_CMAP as CMAP,
+        XY_N_CONTOURS as N_CONTOURS, XY_CMAP as CMAP, XY_SHOT_INDEX as SHOT_INDEX,
     )
 
 
 # ======================================================================================
-# Trace reduction
+# Time reduction
 # ======================================================================================
 
 def _reduction_indices(tarr, mode, t_start, t_end, t_step):
@@ -75,9 +77,8 @@ def _reduction_indices(tarr, mode, t_start, t_end, t_step):
 
     ``mode == "step"``:  returns ``(idx, idx + 1)`` for the sample nearest
     ``t_step`` (ms). ``mode == "range"``: returns the half-open ``[i0, i1)`` slice
-    for the closed window [t_start, t_end] (ms), using the same searchsorted
-    indexing as ``fluctuation_analysis._profile_value``. Both are clamped to the
-    record so callers can read the realized bounds straight from ``tarr``.
+    for the closed window [t_start, t_end] (ms). Both are clamped to the record so
+    callers can read the realized bounds straight from ``tarr``.
     """
     if mode == "step":
         idx = int(np.argmin(np.abs(tarr - t_step * 1e-3)))
@@ -91,17 +92,15 @@ def _reduction_indices(tarr, mode, t_start, t_end, t_step):
 
 
 def _reduce_trace(vf, tarr, mode, t_start, t_end, t_step):
-    """Reduce one filtered trace ``vf`` (vs ``tarr``, seconds) to a scalar.
+    """Reduce one trace ``vf`` (vs ``tarr``, seconds) to a scalar over time.
 
-    ``mode == "range"``: mean over the closed time window [t_start, t_end] (ms).
-    ``mode == "step"``:  the sample nearest ``t_step`` (ms). Times outside the
-    record are clamped to the nearest sample. Index resolution is shared with the
-    label via :func:`_reduction_indices`.
+    ``mode == "range"``: mean over the closed window [t_start, t_end] (ms).
+    ``mode == "step"``:  the sample nearest ``t_step`` (ms). NaN-safe.
     """
     i0, i1 = _reduction_indices(tarr, mode, t_start, t_end, t_step)
     if mode == "step":
         return float(vf[i0])
-    return float(vf[i0:i1].mean())
+    return float(np.nanmean(vf[i0:i1]))
 
 
 def _step_indices(tarr, t_steps_ms):
@@ -122,105 +121,12 @@ def _as_step_list(t_step):
     return [float(t) for t in t_step]
 
 
-# ======================================================================================
-# Grid assembly
-# ======================================================================================
-
-def _grid_axes(positions):
-    """Return (xpos, ypos) regular grid axes from the first motion group that has
-    them, or (None, None) if no grid axes are recorded."""
-    for info in positions.values():
-        xpos, ypos = info.get("xpos"), info.get("ypos")
-        if xpos is not None and ypos is not None:
-            return np.asarray(xpos, dtype=float), np.asarray(ypos, dtype=float)
-    return None, None
-
-
-def _nearest_index(axis, value):
-    """Index of the grid-axis cell nearest ``value`` (within _POS_TOL), else None."""
-    j = int(np.argmin(np.abs(axis - value)))
-    return j if abs(axis[j] - value) <= _POS_TOL else None
-
-
-def build_xy_grid(f, scope, ch, positions, mode, t_start, t_end, t_step,
-                  med_size, gauss_sigma):
-    """Reduce every grid position's repeat-shot traces to one scalar and place it
-    on the regular probe grid.
-
-    For each (x, y): load+filter the repeat shots, reduce each to a scalar via
-    :func:`_reduce_trace`, average across shots, and write that into the
-    ``(len(ypos), len(xpos))`` array ``Z`` at the nearest grid cell. Cells with no
-    usable shots stay ``np.nan``. Returns ``(Z, xpos, ypos, t_lo, t_hi)`` where
-    ``t_lo``/``t_hi`` are the realized (``tarr``-snapped) window bounds in seconds
-    used for the reduction, or ``(None, None, None, None, None)`` if the run has
-    no recorded grid axes.
-    """
-    xpos, ypos = _grid_axes(positions)
-    if xpos is None or ypos is None:
-        return None, None, None, None, None
-
-    tarr = read_hdf5_scope_tarr(f, scope)
-    i0, i1 = _reduction_indices(tarr, mode, t_start, t_end, t_step)
-    t_lo, t_hi = float(tarr[i0]), float(tarr[i1 - 1])
-    Z = np.full((len(ypos), len(xpos)), np.nan, dtype=float)
-    by_pos = _shots_by_position(f, scope, positions)
-
-    for (x, y), shots in tqdm(by_pos.items(), total=len(by_pos),
-                              desc=f"filter {scope}/{ch}", unit="pos"):
-        ix = _nearest_index(xpos, x)
-        iy = _nearest_index(ypos, y)
-        if ix is None or iy is None:
-            continue
-        rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
-        if not rows:
-            continue
-        vals = [_reduce_trace(vf, tarr, mode, t_start, t_end, t_step) for vf in rows]
-        Z[iy, ix] = float(np.mean(vals))
-
-    return Z, xpos, ypos, t_lo, t_hi
-
-
-def build_xy_grids_step(f, scope, ch, positions, t_steps_ms, med_size, gauss_sigma):
-    """Build one XY grid per snapshot time in a single filtering pass.
-
-    Loads + filters each grid position's repeat shots **once**, then samples the
-    shot-averaged trace at every requested snapshot time. Returns
-    ``(Zs, xpos, ypos, t_los)`` where ``Zs`` is a list of ``(len(ypos), len(xpos))``
-    arrays (one per snapshot, parallel to ``t_los`` -- the realized tarr-snapped
-    times in seconds), or ``(None, None, None, None)`` if the run has no grid axes.
-    """
-    xpos, ypos = _grid_axes(positions)
-    if xpos is None or ypos is None:
-        return None, None, None, None
-
-    tarr = read_hdf5_scope_tarr(f, scope)
-    idxs, t_los = _step_indices(tarr, t_steps_ms)
-    Zs = [np.full((len(ypos), len(xpos)), np.nan, dtype=float) for _ in idxs]
-    by_pos = _shots_by_position(f, scope, positions)
-
-    for (x, y), shots in tqdm(by_pos.items(), total=len(by_pos),
-                              desc=f"filter {scope}/{ch}", unit="pos"):
-        ix = _nearest_index(xpos, x)
-        iy = _nearest_index(ypos, y)
-        if ix is None or iy is None:
-            continue
-        rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
-        if not rows:
-            continue
-        mean_trace = np.mean(rows, axis=0)   # average over repeat shots, once
-        for k, idx in enumerate(idxs):
-            Zs[k][iy, ix] = float(mean_trace[idx])
-
-    return Zs, xpos, ypos, t_los
-
-
 def _reduction_label(mode, t_lo, t_hi):
-    """Human-readable description of the scalar reduction, for titles/colorbars,
+    """Human-readable description of the time reduction, for titles/colorbars,
     using the realized (``tarr``-snapped) bounds ``t_lo``/``t_hi`` (seconds).
 
-    For ``range`` it states the averaging *start* in ms and the *width* in us, so
-    the reader sees exactly what the figure averaged: e.g.
-    "mean V from t=1.234 ms over 10.0 us".
+    ``range`` states the averaging *start* in ms and the *width* in us; ``step``
+    states the snapshot time in ms.
     """
     if mode == "step":
         return f"V @ t={t_lo * 1e3:.4f} ms"
@@ -229,19 +135,268 @@ def _reduction_label(mode, t_lo, t_hi):
 
 
 # ======================================================================================
-# Plotting
+# Plane geometry  (acquisition-order reshape -- no encoder-position binning)
+# ======================================================================================
+
+def _plane_axes(positions):
+    """Return ``(xpos, ypos, npos, name)`` from the first motion group's planned
+    ``positions_setup_array``.
+
+    ``xpos``/``ypos`` are the sorted-unique axis vectors (ascending); ``npos`` is
+    the number of planned positions. Returns ``(None, None, 0, None)`` if no setup
+    array is present.
+    """
+    for name, info in positions.items():
+        setup = info.get("setup_array")
+        if setup is None:
+            continue
+        xpos = np.unique(np.asarray(setup["x"], dtype=float))
+        ypos = np.unique(np.asarray(setup["y"], dtype=float))
+        return xpos, ypos, len(setup), name
+    return None, None, 0, None
+
+
+def _is_plane(xpos, ypos):
+    """True only for a genuine 2D plane (both axes have more than one position)."""
+    return xpos is not None and ypos is not None and len(xpos) > 1 and len(ypos) > 1
+
+
+# ======================================================================================
+# Reducers   reduce_fn(stack, tarr, pos_idx) -> scalar
+# ======================================================================================
+# A reducer turns one position's (nshot, nsamples) trace stack into a single
+# scalar. Keeping the *whole stack* (rather than pre-selecting a trace) is what
+# lets future reducers do per-position time indexing or shot-averaging /
+# normalized-std without touching the plane builder or rendering.
+
+def make_single_shot_reduce(shot_index, mode, t_start, t_end, t_step):
+    """Reducer: pick one shot per position by ``shot_index`` and reduce it in time.
+
+    No shot averaging -- this is the current default. The full stack is still
+    passed in so other reducers (per-position time index, shot-averaged
+    normalized-std) can replace this one later with no other code changes.
+    """
+    def reduce_fn(stack, tarr, pos_idx):
+        if stack is None or shot_index >= stack.shape[0]:
+            return np.nan
+        return _reduce_trace(stack[shot_index], tarr, mode, t_start, t_end, t_step)
+    return reduce_fn
+
+
+# ======================================================================================
+# Plane assembly
+# ======================================================================================
+
+def _position_shotnums(positions, npos, nshot, mismatch):
+    """Yield, per planned position index 0..npos-1, the list of global 1-based
+    shot_nums for that position.
+
+    Fast path (``mismatch`` False): shots are contiguous in setup order, so
+    position ``i`` owns shots ``i*nshot + 1 .. i*nshot + nshot``. Fallback path
+    (``mismatch`` True): group recorded shots back to positions via
+    ``_position_for_shot`` against the planned (x, y) -- robust to skipped shots.
+    """
+    if not mismatch:
+        for i in range(npos):
+            base = i * nshot
+            yield i, [base + k + 1 for k in range(nshot)]
+        return
+
+    # Fallback: build planned (x, y) per position from the setup array, then map
+    # each recorded shot to the nearest planned position.
+    info = next(iter(positions.values()))
+    setup = info["setup_array"]
+    planned = list(zip(setup["x"].astype(float), setup["y"].astype(float)))
+    rec = info.get("positions_array")
+    buckets = {i: [] for i in range(npos)}
+    if rec is not None:
+        sn = rec["shot_num"]
+        for j in range(len(rec)):
+            s = int(sn[j])
+            if s == 0:
+                continue
+            x, y = float(rec["x"][j]), float(rec["y"][j])
+            # nearest planned position
+            i = int(np.argmin([(x - px) ** 2 + (y - py) ** 2 for px, py in planned]))
+            buckets[i].append(s)
+    for i in range(npos):
+        yield i, buckets[i]
+
+
+def _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma):
+    """Read + filter the given shots into a ``(nshot, nsamples)`` stack.
+
+    Shots that are missing, skipped, or length-mismatched become a row of NaN so
+    the stack stays rectangular (reducers are NaN-aware). Returns None if no shot
+    could be read at all.
+    """
+    n = len(tarr)
+    rows = []
+    for s in shotnums:
+        try:
+            volts, _dt, _t0 = read_hdf5_scope_data(f, scope, ch, s)
+        except Exception:
+            rows.append(np.full(n, np.nan))
+            continue
+        if len(volts) != n:
+            rows.append(np.full(n, np.nan))
+            continue
+        rows.append(_filter_trace(volts, med_size, gauss_sigma))
+    if not rows:
+        return None
+    return np.vstack(rows)
+
+
+def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
+    """Reduce every planned position to one scalar and reshape onto the plane.
+
+    Reads each position's repeat-shot stack in acquisition order, applies
+    ``reduce_fn(stack, tarr, pos_idx)``, and reshapes the per-position values to
+    ``(ny, nx)``. Returns ``(Z, xpos, ypos)``; or ``(None, None, None)`` if the
+    run has no setup array or is not a 2D plane.
+    """
+    xpos, ypos, npos, _name = _plane_axes(positions)
+    if not _is_plane(xpos, ypos):
+        return None, None, None
+    nx, ny = len(xpos), len(ypos)
+
+    tarr = read_hdf5_scope_tarr(f, scope)
+    total = len(_shot_numbers(f[scope]))
+    nshot = total // npos if npos else 0
+    mismatch = (nshot == 0) or (npos * nshot != total)
+    if mismatch:
+        print(f"  warning: scope '{scope}' has {total} shots != npos({npos}) x "
+              f"nshot -- not a clean grid; using position-lookup fallback")
+
+    vals = np.full(npos, np.nan, dtype=float)
+    for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
+                            total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
+        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        vals[i] = reduce_fn(stack, tarr, i)
+
+    return vals.reshape((ny, nx)), xpos, ypos
+
+
+def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
+                      med_size, gauss_sigma):
+    """Build one plane per snapshot time in a single read pass.
+
+    Loads each position's stack once, picks shot ``shot_index``, and samples it at
+    every requested snapshot index. Returns ``(Zs, xpos, ypos, t_los)`` where
+    ``Zs`` is a list of ``(ny, nx)`` arrays parallel to ``t_los`` (realized
+    tarr-snapped times in seconds); or ``(None, None, None, None)`` if not a plane.
+    """
+    xpos, ypos, npos, _name = _plane_axes(positions)
+    if not _is_plane(xpos, ypos):
+        return None, None, None, None
+    nx, ny = len(xpos), len(ypos)
+
+    tarr = read_hdf5_scope_tarr(f, scope)
+    idxs, t_los = _step_indices(tarr, t_steps_ms)
+    total = len(_shot_numbers(f[scope]))
+    nshot = total // npos if npos else 0
+    mismatch = (nshot == 0) or (npos * nshot != total)
+    if mismatch:
+        print(f"  warning: scope '{scope}' has {total} shots != npos({npos}) x "
+              f"nshot -- not a clean grid; using position-lookup fallback")
+
+    vals = [np.full(npos, np.nan, dtype=float) for _ in idxs]
+    for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
+                            total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
+        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        if stack is None or shot_index >= stack.shape[0]:
+            continue
+        trace = stack[shot_index]
+        for k, idx in enumerate(idxs):
+            vals[k][i] = float(trace[idx])
+
+    Zs = [v.reshape((ny, nx)) for v in vals]
+    return Zs, xpos, ypos, t_los
+
+
+# ======================================================================================
+# Rendering   (origin='upper': reshape row 0 = max-y; contour on meshgrid aligns)
+# ======================================================================================
+
+def _grid_shape(n):
+    """Rows x cols for ``n`` panels wrapped into a roughly square grid."""
+    ncols = int(np.ceil(np.sqrt(n)))
+    nrows = int(np.ceil(n / ncols))
+    return nrows, ncols
+
+
+def _draw_plane(ax, Z, xpos, ypos, cmap, show_contour, vmin=None, vmax=None):
+    """Draw one plane onto ``ax`` (imshow + optional aligned contour). Returns the
+    image handle for the colorbar."""
+    extent = (xpos.min(), xpos.max(), ypos.min(), ypos.max())
+    im = ax.imshow(Z, origin="upper", extent=extent, aspect="auto", cmap=cmap,
+                   interpolation="nearest", vmin=vmin, vmax=vmax)
+    if show_contour:
+        X, Y = np.meshgrid(xpos, ypos)
+        masked = np.ma.masked_invalid(Z)
+        ax.contour(X, Y, masked, levels=N_CONTOURS, colors="white",
+                   alpha=0.4, linewidths=0.5)
+    ax.set_xlabel("probe x (mm)")
+    ax.set_ylabel("probe y (mm)")
+    return im
+
+
+def _render_map(plt, Z, xpos, ypos, scope, ch, label, cmap, show_contour,
+                shot_index, path):
+    """Draw the single-plane ``range``/``step``-scalar figure."""
+    fig, ax = plt.subplots(figsize=(8, 6.5))
+    im = _draw_plane(ax, Z, xpos, ypos, cmap, show_contour)
+    fig.colorbar(im, ax=ax, label=label)
+    ax.set_title(f"scope '{scope}' / {ch}: {label}  (shot {shot_index})",
+                 fontsize=10, loc="left")
+    fig.suptitle(f"{os.path.basename(path)}  —  XY map", fontsize=10)
+    fig.tight_layout()
+
+
+def _render_step_montage(plt, Zs, xpos, ypos, t_los, scope, ch, cmap,
+                         show_contour, shot_index, path):
+    """Draw the ``step``-mode montage: one plane per snapshot time, wrapped into a
+    roughly square grid, sharing a common color scale and one colorbar."""
+    n = len(Zs)
+    finite = np.concatenate([Z[np.isfinite(Z)].ravel() for Z in Zs]) if n else np.array([])
+    vmin = float(finite.min()) if finite.size else None
+    vmax = float(finite.max()) if finite.size else None
+
+    nrows, ncols = _grid_shape(n)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.0 * nrows),
+                             squeeze=False)
+    flat = axes.ravel()
+    im = None
+    for k, (Z, t_lo) in enumerate(zip(Zs, t_los)):
+        ax = flat[k]
+        im = _draw_plane(ax, Z, xpos, ypos, cmap, show_contour, vmin=vmin, vmax=vmax)
+        ax.set_title(f"t={t_lo * 1e3:.4f} ms", fontsize=9, loc="left")
+
+    for ax in flat[n:]:   # hide any unused cells in the wrapped grid
+        ax.axis("off")
+
+    if im is not None:
+        fig.colorbar(im, ax=axes, label="V", shrink=0.9)
+    fig.suptitle(f"{os.path.basename(path)}  —  scope '{scope}' / {ch}: "
+                 f"XY map (step, shot {shot_index})", fontsize=10)
+
+
+# ======================================================================================
+# Driver
 # ======================================================================================
 
 def plot_xy_map(path, scope=None, channels=None, mode=None,
-                t_start=None, t_end=None, t_step=None,
+                t_start=None, t_end=None, t_step=None, shot_index=None,
                 med_size=None, gauss_sigma=None,
                 show_contour=None, cmap=None, show=None, save=None):
-    """Render a 2D XY map per (scope, channel): the reduced scalar over the probe grid.
+    """Render a plane-only XY map per (scope, channel).
 
-    Uses ``imshow`` on the regular probe grid (origin lower, extent from the grid
-    bounds), with an optional contour overlay. Honors SHOW_PLOT/SAVE_PLOT
-    (override with show/save). Saves one PNG per (scope, channel) to a ``plots/``
-    subdir next to the data file. Returns the saved paths.
+    For each scope/channel: pick one shot per position by ``shot_index``, reduce it
+    in time (``range`` -> mean over [t_start, t_end] ms; ``step`` -> snapshot
+    montage at the ``t_step`` time(s)), reshape onto the plane, and imshow with an
+    optional aligned contour. Line scans are skipped. Honors SHOW_PLOT/SAVE_PLOT
+    (override with show/save); saves one PNG per (scope, channel). Returns the
+    saved paths.
     """
     import matplotlib.pyplot as plt
 
@@ -251,6 +406,7 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
     t_start = T_START_MS if t_start is None else t_start
     t_end = T_END_MS if t_end is None else t_end
     t_step = T_STEP_MS if t_step is None else t_step
+    shot_index = SHOT_INDEX if shot_index is None else shot_index
     med_size = MED_SIZE if med_size is None else med_size
     gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
     show_contour = SHOW_CONTOUR if show_contour is None else show_contour
@@ -276,38 +432,42 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
         scopes = [scope] if scope else _scope_groups(f)
 
         for sc in scopes:
+            xpos, ypos, _npos, _name = _plane_axes(positions)
+            if not _is_plane(xpos, ypos):
+                nx = 0 if xpos is None else len(xpos)
+                ny = 0 if ypos is None else len(ypos)
+                print(f"scope '{sc}': grid is {nx}x{ny} (a line) — "
+                      f"plot_xy_map only supports planes; skipping")
+                continue
+
             sg = f[sc]
             shot_nums = _shot_numbers(sg)
             chans = channels if channels else _channel_names(sg, shot_nums[0])
 
             for ch in chans:
                 if mode == "step":
-                    # One figure per (scope, channel) with a panel per snapshot time.
                     t_steps = _as_step_list(t_step)
-                    Zs, xpos, ypos, t_los = build_xy_grids_step(
-                        f, sc, ch, positions, t_steps, med_size, gauss_sigma)
-                    if Zs is None:
-                        print(f"scope '{sc}': no recorded grid axes — skipping")
-                        break  # same for every channel of this scope
-                    if all(np.all(np.isnan(Z)) for Z in Zs):
-                        print(f"scope '{sc}' / {ch}: no usable shots on the grid — skipping")
-                        continue
-                    _render_step_montage(plt, Zs, xpos, ypos, t_los, sc, ch, cmap,
-                                         show_contour, base, path)
-                else:
-                    Z, xpos, ypos, t_lo, t_hi = build_xy_grid(
-                        f, sc, ch, positions, mode, t_start, t_end, t_step,
+                    Zs, xp, yp, t_los = build_planes_step(
+                        f, sc, ch, positions, t_steps, shot_index,
                         med_size, gauss_sigma)
-                    if Z is None:
-                        print(f"scope '{sc}': no recorded grid axes — skipping")
-                        break  # same for every channel of this scope
-                    if np.all(np.isnan(Z)):
-                        print(f"scope '{sc}' / {ch}: no usable shots on the grid — skipping")
+                    if Zs is None or all(np.all(np.isnan(Z)) for Z in Zs):
+                        print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue
-                    # Label uses the realized tarr-snapped bounds (start in ms, width in us).
-                    label = _reduction_label(mode, t_lo, t_hi)
-                    _render_map(plt, Z, xpos, ypos, sc, ch, label, cmap,
-                                show_contour, base, path)
+                    _render_step_montage(plt, Zs, xp, yp, t_los, sc, ch, cmap,
+                                         show_contour, shot_index, path)
+                else:
+                    Z, xp, yp = build_plane(
+                        f, sc, ch, positions,
+                        make_single_shot_reduce(shot_index, mode, t_start, t_end, t_step),
+                        med_size, gauss_sigma)
+                    if Z is None or np.all(np.isnan(Z)):
+                        print(f"scope '{sc}' / {ch}: no usable shots — skipping")
+                        continue
+                    tarr = read_hdf5_scope_tarr(f, sc)
+                    i0, i1 = _reduction_indices(tarr, mode, t_start, t_end, t_step)
+                    label = _reduction_label(mode, float(tarr[i0]), float(tarr[i1 - 1]))
+                    _render_map(plt, Z, xp, yp, sc, ch, label, cmap,
+                                show_contour, shot_index, path)
 
                 if save:
                     out_png = os.path.join(plots_dir, f"{base}_{sc}_{ch}_xymap.png")
@@ -320,120 +480,6 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
     else:
         plt.close("all")
     return saved
-
-
-def _render_map(plt, Z, xpos, ypos, scope, ch, label, cmap, show_contour,
-                base, path):
-    """Draw one XY-map figure. Falls back to a 1D line when the grid is degenerate
-    (a single row or column, i.e. a 1D scan)."""
-    # 1D scan: one of the axes is a single point -> imshow would be a sliver.
-    if len(xpos) == 1 or len(ypos) == 1:
-        fig, ax = plt.subplots(figsize=(9, 4))
-        if len(ypos) == 1:
-            xs, vals, xlabel = xpos, Z[0, :], "probe x (mm)"
-        else:
-            xs, vals, xlabel = ypos, Z[:, 0], "probe y (mm)"
-        ax.plot(xs, vals, "o-", lw=1, ms=3)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(label)
-        ax.grid(alpha=0.3)
-        print(f"scope '{scope}' / {ch}: 1D scan (grid is "
-              f"{len(xpos)}x{len(ypos)}) — drawing a line plot instead of an image")
-    else:
-        fig, ax = plt.subplots(figsize=(8, 6.5))
-        # imshow expects ascending row/col order; xpos/ypos come ascending from
-        # the motion-group attrs, and origin='lower' matches that.
-        extent = [xpos.min(), xpos.max(), ypos.min(), ypos.max()]
-        im = ax.imshow(Z, origin="lower", extent=extent, aspect="auto", cmap=cmap)
-        fig.colorbar(im, ax=ax, label=label)
-        if show_contour:
-            xc = np.linspace(xpos.min(), xpos.max(), Z.shape[1])
-            yc = np.linspace(ypos.min(), ypos.max(), Z.shape[0])
-            X, Y = np.meshgrid(xc, yc)
-            masked = np.ma.masked_invalid(Z)
-            cs = ax.contour(X, Y, masked, levels=N_CONTOURS, colors="white",
-                            linewidths=0.6, alpha=0.7)
-            ax.clabel(cs, inline=True, fontsize=7, fmt="%.3g")
-        ax.set_xlabel("probe x (mm)")
-        ax.set_ylabel("probe y (mm)")
-
-    ax.set_title(f"scope '{scope}' / {ch}: {label}", fontsize=10, loc="left")
-    fig.suptitle(f"{os.path.basename(path)}  —  XY map", fontsize=10)
-    fig.tight_layout()
-
-
-def _grid_shape(n):
-    """Rows x cols for ``n`` panels wrapped into a roughly square grid."""
-    ncols = int(np.ceil(np.sqrt(n)))
-    nrows = int(np.ceil(n / ncols))
-    return nrows, ncols
-
-
-def _render_step_montage(plt, Zs, xpos, ypos, t_los, scope, ch, cmap,
-                         show_contour, base, path):
-    """Draw the ``step``-mode snapshot montage: one panel per snapshot time, wrapped
-    into a roughly square grid, all sharing a common color scale and one colorbar.
-
-    Falls back to overlaid 1D line plots (one line per snapshot) when the grid is
-    degenerate (a single row or column, i.e. a 1D scan)."""
-    n = len(Zs)
-
-    # 1D scan: imshow would be a sliver -> overlay the snapshots as labeled lines.
-    if len(xpos) == 1 or len(ypos) == 1:
-        fig, ax = plt.subplots(figsize=(9, 4))
-        if len(ypos) == 1:
-            xs, xlabel = xpos, "probe x (mm)"
-            lines = [Z[0, :] for Z in Zs]
-        else:
-            xs, xlabel = ypos, "probe y (mm)"
-            lines = [Z[:, 0] for Z in Zs]
-        for vals, t_lo in zip(lines, t_los):
-            ax.plot(xs, vals, "o-", lw=1, ms=3, label=f"t={t_lo * 1e3:.4f} ms")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("V")
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=8)
-        print(f"scope '{scope}' / {ch}: 1D scan (grid is "
-              f"{len(xpos)}x{len(ypos)}) — overlaying snapshot lines instead of images")
-        ax.set_title(f"scope '{scope}' / {ch}: {n} snapshot(s)", fontsize=10, loc="left")
-        fig.suptitle(f"{os.path.basename(path)}  —  XY map (step)", fontsize=10)
-        fig.tight_layout()
-        return
-
-    # Shared color scale across all panels so they are comparable in time.
-    finite = np.concatenate([Z[np.isfinite(Z)].ravel() for Z in Zs]) if n else np.array([])
-    vmin = float(finite.min()) if finite.size else None
-    vmax = float(finite.max()) if finite.size else None
-
-    nrows, ncols = _grid_shape(n)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.0 * nrows),
-                             squeeze=False)
-    flat = axes.ravel()
-    extent = [xpos.min(), xpos.max(), ypos.min(), ypos.max()]
-    im = None
-    for k, (Z, t_lo) in enumerate(zip(Zs, t_los)):
-        ax = flat[k]
-        im = ax.imshow(Z, origin="lower", extent=extent, aspect="auto", cmap=cmap,
-                       vmin=vmin, vmax=vmax)
-        if show_contour:
-            xc = np.linspace(xpos.min(), xpos.max(), Z.shape[1])
-            yc = np.linspace(ypos.min(), ypos.max(), Z.shape[0])
-            X, Y = np.meshgrid(xc, yc)
-            masked = np.ma.masked_invalid(Z)
-            cs = ax.contour(X, Y, masked, levels=N_CONTOURS, colors="white",
-                            linewidths=0.6, alpha=0.7)
-            ax.clabel(cs, inline=True, fontsize=7, fmt="%.3g")
-        ax.set_title(f"t={t_lo * 1e3:.4f} ms", fontsize=9, loc="left")
-        ax.set_xlabel("probe x (mm)")
-        ax.set_ylabel("probe y (mm)")
-
-    for ax in flat[n:]:   # hide any unused cells in the wrapped grid
-        ax.axis("off")
-
-    if im is not None:
-        fig.colorbar(im, ax=axes, label="V", shrink=0.9)
-    fig.suptitle(f"{os.path.basename(path)}  —  scope '{scope}' / {ch}: XY map (step)",
-                 fontsize=10)
 
 
 if __name__ == "__main__":
