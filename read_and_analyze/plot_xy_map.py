@@ -139,19 +139,25 @@ def _reduction_label(mode, t_lo, t_hi):
 # ======================================================================================
 
 def _plane_axes(positions):
-    """Return ``(xpos, ypos, npos, name)`` from the first motion group's planned
-    ``positions_setup_array``.
+    """Return ``(xpos, ypos, npos, name)`` from the first motion group.
 
-    ``xpos``/``ypos`` are the sorted-unique axis vectors (ascending); ``npos`` is
-    the number of planned positions. Returns ``(None, None, 0, None)`` if no setup
-    array is present.
+    Prefers the authoritative ``xpos``/``ypos`` axis vectors the run stored as
+    attrs on ``positions_setup_array`` (see ``acquisition/bmotion.py``); falls
+    back to deriving them from the setup array's columns with ``np.unique`` for
+    older files that lack those attrs. ``npos`` is the number of planned
+    positions. Returns ``(None, None, 0, None)`` if no setup array is present.
     """
     for name, info in positions.items():
         setup = info.get("setup_array")
         if setup is None:
             continue
-        xpos = np.unique(np.asarray(setup["x"], dtype=float))
-        ypos = np.unique(np.asarray(setup["y"], dtype=float))
+        xpos, ypos = info.get("xpos"), info.get("ypos")
+        if xpos is None or ypos is None:  # older file: recover from the columns
+            xpos = np.unique(np.asarray(setup["x"], dtype=float))
+            ypos = np.unique(np.asarray(setup["y"], dtype=float))
+        else:
+            xpos = np.asarray(xpos, dtype=float)
+            ypos = np.asarray(ypos, dtype=float)
         return xpos, ypos, len(setup), name
     return None, None, 0, None
 
