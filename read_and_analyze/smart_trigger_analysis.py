@@ -45,7 +45,7 @@ import os
 import numpy as np
 
 from lab_scopes.io.hdf5 import (
-    open_hdf5_readonly, read_hdf5_scope_data, read_hdf5_scope_tarr,
+    open_hdf5_readonly, read_hdf5_scope_channel_shots, read_hdf5_scope_tarr,
 )
 try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
     from read_and_analyze.read_bmotion_data import (
@@ -83,8 +83,9 @@ SHOTS      = cfg.SHOTS
 HOLDOFF_US = cfg.HOLDOFF_US
 MATH       = cfg.MATH
 
-# Per-kind colors for the plot's shaded event spans.
+# Per-kind colors and marker shapes for the plot's detected-event scatter points.
 _KIND_COLORS = {"glitch": "red", "runt": "purple", "slew": "green", "interval": "orange"}
+_KIND_MARKERS = {"glitch": "o", "runt": "s", "slew": "^", "interval": "D"}
 
 
 # ======================================================================================
@@ -348,9 +349,13 @@ DETECTORS = {
 
 def _resolve_shots(sg, shots):
     """Shot list to scan: explicit ``shots`` (skipping skipped ones) or the
-    first/middle/last sample. Returns a list of shot numbers."""
+    first/middle/last sample. Returns a list of shot numbers.
+
+    ``shots`` may be any sequence -- a list, tuple, or numpy array (e.g.
+    ``np.arange(10, 60)``); ``None`` or empty falls back to the sample shots.
+    """
     shot_nums = _shot_numbers(sg)
-    use = list(shots) if shots else _sample_shots(shot_nums)
+    use = [int(s) for s in shots] if shots is not None and len(shots) else _sample_shots(shot_nums)
     return [s for s in use
             if sg.get(f"shot_{s}") is not None
             and not sg[f"shot_{s}"].attrs.get("skipped", False)]
@@ -360,7 +365,9 @@ def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=No
                            holdoff_us=None, math=None, med_size=None, gauss_sigma=None):
     """Scan recorded traces for the events each SmartTrigger type would catch.
 
-    Parameters default to the module constants. For every (scope, channel,
+    Parameters default to the module constants. ``shots`` may be a list, tuple,
+    or numpy array of shot numbers (e.g. ``np.arange(0, 10)``); ``None`` uses the
+    sample shots (first/middle/last per position). For every (scope, channel,
     selected shot) the trace is denoised (median ``med_size`` then Gaussian
     ``gauss_sigma``), optionally transformed by ``math`` (derivative / integral /
     abs), gated by ``holdoff_us``, then run through each detector in ``kinds``
@@ -394,12 +401,14 @@ def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=No
             chans = channels if channels else _channel_names(sg, shot_list[0])
 
             for ch in chans:
-                for s in shot_list:
-                    try:
-                        volts, _dt, _t0 = read_hdf5_scope_data(f, sc, ch, s)
-                    except Exception:
-                        continue
-                    if len(volts) != len(tarr):
+                # Read all shots of this channel in one pass (WAVEDESC decoded
+                # once); NaN rows mark unreadable/skipped/length-mismatched shots.
+                stack, _dt, _t0 = read_hdf5_scope_channel_shots(
+                    f, sc, ch, shot_list, expected_len=len(tarr))
+                if stack is None:
+                    continue
+                for s, volts in zip(shot_list, stack):
+                    if np.isnan(volts).all():
                         continue
                     filt = _filter_trace(volts, med_size, gauss_sigma)
                     sig = _apply_math(filt, tarr, math)
@@ -477,7 +486,7 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
     data file. Returns the saved paths.
     """
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
 
     scope = SCOPE if scope is None else scope
     channels = CHANNELS if channels is None else channels
@@ -514,16 +523,20 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
             chans = channels if channels else _channel_names(sg, shot_list[0])
             ch = chans[0]  # one channel per figure for clarity
 
+            # Read all plotted shots of this channel in one pass (WAVEDESC
+            # decoded once); NaN rows mark unreadable/skipped/short shots.
+            stack, _dt, _t0 = read_hdf5_scope_channel_shots(
+                f, sc, ch, shot_list, expected_len=len(tarr))
+            if stack is None:
+                print(f"scope '{sc}': no usable shots to plot -- skipping")
+                continue
+
             fig, axes = plt.subplots(len(shot_list), 1,
                                      figsize=(11, 2.8 * len(shot_list)),
                                      sharex=True, squeeze=False)
             axes = axes[:, 0]
-            for ax, s in zip(axes, shot_list):
-                try:
-                    volts, _dt, _t0 = read_hdf5_scope_data(f, sc, ch, s)
-                except Exception:
-                    continue
-                if len(volts) != len(tarr):
+            for ax, s, volts in zip(axes, shot_list, stack):
+                if np.isnan(volts).all():
                     continue
                 filt = _filter_trace(volts, med_size, gauss_sigma)
                 sig_full = _apply_math(filt, tarr, math)
@@ -549,9 +562,15 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
                 for kind in kinds:
                     res = DETECTORS[kind](sig, t)
                     counts[kind] = res["n"]
-                    for ev in res["events"]:
-                        ax.axvspan(ev["t_start"] * 1e3, ev["t_end"] * 1e3,
-                                   color=_KIND_COLORS[kind], alpha=0.3)
+                    if not res["events"]:
+                        continue
+                    # Mark each detected event as a point on the scanned signal at
+                    # its start time, one color/marker per trigger kind.
+                    ev_t = np.array([ev["t_start"] for ev in res["events"]])
+                    ev_y = np.interp(ev_t, t, sig)
+                    ax.scatter(ev_t * 1e3, ev_y, s=40, color=_KIND_COLORS[kind],
+                               marker=_KIND_MARKERS[kind], edgecolors="black",
+                               linewidths=0.5, zorder=5)
 
                 pos = _position_for_shot(positions, s)
                 pos_s = f" @ x={pos[0]:.1f}, y={pos[1]:.1f}" if pos is not None else ""
@@ -561,7 +580,12 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
                 ax.grid(alpha=0.3)
             axes[-1].set_xlabel("time (ms)")
 
-            legend_handles = [Patch(color=_KIND_COLORS[k], alpha=0.3, label=k) for k in kinds]
+            legend_handles = [
+                Line2D([], [], color=_KIND_COLORS[k], marker=_KIND_MARKERS[k],
+                       linestyle="none", markeredgecolor="black", markeredgewidth=0.5,
+                       label=k)
+                for k in kinds
+            ]
             axes[0].legend(handles=legend_handles, fontsize=8, loc="upper right",
                            ncol=len(kinds))
 

@@ -21,6 +21,7 @@ import sys
 import numpy as np
 
 from lab_scopes.io.hdf5 import (
+    read_hdf5_scope_channel_shots,
     read_hdf5_scope_data,
     read_hdf5_scope_tarr,
     read_scope_channel_descriptions,
@@ -420,18 +421,22 @@ def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=Non
                                      figsize=(10, 2.4 * len(use_channels)), squeeze=False)
             axes = axes[:, 0]
             for ax, ch in zip(axes, use_channels):
-                for s in use_shots:
-                    try:
-                        volts, dt, t0 = read_hdf5_scope_data(f, sc, ch, s)
-                    except Exception as e:
-                        print(f"  skip {sc}/shot_{s}/{ch}: {e}")
+                # Read all plotted shots of this channel in one pass (WAVEDESC
+                # decoded once); NaN rows mark unreadable/skipped shots.
+                stack, dt, t0 = read_hdf5_scope_channel_shots(f, sc, ch, use_shots)
+                if stack is None:
+                    print(f"  skip {sc}/{ch}: no readable shots")
+                    continue
+                try:
+                    tarr = read_hdf5_scope_tarr(f, sc)
+                    if len(tarr) != stack.shape[1]:
+                        tarr = np.arange(stack.shape[1]) * dt + t0
+                except Exception:
+                    tarr = np.arange(stack.shape[1]) * dt + t0
+                for s, volts in zip(use_shots, stack):
+                    if np.isnan(volts).all():
+                        print(f"  skip {sc}/shot_{s}/{ch}: unreadable")
                         continue
-                    try:
-                        tarr = read_hdf5_scope_tarr(f, sc)
-                        if len(tarr) != len(volts):
-                            tarr = np.arange(len(volts)) * dt + t0
-                    except Exception:
-                        tarr = np.arange(len(volts)) * dt + t0
                     pos = _position_for_shot(positions, s)
                     label = f"shot {s}"
                     if pos is not None:

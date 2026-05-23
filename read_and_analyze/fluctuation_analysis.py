@@ -31,7 +31,7 @@ import os
 
 import numpy as np
 
-from lab_scopes.io.hdf5 import read_hdf5_scope_data, read_hdf5_scope_tarr
+from lab_scopes.io.hdf5 import read_hdf5_scope_tarr
 try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,

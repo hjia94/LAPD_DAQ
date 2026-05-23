@@ -27,7 +27,9 @@ import os
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, median_filter
 
-from lab_scopes.io.hdf5 import read_hdf5_scope_data, read_hdf5_scope_tarr
+from lab_scopes.io.hdf5 import (
+    read_hdf5_scope_channel_shots, read_hdf5_scope_data, read_hdf5_scope_tarr,
+)
 try:  # works as a package (python -m read_and_analyze.filter_data)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
@@ -86,17 +88,17 @@ def load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma):
     that cannot be read or whose length does not match ``tarr``. Callers stack
     these and decide for themselves whether there are enough shots to proceed.
     This is the in-memory handoff surface consumed by ``fluctuation_analysis``.
+
+    The raw shots are read in one pass (the channel's WAVEDESC is decoded once,
+    not per shot); unreadable/skipped/length-mismatched shots come back as NaN
+    rows and are dropped here to preserve the "usable shots only" contract.
     """
-    rows = []
-    for s in shots:
-        try:
-            volts, _dt, _t0 = read_hdf5_scope_data(f, scope, ch, s)
-        except Exception:
-            continue
-        if len(volts) != len(tarr):
-            continue
-        rows.append(_filter_trace(volts, med_size, gauss_sigma))
-    return rows
+    raw, _dt, _t0 = read_hdf5_scope_channel_shots(
+        f, scope, ch, shots, expected_len=len(tarr))
+    if raw is None:
+        return []
+    return [_filter_trace(row, med_size, gauss_sigma)
+            for row in raw if not np.isnan(row).all()]
 
 
 # ======================================================================================

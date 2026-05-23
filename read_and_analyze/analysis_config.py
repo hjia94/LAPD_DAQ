@@ -36,8 +36,8 @@ DATA_FILE   = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"  # HD
 SELECT_SCOPE = "lpscope"   # scope to analyze; None = all scopes (shared by every module)
 SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels (shared by every module)
 
-SHOW_PLOT   = False  # display figures interactively (shared by every module)
-SAVE_PLOT   = True  # write PNGs to a "plots/" subdir next to the data file (shared by every module)
+SHOW_PLOT   = True  # display figures interactively (shared by every module)
+SAVE_PLOT   = False  # write PNGs to a "plots/" subdir next to the data file (shared by every module)
 
 MED_SIZE    = 5    # median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
 GAUSS_SIGMA = 20   # Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off

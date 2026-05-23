@@ -41,7 +41,9 @@ except ImportError:  # fall back to a no-op pass-through if tqdm isn't installed
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-from lab_scopes.io.hdf5 import open_hdf5_readonly, read_hdf5_scope_data, read_hdf5_scope_tarr
+from lab_scopes.io.hdf5 import (
+    open_hdf5_readonly, read_hdf5_scope_channel_shots, read_hdf5_scope_tarr,
+)
 try:  # works as a package (python -m read_and_analyze.plot_xy_map)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
@@ -232,24 +234,17 @@ def _position_shotnums(positions, npos, nshot, mismatch):
 def _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma):
     """Read + filter the given shots into a ``(nshot, nsamples)`` stack.
 
-    Shots that are missing, skipped, or length-mismatched become a row of NaN so
-    the stack stays rectangular (reducers are NaN-aware). Returns None if no shot
-    could be read at all.
+    The raw shots are read in one pass via ``read_hdf5_scope_channel_shots`` (the
+    channel's WAVEDESC is decoded once, not per shot); missing/skipped/length-
+    mismatched shots come back as NaN rows. Each non-NaN row is then filtered.
+    Reducers are NaN-aware. Returns None if no shot could be read at all.
     """
-    n = len(tarr)
-    rows = []
-    for s in shotnums:
-        try:
-            volts, _dt, _t0 = read_hdf5_scope_data(f, scope, ch, s)
-        except Exception:
-            rows.append(np.full(n, np.nan))
-            continue
-        if len(volts) != n:
-            rows.append(np.full(n, np.nan))
-            continue
-        rows.append(_filter_trace(volts, med_size, gauss_sigma))
-    if not rows:
+    raw, _dt, _t0 = read_hdf5_scope_channel_shots(
+        f, scope, ch, shotnums, expected_len=len(tarr))
+    if raw is None:
         return None
+    rows = [row if np.isnan(row).all() else _filter_trace(row, med_size, gauss_sigma)
+            for row in raw]
     return np.vstack(rows)
 
 
