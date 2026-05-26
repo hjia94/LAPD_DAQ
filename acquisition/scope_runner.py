@@ -21,6 +21,7 @@ Layered like this:
 import time
 
 import numpy as np
+from tqdm import tqdm
 
 from motion import PositionManager
 
@@ -398,9 +399,9 @@ def handle_movement(pos_manager, mc, shot_num, pos, save_path, scope_ips):
     Returns True on a successful move, False if the shot was logged as skipped.
     """
     if pos_manager.nz is None:
-        print(f'Shot = {shot_num}, x = {pos["x"]}, y = {pos["y"]}')
+        tqdm.write(f'Shot = {shot_num}, x = {pos["x"]}, y = {pos["y"]}')
     else:
-        print(f'Shot = {shot_num}, x = {pos["x"]}, y = {pos["y"]}, z = {pos["z"]}')
+        tqdm.write(f'Shot = {shot_num}, x = {pos["x"]}, y = {pos["y"]}, z = {pos["z"]}')
 
     try:
         mc.enable
@@ -417,11 +418,11 @@ def handle_movement(pos_manager, mc, shot_num, pos, save_path, scope_ips):
         mc.stop_now
         raise KeyboardInterrupt
     except ValueError as e:
-        print(f'\nSkipping position - {str(e)}')
+        tqdm.write(f'Skipping position - {str(e)}')
         hdf5_writer.mark_shot_skipped_for_scopes(save_path, scope_ips, shot_num, e)
         return False
     except Exception as e:
-        print(f'\nMotor failed to move with {str(e)}')
+        tqdm.write(f'Motor failed to move with {str(e)}')
         hdf5_writer.mark_shot_skipped_for_scopes(
             save_path, scope_ips, shot_num, f"Motor movement failed: {str(e)}"
         )
@@ -472,51 +473,48 @@ def run_acquisition(save_path, config_path):
                     else:
                         print("\n✓ Motor controller initialized and ready for movement")
                 total_shots = len(positions)
+                print(f"Number of positions: {len(positions)}")
+                print(f"Number of shots per position: {num_duplicate_shots}")
+                print(f"Total shots: {total_shots}")
 
             else:
                 positions = None
                 mc = None
                 print("\nStationary acquisition - No position configuration found")
                 total_shots = num_duplicate_shots * num_run_repeats
+                print(f"Number of shots: {total_shots}")
 
             print("\nStarting initial acquisition...")
             active_scopes = msa.initialize_scopes()
             if not active_scopes:
                 raise RuntimeError("No valid data found from any scope. Aborting acquisition.")
 
-            n = 0
-            for n in range(total_shots):
-                shot_num = n + 1
-                acquisition_loop_start_time = time.time()
+            with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
+                for n in range(total_shots):
+                    shot_num = n + 1
 
-                if pos_manager is not None:
-                    movement_success = handle_movement(
-                        pos_manager, mc, shot_num, positions[n], save_path, msa.scope_ips
-                    )
-                    if not movement_success:
-                        print(f"Skipping shot {shot_num} due to movement failure.")
-                        continue
-                else:
-                    print(f'Shot = {shot_num}')
+                    if pos_manager is not None:
+                        movement_success = handle_movement(
+                            pos_manager, mc, shot_num, positions[n], save_path, msa.scope_ips
+                        )
+                        if not movement_success:
+                            tqdm.write(f"Skipping shot {shot_num} due to movement failure.")
+                            pbar.update(1)
+                            continue
 
-                single_shot_acquisition(msa, active_scopes, shot_num)
+                    single_shot_acquisition(msa, active_scopes, shot_num, verbose=False)
 
-                if pos_manager is not None and mc is not None:
-                    if pos_manager.nz is None:
-                        xpos, ypos = mc.probe_positions
-                        current_positions = {'x': xpos, 'y': ypos, 'z': None}
-                    else:
-                        xpos, ypos, zpos = mc.probe_positions
-                        current_positions = {'x': xpos, 'y': ypos, 'z': zpos}
+                    if pos_manager is not None and mc is not None:
+                        if pos_manager.nz is None:
+                            xpos, ypos = mc.probe_positions
+                            current_positions = {'x': xpos, 'y': ypos, 'z': None}
+                        else:
+                            xpos, ypos, zpos = mc.probe_positions
+                            current_positions = {'x': xpos, 'y': ypos, 'z': zpos}
 
-                    pos_manager.update_position_hdf5(shot_num, current_positions)
+                        pos_manager.update_position_hdf5(shot_num, current_positions)
 
-                time_per_shot = (time.time() - acquisition_loop_start_time)
-                remaining_shots = total_shots - shot_num
-                remaining_time = remaining_shots * time_per_shot
-                print(f' | Remaining time: {remaining_time/3600:.2f}h')
-
-                n += 1
+                    pbar.update(1)
 
         except KeyboardInterrupt:
             print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
