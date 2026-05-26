@@ -37,7 +37,7 @@ LAPD_DAQ/
   Data_Run_MultiScope_Camera.py
   Data_Run_bmotion.py
   Data_Run_45deg.py          Explicitly unsupported in this refactor branch
-  example_experiment_config.txt
+  example_experiment_config.ini
   pyproject.toml
 ```
 
@@ -141,16 +141,16 @@ touching hardware.
    Command Prompt:
 
    ```cmd
-   copy example_experiment_config.txt experiment_config.txt
+   copy example_experiment_config.ini experiment_config.ini
    ```
 
    PowerShell:
 
    ```powershell
-   Copy-Item example_experiment_config.txt experiment_config.txt
+   Copy-Item example_experiment_config.ini experiment_config.ini
    ```
 
-2. Edit `experiment_config.txt` for the run. For a simple stationary mock run,
+2. Edit `experiment_config.ini` for the run. For a simple stationary mock run,
    keep `[scope_ips]` populated and either remove or comment out active
    `[position]` values.
 
@@ -159,13 +159,13 @@ touching hardware.
    Command Prompt:
 
    ```cmd
-   lapd-daq run --config experiment_config.txt --mode stationary --dry-run --output mock_stationary.hdf5
+   lapd-daq run --config experiment_config.ini --mode stationary --dry-run --output mock_stationary.hdf5
    ```
 
    PowerShell:
 
    ```powershell
-   lapd-daq run --config experiment_config.txt --mode stationary --dry-run --output mock_stationary.hdf5
+   lapd-daq run --config experiment_config.ini --mode stationary --dry-run --output mock_stationary.hdf5
    ```
 
 4. Confirm the output by running the lapd_daq unit tests. See
@@ -208,7 +208,7 @@ Use this on the hardware PC after the mock dry run succeeds.
    python -m pip install -e ".[scope]"
    ```
 
-3. Edit `experiment_config.txt`:
+3. Edit `experiment_config.ini`:
 
    ```ini
    [nshots]
@@ -234,13 +234,13 @@ Use this on the hardware PC after the mock dry run succeeds.
    Command Prompt:
 
    ```cmd
-   lapd-daq run --config experiment_config.txt --mode stationary --output run_stationary.hdf5
+   lapd-daq run --config experiment_config.ini --mode stationary --output run_stationary.hdf5
    ```
 
    PowerShell:
 
    ```powershell
-   lapd-daq run --config experiment_config.txt --mode stationary --output run_stationary.hdf5
+   lapd-daq run --config experiment_config.ini --mode stationary --output run_stationary.hdf5
    ```
 
 5. For XY grid acquisition, fill `[position]` and `[motor_ips]`:
@@ -265,13 +265,13 @@ Use this on the hardware PC after the mock dry run succeeds.
    Command Prompt:
 
    ```cmd
-   lapd-daq run --config experiment_config.txt --mode grid --output run_grid.hdf5
+   lapd-daq run --config experiment_config.ini --mode grid --output run_grid.hdf5
    ```
 
    PowerShell:
 
    ```powershell
-   lapd-daq run --config experiment_config.txt --mode grid --output run_grid.hdf5
+   lapd-daq run --config experiment_config.ini --mode grid --output run_grid.hdf5
    ```
 
 6. Check the terminal summary and inspect the HDF5 file before moving it into
@@ -302,13 +302,13 @@ having `[camera_config]` in the config does not affect stationary or grid runs.
    Command Prompt:
 
    ```cmd
-   lapd-daq run --config experiment_config.txt --mode camera --output run_camera.hdf5
+   lapd-daq run --config experiment_config.ini --mode camera --output run_camera.hdf5
    ```
 
    PowerShell:
 
    ```powershell
-   lapd-daq run --config experiment_config.txt --mode camera --output run_camera.hdf5
+   lapd-daq run --config experiment_config.ini --mode camera --output run_camera.hdf5
    ```
 
 4. For dropper mode, add trigger settings:
@@ -324,13 +324,13 @@ having `[camera_config]` in the config does not affect stationary or grid runs.
    Command Prompt:
 
    ```cmd
-   lapd-daq run --config experiment_config.txt --mode dropper --output run_dropper.hdf5
+   lapd-daq run --config experiment_config.ini --mode dropper --output run_dropper.hdf5
    ```
 
    PowerShell:
 
    ```powershell
-   lapd-daq run --config experiment_config.txt --mode dropper --output run_dropper.hdf5
+   lapd-daq run --config experiment_config.ini --mode dropper --output run_dropper.hdf5
    ```
 
 Camera `.cine` files are saved next to the HDF5 output. HDF5 camera metadata
@@ -361,7 +361,7 @@ The bmotion workflow remains script-driven during this transition.
    - `config_path`
    - `toml_path`
 
-3. Prepare `experiment_config.txt` for scopes and shots.
+3. Prepare `experiment_config.ini` for scopes and shots.
 
 4. Prepare the separate bmotion TOML file for motion groups, drives, transforms,
    motion builders, and exclusion zones.

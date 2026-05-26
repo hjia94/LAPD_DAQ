@@ -38,7 +38,7 @@ exp_name = '03-LP-p21p29p41-Xline-Helium'  # experiment name
 date = datetime.date.today()
 base_path = r"E:\Shadow data\Pat"
 hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
-config_path = os.path.join(base_path, 'experiment_config.txt')
+config_path = os.path.join(base_path, 'experiment_config.ini')
 toml_path = os.path.join(base_path, 'bmotion_config.toml')
 
 #===============================================================================================================================================

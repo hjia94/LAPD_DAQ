@@ -6,7 +6,7 @@ Motion control and probe positioning functionality has been moved to the motion 
 
 Key components:
 - MultiScopeAcquisition class: Manages multiple oscilloscopes, data acquisition and storage
-- Scope configuration and metadata loaded from experiment_config.txt
+- Scope configuration and metadata loaded from experiment_config.ini
 - Save experiment info and data in HDF5 file
 - Parallel scope arming support for synchronized acquisition
 
@@ -23,7 +23,7 @@ Created on Feb.14.2024
 Updated July.2025
 - Separated motion control into dedicated motion package
 - Separate scope arming into a separate function
-- Change experiment description to read from experiment_config.txt
+- Change experiment description to read from experiment_config.ini
 
 TODO: MultiscopeAquisition class getting initial time array needs to be optimized.
 '''
@@ -41,7 +41,7 @@ import xarray as xr
 from motion import PositionManager
 #===============================================================================================================================================
 #===============================================================================================================================================
-def load_experiment_config(config_path='experiment_config.txt'):
+def load_experiment_config(config_path='experiment_config.ini'):
     """Load experiment configuration from config file.
     
     Returns:
@@ -199,10 +199,10 @@ class MultiScopeAcquisition:
         
         # Load scope IPs from config
         if 'scope_ips' not in config:
-            raise RuntimeError("No [scope_ips] section found in config. Please check experiment_config.txt")
+            raise RuntimeError("No [scope_ips] section found in config. Please check experiment_config.ini")
         self.scope_ips = dict(config.items('scope_ips'))
         if not self.scope_ips:
-            raise RuntimeError("No scope IPs found in [scope_ips] section. Please uncomment and configure scope IP addresses in experiment_config.txt")
+            raise RuntimeError("No scope IPs found in [scope_ips] section. Please uncomment and configure scope IP addresses in experiment_config.ini")
         
 
     def cleanup(self):
@@ -273,7 +273,7 @@ class MultiScopeAcquisition:
             # Store configuration files
             config_group = f.require_group('Configuration')
             
-            # Store experiment_config.txt from the raw_config_text
+            # Store experiment_config.ini from the raw_config_text
             if self.raw_config_text:
                 config_group.create_dataset('experiment_config', data=np.bytes_(self.raw_config_text))
                 print("Stored full configuration file content from memory")
@@ -704,7 +704,7 @@ def run_acquisition(save_path, config_path):
 if __name__ == '__main__':
     # test
     save_path = 'test_multiscope.h5'
-    config_path = 'experiment_config.txt'
+    config_path = 'experiment_config.ini'
     config, _ = load_experiment_config(config_path)
 
     with MultiScopeAcquisition(save_path, config) as msa:

@@ -14,7 +14,7 @@ runs.
 
 ## XY/XYZ Grid Configuration
 
-Add a `[position]` section to `experiment_config.txt` and run the CLI with
+Add a `[position]` section to `experiment_config.ini` and run the CLI with
 `--mode grid`.
 
 ```ini
@@ -45,13 +45,13 @@ Run:
 Command Prompt:
 
 ```cmd
-lapd-daq run --config experiment_config.txt --mode grid --output run_grid.hdf5
+lapd-daq run --config experiment_config.ini --mode grid --output run_grid.hdf5
 ```
 
 PowerShell:
 
 ```powershell
-lapd-daq run --config experiment_config.txt --mode grid --output run_grid.hdf5
+lapd-daq run --config experiment_config.ini --mode grid --output run_grid.hdf5
 ```
 
 ## Stationary Runs
@@ -61,13 +61,13 @@ For stationary acquisition, remove the `[position]` section or leave it empty:
 Command Prompt:
 
 ```cmd
-lapd-daq run --config experiment_config.txt --mode stationary --output run_stationary.hdf5
+lapd-daq run --config experiment_config.ini --mode stationary --output run_stationary.hdf5
 ```
 
 PowerShell:
 
 ```powershell
-lapd-daq run --config experiment_config.txt --mode stationary --output run_stationary.hdf5
+lapd-daq run --config experiment_config.ini --mode stationary --output run_stationary.hdf5
 ```
 
 ## PositionManager
@@ -79,7 +79,7 @@ control, and record achieved positions.
 ```python
 from motion import PositionManager
 
-pos_manager = PositionManager("run.hdf5", config_path="experiment_config.txt")
+pos_manager = PositionManager("run.hdf5", config_path="experiment_config.ini")
 positions = pos_manager.initialize_position_hdf5()
 mc = pos_manager.initialize_motor()
 ```

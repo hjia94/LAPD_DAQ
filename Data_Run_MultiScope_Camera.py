@@ -12,8 +12,8 @@ Main functions:
 - run_acquisition_with_WDropper(): Multi-scope and camera acquisition with tungsten dropper
 
 Configuration and metadata:
-- Scope and channel descriptions, as well as experiment metadata, are now loaded from experiment_config.txt.
-- Edit experiment_config.txt to set experiment description, scope descriptions, and channel descriptions.
+- Scope and channel descriptions, as well as experiment metadata, are now loaded from experiment_config.ini.
+- Edit experiment_config.ini to set experiment description, scope descriptions, and channel descriptions.
 - Use this script to set scope IP addresses, camera configuration, number of shots, delays, and file paths.
 
 Created July.2025
@@ -44,7 +44,7 @@ date = datetime.date.today()
 base_path = r"E:\Shadow data\Energetic_Electron_Ring\test"
 hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
 
-config_path = os.path.join(base_path, 'experiment_config.txt')
+config_path = os.path.join(base_path, 'experiment_config.ini')
 
 
 #-------------------------------------------------------------------------------------------------------------

@@ -19,9 +19,24 @@ BmotionSelection = _mod.BmotionSelection
 resolve_bmotion_selection = _mod.resolve_bmotion_selection
 
 
+class _StubMotionGroup:
+    """Minimal stand-in for a bapsf_motion MotionGroup.
+
+    Exposes ``config["drive"]["name"]`` so the parser can resolve by drive name.
+    Pass ``drive=None`` to model a group with no discoverable drive name.
+    """
+
+    def __init__(self, drive=None):
+        self.config = {}
+        if drive is not None:
+            self.config["drive"] = {"name": drive}
+
+
 class _StubRunManager:
-    def __init__(self, mg_keys):
-        self.mgs = {k: object() for k in mg_keys}
+    def __init__(self, mg_keys, drives=None):
+        """``drives`` maps a motion-group key to its physical drive name."""
+        drives = drives or {}
+        self.mgs = {k: _StubMotionGroup(drives.get(k)) for k in mg_keys}
 
 
 def _make_config(section_text=None):
@@ -118,6 +133,59 @@ class BmotionConfigTests(unittest.TestCase):
         rm = _StubRunManager([])
         with self.assertRaises(RuntimeError):
             resolve_bmotion_selection(_make_config(), rm)
+
+    # --- drive-name selection -------------------------------------------------
+    def _drive_rm(self):
+        return _StubRunManager(
+            [0, 1, 2], drives={0: "Hades", 1: "Athena", 2: "Hermes"}
+        )
+
+    def test_motion_groups_by_drive_name(self):
+        cfg = _make_config("[bmotion]\nmotion_groups = Hades, Hermes\n")
+        self.assertEqual(resolve_bmotion_selection(cfg, self._drive_rm()).mg_keys, [0, 2])
+
+    def test_motion_groups_drive_name_case_insensitive(self):
+        cfg = _make_config("[bmotion]\nmotion_groups = hades athena\n")
+        self.assertEqual(resolve_bmotion_selection(cfg, self._drive_rm()).mg_keys, [0, 1])
+
+    def test_motion_groups_index_fallback_still_works(self):
+        cfg = _make_config("[bmotion]\nmotion_groups = 0, 2\n")
+        self.assertEqual(resolve_bmotion_selection(cfg, self._drive_rm()).mg_keys, [0, 2])
+
+    def test_unknown_drive_name_raises_with_drive_hint(self):
+        cfg = _make_config("[bmotion]\nmotion_groups = Zeus\n")
+        with self.assertRaises(ValueError) as ctx:
+            resolve_bmotion_selection(cfg, self._drive_rm())
+        msg = str(ctx.exception)
+        self.assertIn("Zeus", msg)
+        self.assertIn("Hades", msg)  # hint lists available drives
+
+    def test_direction_per_drive_mapping(self):
+        cfg = _make_config(
+            "[bmotion]\nmotion_groups = Hades, Athena\ndirection = Hades=backward\n"
+        )
+        sel = resolve_bmotion_selection(cfg, self._drive_rm())
+        self.assertEqual(sel.direction, {0: "backward", 1: "forward"})
+
+    def test_direction_drive_not_selected_raises(self):
+        cfg = _make_config(
+            "[bmotion]\nmotion_groups = Hades\ndirection = Athena=backward\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            resolve_bmotion_selection(cfg, self._drive_rm())
+        self.assertIn("Athena", str(ctx.exception))
+
+    def test_duplicate_drive_name_raises(self):
+        rm = _StubRunManager([0, 1], drives={0: "Hades", 1: "Hades"})
+        cfg = _make_config("[bmotion]\nmotion_groups = all\n")
+        with self.assertRaises(ValueError) as ctx:
+            resolve_bmotion_selection(cfg, rm)
+        self.assertIn("shared", str(ctx.exception).lower())
+
+    def test_quoted_drive_name_fails(self):
+        cfg = _make_config('[bmotion]\nmotion_groups = "Hades"\n')
+        with self.assertRaises(ValueError):
+            resolve_bmotion_selection(cfg, self._drive_rm())
 
 
 if __name__ == "__main__":

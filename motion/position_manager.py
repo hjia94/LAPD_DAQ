@@ -296,7 +296,7 @@ class PositionManager:
         """
         Args:
             save_path: Path to HDF5 file
-            config_path: Path to experiment_config.txt file
+            config_path: Path to experiment_config.ini file
             num_duplicate_shots: Number of shots per position
             num_run_repeats: Number of times to repeat the entire run
         """

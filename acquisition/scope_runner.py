@@ -14,7 +14,7 @@ Layered like this:
         - one acquisition step (with or without motion)
 
     run_acquisition
-        - top-level loop driven by experiment_config.txt; the function
+        - top-level loop driven by experiment_config.ini; the function
           Data_Run.py and Data_Run_45deg.py call into.
 """
 
@@ -529,7 +529,7 @@ def run_acquisition(save_path, config_path):
 # =============================================================================
 if __name__ == '__main__':
     save_path = 'test_multiscope.h5'
-    config_path = 'experiment_config.txt'
+    config_path = 'experiment_config.ini'
     config, _ = load_experiment_config(config_path)
 
     with MultiScopeAcquisition(save_path, config) as msa:

@@ -1,6 +1,6 @@
 """Experiment-config parsing for the multi-scope acquisition pipeline.
 
-`load_experiment_config` reads `experiment_config.txt` once, returning both a
+`load_experiment_config` reads `experiment_config.ini` once, returning both a
 `ConfigParser` for structured access and the raw text for verbatim storage in
 the resulting HDF5 file.
 """
@@ -8,7 +8,7 @@ the resulting HDF5 file.
 import configparser
 
 
-def load_experiment_config(config_path='experiment_config.txt'):
+def load_experiment_config(config_path='experiment_config.ini'):
     """Load experiment configuration from config file.
 
     Returns:
@@ -16,7 +16,10 @@ def load_experiment_config(config_path='experiment_config.txt'):
             - config: ConfigParser object with parsed configuration
             - raw_config_text: Raw text content of the configuration file
     """
-    config = configparser.ConfigParser()
+    # Strip inline comments ("# ..." / "; ..." after a value) so a stray comment
+    # on a value line cannot corrupt an IP or a [bmotion] token. Matches
+    # lapd_daq.config.load_run_config.
+    config = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
 
     # Read the raw config text
     raw_config_text = ""

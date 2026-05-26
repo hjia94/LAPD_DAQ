@@ -4,15 +4,15 @@ Multi-scope data acquisition program with probe movement support.
 See multi_scope_acquisition.py for more details.
 
 Configuration and metadata:
-- Edit experiment_config.txt to set experiment description, scope/channel descriptions, and probe movement/position parameters.
+- Edit experiment_config.ini to set experiment description, scope/channel descriptions, and probe movement/position parameters.
 - Use this script to set file paths, scope and motor IP addresses, and other run-specific parameters.
 
 Created on Feb.14.2024
 @author: Jia Han
 
 Update July.2025
-- Change experiment description to read from experiment_config.txt
-- Change probe position and movement to read from experiment_config.txt
+- Change experiment description to read from experiment_config.ini
+- Change probe position and movement to read from experiment_config.ini
 
 
 TODO: this script is not optimized for speed. Need to:
@@ -35,7 +35,7 @@ exp_name = '03_speed_test'  # experiment name
 date = datetime.date.today()
 path = r"C:\data\Energetic_Electron_Ring"
 save_path = f"{path}\\{exp_name}_{date}.hdf5"
-config_path = r"C:\data\Energetic_Electron_Ring\experiment_config.txt"
+config_path = r"C:\data\Energetic_Electron_Ring\experiment_config.ini"
 
 #===============================================================================================================================================
 # Main function
