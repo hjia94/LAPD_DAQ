@@ -302,7 +302,7 @@ class MultiScopeAcquisition:
                 print(f"Error acquiring from {name}: {e}")
                 failed_scopes.append(name)
         if verbose:
-            print("✓")
+            print("done")
         return all_data
 
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
@@ -334,7 +334,7 @@ def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True):
             print('Updating scope data to HDF5...')
         msa.update_scope_hdf5(all_data, shot_num)
     else:
-        print(f"Warning: No valid data acquired at shot {shot_num}")
+        tqdm.write(f"Warning: No valid data acquired at shot {shot_num}")
 
 
 def single_shot_acquisition_45(pos, motors, msa, pos_manager, save_path, scope_ips, active_scopes):
@@ -390,7 +390,7 @@ def single_shot_acquisition_45(pos, motors, msa, pos_manager, save_path, scope_i
         msa.update_scope_hdf5(all_data, shot_num)
         pos_manager.update_position_hdf5(shot_num, positions)
     else:
-        print(f"Warning: No valid data acquired at shot {shot_num}")
+        tqdm.write(f"Warning: No valid data acquired at shot {shot_num}")
 
 
 def handle_movement(pos_manager, mc, shot_num, pos, save_path, scope_ips):
@@ -455,7 +455,7 @@ def run_acquisition(save_path, config_path):
         try:
             print("Initializing HDF5 file...", end='')
             msa.initialize_hdf5_base()
-            print("✓")
+            print("done")
 
             if pos_manager is not None:
                 positions = pos_manager.initialize_position_hdf5()
@@ -467,11 +467,11 @@ def run_acquisition(save_path, config_path):
                 else:
                     mc = pos_manager.initialize_motor()
                     if mc is None:
-                        print("\n× Warning: Failed to initialize motor controller")
+                        print("\n[!] Warning: Failed to initialize motor controller")
                         print("  - Check [motor_ips] section in your config file")
                         print("  - Continuing with stationary acquisition (motors disabled)")
                     else:
-                        print("\n✓ Motor controller initialized and ready for movement")
+                        print("\n[OK] Motor controller initialized and ready for movement")
                 total_shots = len(positions)
                 print(f"Number of positions: {len(positions)}")
                 print(f"Number of shots per position: {num_duplicate_shots}")

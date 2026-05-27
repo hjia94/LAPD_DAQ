@@ -171,7 +171,7 @@ class BmotionLoopTests(unittest.TestCase):
             move_calls.append((index, dict(ml_order_dict)))
 
         def spy_take(msa, active_scopes, hdf5_path, run_manager,
-                     record_keys, shot_num, nshots_, pbar):
+                     record_keys, shot_num, nshots_, pbar, estimator=None):
             shot_calls.append((shot_num, list(record_keys)))
             return shot_num + nshots_
 
@@ -212,7 +212,7 @@ class BmotionLoopTests(unittest.TestCase):
             move_calls.append((index, dict(ml_order_dict)))
 
         def spy_take(msa, active_scopes, hdf5_path, run_manager,
-                     record_keys, shot_num, nshots_, pbar):
+                     record_keys, shot_num, nshots_, pbar, estimator=None):
             shot_calls.append((shot_num, list(record_keys)))
             return shot_num + nshots_
 

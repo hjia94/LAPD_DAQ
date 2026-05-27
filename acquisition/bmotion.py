@@ -7,6 +7,7 @@ import traceback
 import warnings
 import xarray as xr
 
+from collections import deque
 from typing import Dict
 
 from tqdm import tqdm
@@ -17,6 +18,63 @@ from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
 
 
 _POSITION_DTYPE = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
+
+
+class _LineTimeEstimator:
+    """Line-based remaining-time estimate for a raster bmotion run.
+
+    Within a line (fixed y, sweeping x) the moves are short hops; the
+    expensive part is the long traverse when y changes to start the next
+    line. Per-shot timing therefore swings depending on whether a shot
+    followed a within-line hop or a line-start traverse, which makes any
+    per-shot extrapolation jump around. tqdm already shows that per-shot
+    rate on the bar, so we leave it alone.
+
+    For the *total* estimate we instead measure how long each completed line
+    takes end to end (the line-start traverse plus all of its positions and
+    shots) and project: remaining_seconds = avg_line_time * remaining_lines,
+    plus a partial-line correction for the line in progress. This is steadier
+    and matches how the run actually spends time.
+    """
+
+    def __init__(self, total_lines, window=5):
+        self.total_lines = max(int(total_lines), 0)
+        self._line_times = deque(maxlen=window)
+        self.lines_done = 0
+        self._current_line_start = None
+
+    def start_line(self):
+        """Call when beginning a new line (just before the line-start move)."""
+        self._current_line_start = time.time()
+
+    def finish_line(self):
+        """Call after the last shot of a line has been acquired."""
+        if self._current_line_start is not None:
+            self._line_times.append(time.time() - self._current_line_start)
+            self.lines_done += 1
+            self._current_line_start = None
+
+    def remaining_seconds(self):
+        """Best estimate of seconds left, or None until one line is complete."""
+        if not self._line_times:
+            return None
+        avg_line = sum(self._line_times) / len(self._line_times)
+        remaining_lines = max(self.total_lines - self.lines_done, 0)
+        total = avg_line * remaining_lines
+        # Credit time already spent on the line currently in progress so the
+        # estimate counts down smoothly within a line instead of only stepping
+        # at line boundaries.
+        if self._current_line_start is not None and remaining_lines > 0:
+            spent = time.time() - self._current_line_start
+            total -= min(spent, avg_line)
+        return max(total, 0.0)
+
+    def postfix(self):
+        """Short string for tqdm.set_postfix_str, or '' if not enough data."""
+        secs = self.remaining_seconds()
+        if secs is None:
+            return ""
+        return f"~{secs / 3600:.2f}h left ({self.lines_done}/{self.total_lines} lines)"
 
 
 def _build_setup_array(mg):
@@ -214,6 +272,7 @@ def _take_shots_at_position(
     shot_num: int,
     nshots: int,
     pbar,
+    estimator=None,
 ):
     """Acquire nshots at the current position, recording positions only for
     the motion groups in record_keys. Advances `pbar` once per shot and
@@ -261,49 +320,130 @@ def _take_shots_at_position(
                 )
         finally:
             shot_num += 1
+            # tqdm tracks per-shot rate on the bar itself; we only overlay the
+            # line-based total-time estimate as a postfix, refreshed each shot
+            # so it counts down smoothly within a line.
+            if estimator is not None:
+                postfix = estimator.postfix()
+                if postfix:
+                    pbar.set_postfix_str(postfix)
             pbar.update(1)
     return shot_num
+
+
+def _format_position_line(rm, mg_keys, motion_index, total_positions,
+                           line_idx, total_lines, shot_num, nshots, total_shots):
+    """Build one compact status line for a position, e.g.
+
+        -> Hermes x=3.00 y=-5.00 | pos 12/400 | line 3/20 | shots 56-60/2000
+
+    Leads with the motion group(s) that just moved (named, e.g. 'Hermes') so
+    it's clear which probe is positioned, followed by per-position progress,
+    which raster line it belongs to, and the shot-number range this position
+    will fill. Designed for tqdm.write so it sits cleanly above the bar.
+    """
+    movers = " ".join(
+        f"{rm.mgs[k].config['name']} x={rm.mgs[k].position[0]:.2f} y={rm.mgs[k].position[1]:.2f}"
+        for k in mg_keys
+    )
+    shot_lo = shot_num
+    shot_hi = shot_num + nshots - 1
+    span = f"{shot_lo}" if nshots == 1 else f"{shot_lo}-{shot_hi}"
+    parts = [
+        f"-> {movers}",
+        f"pos {motion_index + 1}/{total_positions}",
+        f"line {line_idx}/{total_lines}",
+        f"shots {span}/{total_shots}",
+    ]
+    return " | ".join(parts)
+
+
+def _positions_per_line(rm, mg_key):
+    """Number of positions in one raster line (fixed y, sweeping x).
+
+    A line is the set of unique x values at a given y, so positions_per_line
+    equals the count of distinct x coordinates in the motion list. Falls back
+    to 1 (every position is its own line) if the layout can't be determined,
+    which keeps the estimator conservative rather than wrong.
+    """
+    try:
+        arr = rm.mgs[mg_key].mb.motion_list.values
+        return max(int(np.unique(arr[:, 0]).size), 1)
+    except Exception:
+        return 1
 
 
 def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
     max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
     shot_num = 1
     record_keys = list(ml_order.keys())
-    with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
-        for motion_index in range(max_ml_size):
-            tqdm.write(f"\nMoving to position {motion_index + 1}/{max_ml_size}...")
-            move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
 
-            tqdm.write("Current positions:")
-            for mg_key in ml_order:
-                mg = run_manager.mgs[mg_key]
-                tqdm.write(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
+    # Lines are defined by the first selected group's grid; interleaved runs
+    # share a common rectangular layout across groups.
+    per_line = _positions_per_line(run_manager, record_keys[0])
+    total_lines = int(np.ceil(max_ml_size / per_line))
+    estimator = _LineTimeEstimator(total_lines)
+
+    with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True) as pbar:
+        line_idx = 0
+        for motion_index in range(max_ml_size):
+            # A new line begins whenever we cross a positions-per-line boundary.
+            if motion_index % per_line == 0:
+                estimator.finish_line()   # close the previous line (no-op on first)
+                estimator.start_line()
+                line_idx += 1
+
+            move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
+            tqdm.write(_format_position_line(
+                run_manager, list(ml_order), motion_index, max_ml_size,
+                line_idx, total_lines, shot_num, nshots, total_shots,
+            ))
 
             shot_num = _take_shots_at_position(
                 msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots, pbar,
+                estimator=estimator,
             )
+        estimator.finish_line()  # close the final line
 
 
 def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
     shot_num = 1
-    with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
+
+    # Total lines summed across all groups (each group is a self-contained
+    # raster run before the next group starts).
+    total_lines = 0
+    for mg_key in ml_order:
+        size = get_motion_list_size(run_manager, mg_key)
+        total_lines += int(np.ceil(size / _positions_per_line(run_manager, mg_key)))
+    estimator = _LineTimeEstimator(total_lines)
+
+    with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True) as pbar:
+        line_idx = 0
         for mg_key, direction in ml_order.items():
             mg = run_manager.mgs[mg_key]
             ml_size = get_motion_list_size(run_manager, mg_key)
-            tqdm.write(f"\n=== Starting motion group '{mg.config['name']}' "
+            per_line = _positions_per_line(run_manager, mg_key)
+            tqdm.write(f"=== Motion group '{mg.config['name']}' "
                        f"(key={mg_key}, {ml_size} positions, {direction}) ===")
 
             single_group_order = {mg_key: direction}
             for motion_index in range(ml_size):
-                tqdm.write(f"\n[{mg.config['name']}] Moving to position "
-                           f"{motion_index + 1}/{ml_size}...")
-                move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
+                if motion_index % per_line == 0:
+                    estimator.finish_line()   # close the previous line (no-op on first)
+                    estimator.start_line()
+                    line_idx += 1
 
-                tqdm.write(f"  '{mg.config['name']}'  : x={mg.position[0]:.2f}, y={mg.position[1]:.2f}")
+                move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
+                tqdm.write(_format_position_line(
+                    run_manager, [mg_key], motion_index, ml_size,
+                    line_idx, total_lines, shot_num, nshots, total_shots,
+                ))
 
                 shot_num = _take_shots_at_position(
                     msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots, pbar,
+                    estimator=estimator,
                 )
+        estimator.finish_line()  # close the final line
 
 
 def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
@@ -314,7 +454,7 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
 
     print("Loading TOML configuration...", end='')
     run_manager = bmotion.actors.RunManager(toml_path, auto_run=True)
-    print("✓")
+    print("done")
 
     try:
         sel = resolve_bmotion_selection(config, run_manager)
@@ -346,7 +486,7 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
         try:
             print("Initializing HDF5 file...", end='')
             msa.initialize_hdf5_base()
-            print("✓")
+            print("done")
 
             print("\nStarting initial acquisition...")
             active_scopes = msa.initialize_scopes()
