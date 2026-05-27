@@ -175,8 +175,6 @@ def write_shot_data(save_path, all_data, shot_num, channel_descriptions):
                     data=trace_data,
                     dtype='int16',
                     chunks=chunk_size,
-                    compression='lzf',
-                    shuffle=True,
                     fletcher32=True,
                 )
                 header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))
