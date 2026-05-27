@@ -22,9 +22,15 @@ import numpy as np
 # `_lab_scopes_source()` so reproducibility is preserved.
 _SOURCE_FILES = (
     'Data_Run.py',
+    'Data_Run_bmotion.py',
+    'Offload_Run.py',
     'acquisition/scope_runner.py',
     'acquisition/hdf5_writer.py',
     'acquisition/config.py',
+    'acquisition/bmotion.py',
+    'acquisition/spool_adapter.py',
+    'spooling/spool_format.py',
+    'offload_runner.py',
 )
 
 
@@ -175,6 +181,8 @@ def write_shot_data(save_path, all_data, shot_num, channel_descriptions):
                     data=trace_data,
                     dtype='int16',
                     chunks=chunk_size,
+                    compression='lzf',
+                    shuffle=True,
                     fletcher32=True,
                 )
                 header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))

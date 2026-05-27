@@ -20,6 +20,15 @@ def run_acquisition_bmotion(*args, **kwargs):
 
     return _run_acquisition_bmotion(*args, **kwargs)
 
+
+def run_acquisition_bmotion_spooled(*args, **kwargs):
+    from .bmotion import (
+        run_acquisition_bmotion_spooled as _run_acquisition_bmotion_spooled,
+    )
+
+    return _run_acquisition_bmotion_spooled(*args, **kwargs)
+
+
 __all__ = [
     "BmotionSelection",
     "MultiScopeAcquisition",
@@ -27,6 +36,7 @@ __all__ = [
     "resolve_bmotion_selection",
     "run_acquisition",
     "run_acquisition_bmotion",
+    "run_acquisition_bmotion_spooled",
     "single_shot_acquisition",
     "single_shot_acquisition_45",
 ]

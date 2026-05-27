@@ -104,43 +104,50 @@ def _build_setup_array(mg):
     return setup, xpos, ypos
 
 
-def configure_bmotion_hdf5_group(
-    hdf5_path: str,
-    total_shots: int,
-    n_motion_groups: int,
-    toml_path: str,
-    run_manager: bmotion.actors.RunManager,
-    selected_mg_keys,
-    ml_order: Dict = None,
-    execution_order: str = "interleaved",
-):
-    # Validate every selected motion group up front so we abort before
-    # creating any HDF5 datasets if one of them is unsupported.
+def collect_bmotion_position_setup(run_manager, selected_mg_keys):
+    """Validate selected motion groups and gather their planned-position layout.
+
+    Returns a list of ``(mg_key, mg_name, setup_array, xpos, ypos)`` tuples,
+    pre-validated so callers can abort before creating any HDF5 datasets if a
+    motion group is unsupported. Split out of ``configure_bmotion_hdf5_group``
+    so the spool/offload path can capture this layout (plain numpy arrays) and
+    rebuild the HDF5 positions groups later without a live ``RunManager``.
+    """
     prepared = []
     for mg_key in selected_mg_keys:
         mg = run_manager.mgs[mg_key]
         setup, xpos, ypos = _build_setup_array(mg)
         prepared.append((mg_key, mg.config['name'], setup, xpos, ypos))
+    return prepared
 
+
+def write_bmotion_position_groups(
+    hdf5_path: str,
+    total_shots: int,
+    toml_text: str,
+    selection_blob: str,
+    prepared,
+):
+    """Create the Control/Positions groups and bmotion Configuration datasets.
+
+    Takes plain values (``toml_text``, ``selection_blob`` JSON string, and the
+    ``prepared`` list from :func:`collect_bmotion_position_setup`) so it is
+    usable both in-process (with a live RunManager) and from the offload process
+    (reconstructing from spooled metadata).
+    """
     with h5py.File(hdf5_path, 'a') as f:
         ctl_grp = f.require_group('Control')
         pos_grp = ctl_grp.require_group('Positions')
 
-        # Store TOML configuration file
         config_grp = f.require_group('Configuration')
-        with open(toml_path, 'r') as toml_file:
-            bmotion_config_text = toml_file.read()
-            config_grp.create_dataset('bmotion_config', data=np.bytes_(bmotion_config_text))
-
-        # Record exactly which subset/direction was used for this run.
-        selection_blob = json.dumps({
-            "mg_keys": [str(k) for k in selected_mg_keys],
-            "direction": {str(k): v for k, v in (ml_order or {}).items()},
-            "execution_order": execution_order,
-        })
-        config_grp.create_dataset('bmotion_selection', data=np.bytes_(selection_blob))
+        if 'bmotion_config' not in config_grp:
+            config_grp.create_dataset('bmotion_config', data=np.bytes_(toml_text))
+        if 'bmotion_selection' not in config_grp:
+            config_grp.create_dataset('bmotion_selection', data=np.bytes_(selection_blob))
 
         for mg_key, mg_name, setup, xpos, ypos in prepared:
+            if mg_name in pos_grp:
+                continue
             mg_group = pos_grp.create_group(mg_name)
             mg_group.attrs['name'] = mg_name
             mg_group.attrs['key'] = str(mg_key)
@@ -154,6 +161,40 @@ def configure_bmotion_hdf5_group(
             mg_group.create_dataset(
                 'positions_array', shape=(total_shots,), dtype=_POSITION_DTYPE,
             )
+
+
+def build_bmotion_selection_blob(selected_mg_keys, ml_order, execution_order):
+    """JSON string recording which motion-group subset/direction a run used."""
+    return json.dumps({
+        "mg_keys": [str(k) for k in selected_mg_keys],
+        "direction": {str(k): v for k, v in (ml_order or {}).items()},
+        "execution_order": execution_order,
+    })
+
+
+def configure_bmotion_hdf5_group(
+    hdf5_path: str,
+    total_shots: int,
+    n_motion_groups: int,
+    toml_path: str,
+    run_manager: bmotion.actors.RunManager,
+    selected_mg_keys,
+    ml_order: Dict = None,
+    execution_order: str = "interleaved",
+):
+    # Validate every selected motion group up front so we abort before
+    # creating any HDF5 datasets if one of them is unsupported.
+    prepared = collect_bmotion_position_setup(run_manager, selected_mg_keys)
+
+    with open(toml_path, 'r') as toml_file:
+        toml_text = toml_file.read()
+    selection_blob = build_bmotion_selection_blob(
+        selected_mg_keys, ml_order, execution_order
+    )
+
+    write_bmotion_position_groups(
+        hdf5_path, total_shots, toml_text, selection_blob, prepared,
+    )
 
 
 def get_motion_list_size(rm: bmotion.actors.RunManager, mg_key) -> int:
@@ -243,6 +284,20 @@ def move_to_index(
     #         all_motors_set = True
 
 
+def read_bmotion_positions(rm, mg_keys):
+    """Read each selected motion group's current position into a coords dict.
+
+    Returns ``{mg_name: (x, y)}`` so callers can either write it straight to
+    HDF5 (in-process) or bundle it into a spooled shot payload (parallel mode).
+    """
+    coords = {}
+    for key in mg_keys:
+        mg = rm.mgs[key]
+        positions = mg.position.value
+        coords[mg.config['name']] = (positions[0], positions[1])
+    return coords
+
+
 def record_bmotion_positions(
     hdf5_path: str,
     shotnum: int,
@@ -250,17 +305,82 @@ def record_bmotion_positions(
     mg_keys,
 ) -> None:
 
+    coords = read_bmotion_positions(rm, mg_keys)
     with h5py.File(hdf5_path, 'a') as f:
-        for key in mg_keys:
-            mg = rm.mgs[key]
-            mg_name = mg.config['name']
-            positions = mg.position.value
-
+        for mg_name, (x, y) in coords.items():
             # Access the positions_array for this specific motion group directly under Control/Positions
             dataset = f[f"Control/Positions/{mg_name}/positions_array"]
-            
+
             # Record position for this shot using structured array format (shot_num is 1-based, array is 0-based)
-            dataset[shotnum - 1] = (shotnum, positions[0], positions[1])
+            dataset[shotnum - 1] = (shotnum, x, y)
+
+
+class _Hdf5ShotSink:
+    """Per-shot sink that writes straight into the final HDF5 file (legacy,
+    in-process behaviour). Used when no parallel spool is configured."""
+
+    def __init__(self, msa, active_scopes, hdf5_path, run_manager):
+        self.msa = msa
+        self.active_scopes = active_scopes
+        self.hdf5_path = hdf5_path
+        self.run_manager = run_manager
+
+    def take_shot(self, shot_num, record_keys):
+        # arm + acquire + write scope data to HDF5 (as single_shot_acquisition).
+        single_shot_acquisition(self.msa, self.active_scopes, shot_num, verbose=False)
+        record_bmotion_positions(
+            hdf5_path=self.hdf5_path, shotnum=shot_num,
+            rm=self.run_manager, mg_keys=record_keys,
+        )
+
+    def mark_skipped(self, shot_num, reason, record_keys):
+        with h5py.File(self.hdf5_path, 'a') as f:
+            for scope_name in self.msa.scope_ips:
+                scope_group = f[scope_name]
+                if f'shot_{shot_num}' not in scope_group:
+                    shot_group = scope_group.create_group(f'shot_{shot_num}')
+                    shot_group.attrs['skipped'] = True
+                    shot_group.attrs['skip_reason'] = str(reason)
+                    shot_group.attrs['acquisition_time'] = time.ctime()
+        record_bmotion_positions(
+            hdf5_path=self.hdf5_path, shotnum=shot_num,
+            rm=self.run_manager, mg_keys=record_keys,
+        )
+
+
+class _SpoolShotSink:
+    """Per-shot sink that writes to the fast-disk spool instead of the HDF5.
+
+    The probe is already at position when this runs; per the parallel design
+    the order per shot is arm -> acquire -> read positions -> write bin+done.
+    A separate offload process turns the spool into the HDF5 file.
+    """
+
+    def __init__(self, msa, active_scopes, spool_dir, run_manager):
+        self.msa = msa
+        self.active_scopes = active_scopes
+        self.spool_dir = spool_dir
+        self.run_manager = run_manager
+
+    def take_shot(self, shot_num, record_keys):
+        from spooling import spool_format
+        from . import spool_adapter
+
+        self.msa.arm_scopes_for_trigger(self.active_scopes, verbose=False)
+        all_data = self.msa.acquire_shot(self.active_scopes, shot_num, verbose=False)
+        if not all_data:
+            raise RuntimeError(f"No valid data acquired at shot {shot_num}")
+        coords = read_bmotion_positions(self.run_manager, record_keys)
+        payload = spool_adapter.all_data_to_payload(all_data, shot_num, coords)
+        spool_format.write_shot(self.spool_dir, payload)
+
+    def mark_skipped(self, shot_num, reason, record_keys):
+        from spooling import spool_format
+        from . import spool_adapter
+
+        coords = read_bmotion_positions(self.run_manager, record_keys)
+        payload = spool_adapter.skipped_payload(shot_num, reason, coords)
+        spool_format.write_shot(self.spool_dir, payload)
 
 
 def _take_shots_at_position(
@@ -273,51 +393,26 @@ def _take_shots_at_position(
     nshots: int,
     pbar,
     estimator=None,
+    sink=None,
 ):
     """Acquire nshots at the current position, recording positions only for
     the motion groups in record_keys. Advances `pbar` once per shot and
-    returns the next shot_num."""
+    returns the next shot_num.
+
+    The actual per-shot write is delegated to `sink`; when None, a legacy
+    HDF5 sink is used (writes straight to `hdf5_path`)."""
+    if sink is None:
+        sink = _Hdf5ShotSink(msa, active_scopes, hdf5_path, run_manager)
+
     for n in range(nshots):
         try:
-            single_shot_acquisition(msa, active_scopes, shot_num, verbose=False)
-            record_bmotion_positions(
-                hdf5_path=hdf5_path,
-                shotnum=shot_num,
-                rm=run_manager,
-                mg_keys=record_keys,
-            )
+            sink.take_shot(shot_num, record_keys)
         except (ValueError, RuntimeError) as e:
             tqdm.write(f'Skipping shot {shot_num} - {str(e)}')
-            with h5py.File(hdf5_path, 'a') as f:
-                for scope_name in msa.scope_ips:
-                    scope_group = f[scope_name]
-                    if f'shot_{shot_num}' not in scope_group:
-                        shot_group = scope_group.create_group(f'shot_{shot_num}')
-                        shot_group.attrs['skipped'] = True
-                        shot_group.attrs['skip_reason'] = str(e)
-                        shot_group.attrs['acquisition_time'] = time.ctime()
-                record_bmotion_positions(
-                    hdf5_path=hdf5_path,
-                    shotnum=shot_num,
-                    rm=run_manager,
-                    mg_keys=record_keys,
-                )
+            sink.mark_skipped(shot_num, str(e), record_keys)
         except Exception as e:
             tqdm.write(f'Motion failed for shot {shot_num} - {str(e)}')
-            with h5py.File(hdf5_path, 'a') as f:
-                for scope_name in msa.scope_ips:
-                    scope_group = f[scope_name]
-                    if f'shot_{shot_num}' not in scope_group:
-                        shot_group = scope_group.create_group(f'shot_{shot_num}')
-                        shot_group.attrs['skipped'] = True
-                        shot_group.attrs['skip_reason'] = f"Motion failed: {str(e)}"
-                        shot_group.attrs['acquisition_time'] = time.ctime()
-                record_bmotion_positions(
-                    hdf5_path=hdf5_path,
-                    shotnum=shot_num,
-                    rm=run_manager,
-                    mg_keys=record_keys,
-                )
+            sink.mark_skipped(shot_num, f"Motion failed: {str(e)}", record_keys)
         finally:
             shot_num += 1
             # tqdm tracks per-shot rate on the bar itself; we only overlay the
@@ -367,7 +462,7 @@ def _positions_per_line(rm, mg_key):
         return 1
 
 
-def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
+def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots, sink=None):
     max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
     shot_num = 1
     record_keys = list(ml_order.keys())
@@ -392,12 +487,13 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
 
             shot_num = _take_shots_at_position(
                 msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots, pbar,
-                estimator=estimator,
+                estimator=estimator, sink=sink,
             )
         estimator.finish_line()  # close the final line
+    return shot_num
 
 
-def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots):
+def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots, sink=None):
     shot_num = 1
 
     # Total lines summed across all groups (each group is a self-contained
@@ -429,14 +525,18 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
 
                 shot_num = _take_shots_at_position(
                     msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots, pbar,
-                    estimator=estimator,
+                    estimator=estimator, sink=sink,
                 )
         estimator.finish_line()  # close the final line
+    return shot_num
 
 
-def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
-    print('Starting acquisition at', time.ctime())
+def _prepare_bmotion_run(toml_path, config_path):
+    """Shared setup for both the in-process and spooled bmotion runs.
 
+    Loads config, starts the RunManager, resolves the motion-group selection,
+    and computes total shot counts. Returns everything the run loops need.
+    """
     config, raw_config_text = load_experiment_config(config_path)
     nshots = config.getint('nshots', 'num_duplicate_shots', fallback=1)
 
@@ -470,6 +570,29 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
     total_shots = total_positions * nshots
     print(f"Total shots: {total_shots}")
 
+    return {
+        "config": config,
+        "raw_config_text": raw_config_text,
+        "nshots": nshots,
+        "run_manager": run_manager,
+        "ml_order": ml_order,
+        "execution_order": execution_order,
+        "total_shots": total_shots,
+    }
+
+
+def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
+    print('Starting acquisition at', time.ctime())
+
+    ctx = _prepare_bmotion_run(toml_path, config_path)
+    config = ctx["config"]
+    raw_config_text = ctx["raw_config_text"]
+    nshots = ctx["nshots"]
+    run_manager = ctx["run_manager"]
+    ml_order = ctx["ml_order"]
+    execution_order = ctx["execution_order"]
+    total_shots = ctx["total_shots"]
+
     with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
         try:
             print("Initializing HDF5 file...", end='')
@@ -501,3 +624,71 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
             raise RuntimeError() from err
         finally:
             run_manager.terminate()
+
+
+def run_acquisition_bmotion_spooled(spool_dir, toml_path, config_path):
+    """Parallel-mode acquisition: write each shot to the fast-disk spool.
+
+    Mirrors :func:`run_acquisition_bmotion` but, instead of writing the HDF5
+    file directly, it writes the run metadata + per-shot bin files to
+    ``spool_dir`` for a separate offload process to consume. The scopes never
+    wait on the slow output disk. Per-shot order is unchanged: move + settle +
+    disable (per position), then arm -> acquire -> read position -> write
+    bin+done.
+    """
+    from spooling import spool_format
+    from . import spool_adapter
+
+    print('Starting spooled acquisition at', time.ctime())
+
+    ctx = _prepare_bmotion_run(toml_path, config_path)
+    config = ctx["config"]
+    raw_config_text = ctx["raw_config_text"]
+    nshots = ctx["nshots"]
+    run_manager = ctx["run_manager"]
+    ml_order = ctx["ml_order"]
+    execution_order = ctx["execution_order"]
+    total_shots = ctx["total_shots"]
+
+    last_shot_num = 0
+    # MultiScopeAcquisition's save_path is unused on the spool path (no HDF5
+    # writes happen here), but the class still wants a value.
+    with MultiScopeAcquisition(spool_dir, config, raw_config_text) as msa:
+        try:
+            print("\nStarting initial acquisition...")
+            active_scopes = msa.initialize_scopes()
+            if msa.scope_ips and not active_scopes:
+                raise RuntimeError(
+                    "No valid data found from any scope. Aborting acquisition."
+                )
+
+            meta = spool_adapter.build_run_metadata(
+                msa, active_scopes, run_manager, list(ml_order.keys()),
+                ml_order, execution_order, toml_path, total_shots,
+            )
+            spool_format.write_run_metadata(spool_dir, meta)
+            print(f"Wrote run metadata to spool: {spool_dir}")
+
+            sink = _SpoolShotSink(msa, active_scopes, spool_dir, run_manager)
+
+            if execution_order == "sequential":
+                last_shot_num = _run_sequential(
+                    msa, active_scopes, spool_dir, run_manager,
+                    ml_order, nshots, total_shots, sink=sink,
+                )
+            else:
+                last_shot_num = _run_interleaved(
+                    msa, active_scopes, spool_dir, run_manager,
+                    ml_order, nshots, total_shots, sink=sink,
+                )
+
+        except KeyboardInterrupt as err:
+            print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+            raise RuntimeError() from err
+        finally:
+            run_manager.terminate()
+            # `_run_*` return the next (unused) shot number; total_shots is the
+            # count actually emitted unless interrupted. Use whichever advanced.
+            final = last_shot_num - 1 if last_shot_num else total_shots
+            spool_format.write_run_complete(spool_dir, final)
+            print(f"Wrote RUN_COMPLETE (final_shot_num={final}) to spool")

@@ -45,3 +45,18 @@ def load_experiment_config(config_path='experiment_config.ini'):
         config.set('experiment', 'description', 'No experiment description provided')
 
     return config, raw_config_text
+
+
+def get_storage_paths(config):
+    """Return parallel-mode storage paths from the optional [storage] section.
+
+    The two-process (spool + offload) pipeline writes shots to a fast local
+    ``spool_dir`` and offloads them into ``hdf5_path`` on a slower/larger disk.
+    Returns ``(spool_dir, hdf5_path)`` with either value possibly ``None`` when
+    not configured, so callers can fall back to the legacy single-process path.
+    """
+    if 'storage' not in config:
+        return None, None
+    spool_dir = config.get('storage', 'spool_dir', fallback=None) or None
+    hdf5_path = config.get('storage', 'hdf5_path', fallback=None) or None
+    return spool_dir, hdf5_path
