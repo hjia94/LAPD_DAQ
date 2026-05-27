@@ -331,8 +331,7 @@ def _take_shots_at_position(
     return shot_num
 
 
-def _format_position_line(rm, mg_keys, motion_index, total_positions,
-                           line_idx, total_lines, shot_num, nshots, total_shots):
+def _format_position_line(rm, mg_keys, motion_index, total_positions):
     """Build one compact status line for a position, e.g.
 
         -> Hermes x=3.00 y=-5.00 | pos 12/400 | line 3/20 | shots 56-60/2000
@@ -346,14 +345,9 @@ def _format_position_line(rm, mg_keys, motion_index, total_positions,
         f"{rm.mgs[k].config['name']} x={rm.mgs[k].position[0]:.2f} y={rm.mgs[k].position[1]:.2f}"
         for k in mg_keys
     )
-    shot_lo = shot_num
-    shot_hi = shot_num + nshots - 1
-    span = f"{shot_lo}" if nshots == 1 else f"{shot_lo}-{shot_hi}"
     parts = [
         f"-> {movers}",
-        f"pos {motion_index + 1}/{total_positions}",
-        f"line {line_idx}/{total_lines}",
-        f"shots {span}/{total_shots}",
+        f"pos {motion_index + 1}/{total_positions}"
     ]
     return " | ".join(parts)
 
@@ -394,10 +388,7 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
                 line_idx += 1
 
             move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
-            tqdm.write(_format_position_line(
-                run_manager, list(ml_order), motion_index, max_ml_size,
-                line_idx, total_lines, shot_num, nshots, total_shots,
-            ))
+            tqdm.write(_format_position_line(run_manager, list(ml_order), motion_index, max_ml_size))
 
             shot_num = _take_shots_at_position(
                 msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots, pbar,
@@ -434,10 +425,7 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
                     line_idx += 1
 
                 move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
-                tqdm.write(_format_position_line(
-                    run_manager, [mg_key], motion_index, ml_size,
-                    line_idx, total_lines, shot_num, nshots, total_shots,
-                ))
+                tqdm.write(_format_position_line(run_manager, [mg_key], motion_index, ml_size))
 
                 shot_num = _take_shots_at_position(
                     msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots, pbar,
