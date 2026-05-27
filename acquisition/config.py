@@ -59,16 +59,50 @@ def get_experiment_name(config):
     return (name or 'experiment').strip()
 
 
+def hdf5_filename(exp_name, date=None):
+    """Build the standard HDF5 filename ``<exp_name>_<YYYY-MM-DD>.hdf5``.
+
+    Centralized so every entry point (acquisition and offload) derives the
+    exact same name from the same config.
+    """
+    import datetime as _datetime
+
+    if date is None:
+        date = _datetime.date.today()
+    return f"{exp_name}_{date}.hdf5"
+
+
 def get_storage_paths(config):
-    """Return parallel-mode storage paths from the optional [storage] section.
+    """Return parallel-mode storage directories from the optional [storage] section.
 
     The two-process (spool + offload) pipeline writes shots to a fast local
-    ``spool_dir`` and offloads them into ``hdf5_path`` on a slower/larger disk.
-    Returns ``(spool_dir, hdf5_path)`` with either value possibly ``None`` when
-    not configured, so callers can fall back to the legacy single-process path.
+    ``spool_dir`` and offloads them into an HDF5 file under ``hdf5_dir`` on a
+    slower/larger disk. Both values are *directories*; the HDF5 filename is
+    derived from the experiment name (see :func:`resolve_hdf5_path`).
+
+    ``hdf5_path`` is accepted as a backward-compatible alias for ``hdf5_dir``
+    and is likewise treated as a directory. Returns ``(spool_dir, hdf5_dir)``
+    with either possibly ``None`` when not configured, so callers can fall back
+    to the legacy single-process path.
     """
     if 'storage' not in config:
         return None, None
     spool_dir = config.get('storage', 'spool_dir', fallback=None) or None
-    hdf5_path = config.get('storage', 'hdf5_path', fallback=None) or None
-    return spool_dir, hdf5_path
+    hdf5_dir = (config.get('storage', 'hdf5_dir', fallback=None)
+                or config.get('storage', 'hdf5_path', fallback=None) or None)
+    return spool_dir, hdf5_dir
+
+
+def resolve_hdf5_path(config, base_path, date=None):
+    """Return the full HDF5 file path for a run.
+
+    Uses ``[storage] hdf5_dir`` as the output directory when set, otherwise
+    ``base_path``; the filename is always ``<exp_name>_<date>.hdf5`` built from
+    ``[experiment] name``. Both the acquisition and offload processes call this
+    so they target the same file.
+    """
+    import os as _os
+
+    _spool_dir, hdf5_dir = get_storage_paths(config)
+    out_dir = hdf5_dir or base_path
+    return _os.path.join(out_dir, hdf5_filename(get_experiment_name(config), date))

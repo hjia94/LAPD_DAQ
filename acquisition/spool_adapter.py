@@ -110,11 +110,16 @@ def build_run_metadata(msa, active_scopes, run_manager, selected_mg_keys,
         for key, value in msa.config.items("channels"):
             channel_descriptions[key] = value
 
+    from .config import get_experiment_name, hdf5_filename
+
     return {
         "writer": WRITER_TAG,
         "experiment_description": msa.get_experiment_description(),
         "source_code": hdf5_writer.read_source_files(),
         "raw_config_text": msa.raw_config_text,
+        # Filename the acquire side intends; the offload uses this verbatim so a
+        # run that crosses midnight still targets one consistent file.
+        "hdf5_filename": hdf5_filename(get_experiment_name(msa.config)),
         "config_scope_names": list(active_scopes.keys()),
         "scopes": scopes,
         "channel_descriptions": channel_descriptions,

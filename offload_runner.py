@@ -13,6 +13,7 @@ the ``acquisition`` (bmotion) one; a ``lapd_daq`` adapter can be added without
 touching this loop.
 """
 
+import os
 import time
 
 import h5py
@@ -37,11 +38,15 @@ def _get_adapter(writer_tag):
 
 
 def run_offload(spool_dir, hdf5_path, config=None, poll_seconds=_POLL_SECONDS):
-    """Drain ``spool_dir`` into ``hdf5_path`` until RUN_COMPLETE, then exit.
+    """Drain ``spool_dir`` into the destination HDF5 until RUN_COMPLETE, then exit.
 
     Args:
         spool_dir: fast-disk spool directory written by the acquire process.
-        hdf5_path: destination HDF5 file on the slow/large disk.
+        hdf5_path: destination HDF5 file on the slow/large disk. If the run
+            metadata records an ``hdf5_filename`` (it does for runs produced by
+            this codebase), that name is used inside ``dirname(hdf5_path)`` so
+            the offload always matches the file the acquire process intended,
+            even across a midnight date rollover.
         config: optional ConfigParser; only used as a fallback by the HDF5
             metadata writer when the spooled raw config text is empty.
         poll_seconds: idle poll interval.
@@ -50,6 +55,12 @@ def run_offload(spool_dir, hdf5_path, config=None, poll_seconds=_POLL_SECONDS):
     _wait_for(lambda: spool_format.run_metadata_exists(spool_dir), poll_seconds)
 
     meta = spool_format.read_run_metadata(spool_dir)
+
+    # Prefer the filename the acquire side recorded, under the configured dir.
+    meta_filename = meta.get("hdf5_filename")
+    if meta_filename:
+        hdf5_path = os.path.join(os.path.dirname(hdf5_path), meta_filename)
+
     adapter = _get_adapter(meta.get("writer"))
     print(f"Offload: writer={meta.get('writer')}, building HDF5 skeleton -> {hdf5_path}")
     adapter.build_skeleton(hdf5_path, meta, config, meta.get("raw_config_text", ""))

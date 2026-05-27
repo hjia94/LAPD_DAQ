@@ -25,9 +25,9 @@ import logging
 
 from acquisition import run_acquisition_bmotion, run_acquisition_bmotion_spooled
 from acquisition.config import (
-    get_experiment_name,
     get_storage_paths,
     load_experiment_config,
+    resolve_hdf5_path,
 )
 
 logging.basicConfig(
@@ -56,16 +56,13 @@ def main():
         os.makedirs(base_path)
 
     # Parse the config first; the experiment name and the HDF5 filename come
-    # from it (not from a hard-coded variable in this script).
+    # from it (not from a hard-coded variable in this script). The output file
+    # is <hdf5_dir or base_path>/<exp_name>_<date>.hdf5.
     config, _ = load_experiment_config(config_path)
-    exp_name = get_experiment_name(config)
-    date = datetime.date.today()
-    hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
+    hdf5_path = resolve_hdf5_path(config, base_path)
 
     # Parallel mode is enabled when [storage] provides a fast spool_dir.
-    spool_dir, storage_hdf5_path = get_storage_paths(config)
-    if storage_hdf5_path:
-        hdf5_path = storage_hdf5_path
+    spool_dir, _hdf5_dir = get_storage_paths(config)
     spooled = bool(spool_dir)
 
     if spooled:

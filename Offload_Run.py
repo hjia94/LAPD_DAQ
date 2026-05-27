@@ -22,7 +22,11 @@ import os
 import sys
 import time
 
-from acquisition.config import get_storage_paths, load_experiment_config
+from acquisition.config import (
+    get_storage_paths,
+    load_experiment_config,
+    resolve_hdf5_path,
+)
 from offload_runner import run_offload
 
 ############################################################################################################################
@@ -35,12 +39,15 @@ config_path = os.path.join(base_path, 'experiment_config.ini')
 #===============================================================================================================================================
 def main():
     config, _ = load_experiment_config(config_path)
-    spool_dir, hdf5_path = get_storage_paths(config)
+    spool_dir, hdf5_dir = get_storage_paths(config)
 
-    if not spool_dir or not hdf5_path:
-        print("No [storage] section with spool_dir + hdf5_path found in "
+    if not spool_dir or not hdf5_dir:
+        print("No [storage] section with spool_dir + hdf5_dir found in "
               f"{config_path}. Nothing to offload.")
         sys.exit(1)
+
+    # Derive the same destination file the acquisition process targets.
+    hdf5_path = resolve_hdf5_path(config, base_path)
 
     # Guard the destination file the same way Data_Run does.
     if os.path.exists(hdf5_path):
