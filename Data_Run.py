@@ -23,17 +23,18 @@ TODO: this script is not optimized for speed. Need to:
 import datetime
 import os
 from acquisition import run_acquisition
+from acquisition.config import get_experiment_name, load_experiment_config
 import time
 import sys
 
 ############################################################################################################################
 '''
-User set following
+User sets only the base path below. The experiment name lives in
+experiment_config.ini ([experiment] name = ...); the config is found inside
+base_path, and the HDF5 filename is built from the parsed experiment name
+after the config is read.
 '''
-exp_name = '00_speed_test'  # experiment name
-date = datetime.date.today()
 base_path = r"E:\Shadow data\Pat"
-hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
 config_path = os.path.join(base_path, 'experiment_config.ini')
 
 #===============================================================================================================================================
@@ -43,6 +44,13 @@ def main():
     # Create save directory if it doesn't exist
     if not os.path.exists(base_path):
         os.makedirs(base_path)
+
+    # Parse the config first; the experiment name and the HDF5 filename come
+    # from it (not from a hard-coded variable in this script).
+    config, _ = load_experiment_config(config_path)
+    exp_name = get_experiment_name(config)
+    date = datetime.date.today()
+    hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
 
     # Check if file already exists
     if os.path.exists(hdf5_path):

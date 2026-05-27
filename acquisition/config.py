@@ -47,6 +47,18 @@ def load_experiment_config(config_path='experiment_config.ini'):
     return config, raw_config_text
 
 
+def get_experiment_name(config):
+    """Return the experiment name from [experiment] name (or exp_name).
+
+    The Data_Run entry scripts now take only a base path; the experiment name
+    lives in the config file and the HDF5 filename is derived from it after
+    parsing. Falls back to 'experiment' if unset.
+    """
+    name = (config.get('experiment', 'name', fallback=None)
+            or config.get('experiment', 'exp_name', fallback=None))
+    return (name or 'experiment').strip()
+
+
 def get_storage_paths(config):
     """Return parallel-mode storage paths from the optional [storage] section.
 

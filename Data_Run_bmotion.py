@@ -24,7 +24,11 @@ import sys
 import logging
 
 from acquisition import run_acquisition_bmotion, run_acquisition_bmotion_spooled
-from acquisition.config import get_storage_paths, load_experiment_config
+from acquisition.config import (
+    get_experiment_name,
+    get_storage_paths,
+    load_experiment_config,
+)
 
 logging.basicConfig(
     filename='motor.log',
@@ -34,12 +38,12 @@ logging.basicConfig(
 
 ############################################################################################################################
 '''
-User set following
+User sets only the base path below. The experiment name lives in
+experiment_config.ini ([experiment] name = ...); the config and bmotion TOML
+are found inside base_path, and the HDF5 filename is built from the parsed
+experiment name after the config is read.
 '''
-exp_name = '03-LP-p21p29p41-Xline-Helium'  # experiment name
-date = datetime.date.today()
 base_path = r"E:\Shadow data\Pat"
-hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
 config_path = os.path.join(base_path, 'experiment_config.ini')
 toml_path = os.path.join(base_path, 'bmotion_config.toml')
 
@@ -51,9 +55,17 @@ def main():
     if not os.path.exists(base_path):
         os.makedirs(base_path)
 
-    # Parallel mode is enabled when [storage] provides a fast spool_dir.
+    # Parse the config first; the experiment name and the HDF5 filename come
+    # from it (not from a hard-coded variable in this script).
     config, _ = load_experiment_config(config_path)
+    exp_name = get_experiment_name(config)
+    date = datetime.date.today()
+    hdf5_path = os.path.join(base_path, f"{exp_name}_{date}.hdf5")
+
+    # Parallel mode is enabled when [storage] provides a fast spool_dir.
     spool_dir, storage_hdf5_path = get_storage_paths(config)
+    if storage_hdf5_path:
+        hdf5_path = storage_hdf5_path
     spooled = bool(spool_dir)
 
     if spooled:
@@ -61,8 +73,7 @@ def main():
         if not os.path.exists(spool_dir):
             os.makedirs(spool_dir)
         print(f'PARALLEL mode: spooling shots to {spool_dir}')
-        print(f'  Run Offload_Run.py to write the HDF5 file '
-              f'({storage_hdf5_path or hdf5_path}).')
+        print(f'  Run Offload_Run.py to write the HDF5 file ({hdf5_path}).')
     else:
         # Legacy single-process: guard the destination HDF5 up front.
         if os.path.exists(hdf5_path):
