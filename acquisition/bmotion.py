@@ -395,6 +395,20 @@ class _SpoolShotSink:
         spool_format.write_shot(self.spool_dir, payload)
 
 
+def _safe_mark_skipped(sink, shot_num, reason, record_keys):
+    """Record a skipped shot, but never let skip-recording itself abort the run.
+
+    ``mark_skipped`` reads the motor position (and, for the HDF5 sink, reopens
+    the file); if the underlying cause is a broken motor link, that read can
+    raise. A failure here must degrade to a logged warning -- losing the skip
+    record for one shot -- rather than killing a long run.
+    """
+    try:
+        sink.mark_skipped(shot_num, reason, record_keys)
+    except Exception as e:  # noqa: BLE001
+        tqdm.write(f"Warning: could not record skip for shot {shot_num}: {e}")
+
+
 def _take_shots_at_position(
     msa,
     active_scopes,
@@ -421,10 +435,10 @@ def _take_shots_at_position(
             sink.take_shot(shot_num, record_keys)
         except (ValueError, RuntimeError) as e:
             tqdm.write(f'Skipping shot {shot_num} - {str(e)}')
-            sink.mark_skipped(shot_num, str(e), record_keys)
+            _safe_mark_skipped(sink, shot_num, str(e), record_keys)
         except Exception as e:
             tqdm.write(f'Motion failed for shot {shot_num} - {str(e)}')
-            sink.mark_skipped(shot_num, f"Motion failed: {str(e)}", record_keys)
+            _safe_mark_skipped(sink, shot_num, f"Motion failed: {str(e)}", record_keys)
         finally:
             shot_num += 1
             # tqdm tracks per-shot rate on the bar itself; we only overlay the
@@ -474,7 +488,33 @@ def _positions_per_line(rm, mg_key):
         return 1
 
 
-def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots, sink=None):
+def _do_move(run_manager, ml_order_dict, motion_index, move_opts, run_state):
+    """Move to ``motion_index``. Returns True to continue, False to abort.
+
+    When ``move_opts`` is None (legacy in-process path), uses the original
+    ``move_to_index`` unchanged. When provided (spooled path), uses
+    ``move_with_recovery``; on a terminal :class:`MotorError` it records the
+    reason in ``run_state`` and returns False so the caller stops cleanly.
+    """
+    if move_opts is None:
+        move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order_dict)
+        return True
+    from .motor_recovery import move_with_recovery, MotorError, safe_stop
+    try:
+        move_with_recovery(run_manager, ml_order_dict, motion_index,
+                           log=tqdm.write, **move_opts)
+        return True
+    except MotorError as e:
+        tqdm.write(f"\n______Terminating run: motor failure______\n{e}")
+        safe_stop(run_manager)
+        if run_state is not None:
+            run_state["terminated_early"] = True
+            run_state["abort_reason"] = str(e)
+        return False
+
+
+def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots,
+                     total_shots, sink=None, move_opts=None, run_state=None):
     max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
     shot_num = 1
     record_keys = list(ml_order.keys())
@@ -494,7 +534,8 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
                 estimator.start_line()
                 line_idx += 1
 
-            move_to_index(index=motion_index, rm=run_manager, ml_order_dict=ml_order)
+            if not _do_move(run_manager, ml_order, motion_index, move_opts, run_state):
+                break  # terminal motor failure -> stop cleanly, finalize partial
             tqdm.write(_format_position_line(run_manager, list(ml_order), motion_index, max_ml_size))
 
             shot_num = _take_shots_at_position(
@@ -505,7 +546,8 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
     return shot_num
 
 
-def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots, total_shots, sink=None):
+def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots,
+                    total_shots, sink=None, move_opts=None, run_state=None):
     shot_num = 1
 
     # Total lines summed across all groups (each group is a self-contained
@@ -516,9 +558,12 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
         total_lines += int(np.ceil(size / _positions_per_line(run_manager, mg_key)))
     estimator = _LineTimeEstimator(total_lines)
 
+    aborted = False
     with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True) as pbar:
         line_idx = 0
         for mg_key, direction in ml_order.items():
+            if aborted:
+                break
             mg = run_manager.mgs[mg_key]
             ml_size = get_motion_list_size(run_manager, mg_key)
             per_line = _positions_per_line(run_manager, mg_key)
@@ -532,7 +577,10 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
                     estimator.start_line()
                     line_idx += 1
 
-                move_to_index(index=motion_index, rm=run_manager, ml_order_dict=single_group_order)
+                if not _do_move(run_manager, single_group_order, motion_index,
+                                move_opts, run_state):
+                    aborted = True
+                    break  # terminal motor failure -> stop cleanly
                 tqdm.write(_format_position_line(run_manager, [mg_key], motion_index, ml_size))
 
                 shot_num = _take_shots_at_position(
@@ -667,6 +715,7 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
     total_shots = ctx["total_shots"]
 
     last_shot_num = 0
+    run_state = {"terminated_early": False, "abort_reason": None}
     with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
         try:
             print("Initializing HDF5 file...", end='')
@@ -698,25 +747,30 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
             })
             print(f"Wrote run metadata to spool: {spool_dir}")
 
-            from .config import get_backpressure_limits
+            from .config import get_backpressure_limits, get_motion_recovery_opts
             max_pending, min_free_gb = get_backpressure_limits(config)
             sink = _SpoolShotSink(msa, active_scopes, spool_dir, run_manager,
                                   max_pending_shots=max_pending,
                                   min_free_gb=min_free_gb)
+            move_opts = get_motion_recovery_opts(config)
 
             if execution_order == "sequential":
                 last_shot_num = _run_sequential(
                     msa, active_scopes, spool_dir, run_manager,
                     ml_order, nshots, total_shots, sink=sink,
+                    move_opts=move_opts, run_state=run_state,
                 )
             else:
                 last_shot_num = _run_interleaved(
                     msa, active_scopes, spool_dir, run_manager,
                     ml_order, nshots, total_shots, sink=sink,
+                    move_opts=move_opts, run_state=run_state,
                 )
 
         except KeyboardInterrupt as err:
             print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+            run_state["terminated_early"] = True
+            run_state["abort_reason"] = "KeyboardInterrupt (Ctrl-C)"
             raise RuntimeError() from err
         finally:
             run_manager.terminate()
@@ -731,8 +785,16 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
             # offload to finalize, and a RUN_COMPLETE with no metadata would
             # just leave the offload waiting on metadata that never comes.
             if spool_format.run_metadata_exists(spool_dir):
-                spool_format.write_run_complete(spool_dir, final)
-                print(f"Wrote RUN_COMPLETE (final_shot_num={final}) to spool")
+                spool_format.write_run_complete(
+                    spool_dir, final,
+                    terminated_early=run_state["terminated_early"],
+                    abort_reason=run_state["abort_reason"],
+                )
+                if run_state["terminated_early"]:
+                    print(f"Run terminated early ({run_state['abort_reason']}); "
+                          f"{final} shots safely spooled. Wrote RUN_COMPLETE.")
+                else:
+                    print(f"Wrote RUN_COMPLETE (final_shot_num={final}) to spool")
             else:
                 print("Run aborted before metadata was written; "
                       "no RUN_COMPLETE emitted.")

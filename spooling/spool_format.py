@@ -318,11 +318,24 @@ def wait_for_capacity(spool_dir, max_pending_shots, min_free_gb,
 # --------------------------------------------------------------------------- #
 # Run-complete sentinel
 # --------------------------------------------------------------------------- #
-def write_run_complete(spool_dir: str, final_shot_num: int) -> None:
+def write_run_complete(spool_dir: str, final_shot_num: int,
+                       terminated_early: bool = False,
+                       abort_reason: Optional[str] = None) -> None:
+    """Write the RUN_COMPLETE sentinel the offload waits on.
+
+    ``terminated_early`` / ``abort_reason`` record that the run stopped before
+    its planned end (e.g. a terminal motor failure or Ctrl-C). The data already
+    spooled is still complete and consistent for the shots taken; these fields
+    just let the offload/analysis know the scan was cut short.
+    """
     os.makedirs(spool_dir, exist_ok=True)
     _atomic_pickle(
         os.path.join(spool_dir, _RUN_COMPLETE),
-        {"final_shot_num": int(final_shot_num)},
+        {
+            "final_shot_num": int(final_shot_num),
+            "terminated_early": bool(terminated_early),
+            "abort_reason": abort_reason,
+        },
     )
 
 

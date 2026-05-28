@@ -93,6 +93,34 @@ def get_storage_paths(config):
     return spool_dir, hdf5_dir
 
 
+def get_motion_recovery_opts(config):
+    """Return motor-move recovery tunables from the optional ``[bmotion]`` keys.
+
+    Used by the bmotion acquisition loop to retry a failed/silently-missed motor
+    move through an escalating recovery ladder before terminating the run. Keys
+    (all optional, with defaults so existing configs need no change):
+
+      * ``move_attempts``        - total move attempts incl. the first (default 3)
+      * ``move_settle_timeout_s``- seconds to wait for motion to stop (default 30)
+      * ``reconnect_timeout_s``  - seconds to wait for a lost motor link to come
+                                   back via the bapsf_motion heartbeat (default 60)
+      * ``position_tol``         - max |achieved - target| per axis, in motion-
+                                   space units, to count a move as arrived (0.5)
+
+    Returns a dict with those four keys.
+    """
+    section = 'bmotion'
+    if section not in config:
+        return {"attempts": 3, "settle_timeout": 30.0,
+                "reconnect_timeout": 60.0, "tol": 0.5}
+    return {
+        "attempts": config.getint(section, 'move_attempts', fallback=3),
+        "settle_timeout": config.getfloat(section, 'move_settle_timeout_s', fallback=30.0),
+        "reconnect_timeout": config.getfloat(section, 'reconnect_timeout_s', fallback=60.0),
+        "tol": config.getfloat(section, 'position_tol', fallback=0.5),
+    }
+
+
 def get_backpressure_limits(config):
     """Return ``(max_pending_shots, min_free_gb)`` for spool backpressure.
 

@@ -132,6 +132,10 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
     if final_shot_num is not None:
         adapter.finalize(hdf5_path, meta, final_shot_num)
         print(f"Offload: finalized run (final_shot_num={final_shot_num}).")
+        if complete and complete.get("terminated_early"):
+            print(f"NOTE: acquisition terminated early "
+                  f"({complete.get('abort_reason')}); HDF5 is complete and "
+                  f"consistent for the {final_shot_num} shots taken.")
     n_ok = len(processed) - len(quarantined)
     print(f"Offload complete. {n_ok} shots written to {hdf5_path}")
     if quarantined:

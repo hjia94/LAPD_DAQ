@@ -468,5 +468,61 @@ class SpoolSinkTests(unittest.TestCase):
         self.assertEqual(got.skip_reason, "motor failed")
 
 
+class TerminalMotorFailureTests(unittest.TestCase):
+    """A terminal MotorError mid-run must stop the loop cleanly (no raise),
+    record terminated_early in run_state, and preserve the partial shot count."""
+
+    def setUp(self):
+        self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
+        self._stdout_ctx.__enter__()
+        self.mg = StubMotionGroup("A", make_grid_motion_list(nx=5, ny=1))
+        self.rm = StubRunManager({"a": self.mg})
+
+    def tearDown(self):
+        self._stdout_ctx.__exit__(None, None, None)
+
+    def test_motor_error_breaks_loop_and_flags_run_state(self):
+        from acquisition.motor_recovery import MotorError
+
+        fail_at = 2
+        shot_calls = []
+
+        def fake_move_with_recovery(rm, ml_order_dict, index, **kw):
+            if index >= fail_at:
+                raise MotorError(f"dead motor at index {index}")
+
+        def spy_take(msa, active_scopes, hdf5_path, run_manager,
+                     record_keys, shot_num, nshots_, pbar, estimator=None,
+                     sink=None):
+            shot_calls.append(shot_num)
+            return shot_num + nshots_
+
+        run_state = {"terminated_early": False, "abort_reason": None}
+        _orig_take = bmotion_module._take_shots_at_position
+        # _do_move imports move_with_recovery from .motor_recovery at call time;
+        # patch it there so the loop picks up the fake.
+        import acquisition.motor_recovery as mr
+        _orig_real = mr.move_with_recovery
+        mr.move_with_recovery = fake_move_with_recovery
+        bmotion_module._take_shots_at_position = spy_take
+        try:
+            shot_num = bmotion_module._run_interleaved(
+                StubMSA(), {"lpscope": 0}, "/dev/null", self.rm,
+                {"a": "forward"}, 1, 5, sink=object(),
+                move_opts={"attempts": 2}, run_state=run_state,
+            )
+        finally:
+            mr.move_with_recovery = _orig_real
+            bmotion_module._take_shots_at_position = _orig_take
+
+        # Loop did not raise; it stopped at the failing position.
+        self.assertTrue(run_state["terminated_early"])
+        self.assertIn("dead motor", run_state["abort_reason"])
+        # Shots were taken at indices 0 and 1 only (failure at index 2).
+        self.assertEqual(shot_calls, [1, 2])
+        # Partial count returned reflects the shots actually taken.
+        self.assertEqual(shot_num, 3)
+
+
 if __name__ == "__main__":
     unittest.main()
