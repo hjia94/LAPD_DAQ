@@ -93,6 +93,23 @@ def get_storage_paths(config):
     return spool_dir, hdf5_dir
 
 
+def get_backpressure_limits(config):
+    """Return ``(max_pending_shots, min_free_gb)`` for spool backpressure.
+
+    Acquisition pauses before a shot when the spool has more than
+    ``max_pending_shots`` undrained shots OR less than ``min_free_gb`` free on
+    the spool disk, so a slow/stalled offload can't silently fill the disk.
+    Both come from the optional ``[storage]`` keys ``max_pending_shots`` /
+    ``min_free_gb``; either ``<= 0`` disables that check. Defaults are generous
+    (1000 shots, 5 GB) so a healthy run never notices them.
+    """
+    if 'storage' not in config:
+        return 1000, 5.0
+    max_pending = config.getint('storage', 'max_pending_shots', fallback=1000)
+    min_free_gb = config.getfloat('storage', 'min_free_gb', fallback=5.0)
+    return max_pending, min_free_gb
+
+
 def resolve_hdf5_path(config, base_path, date=None):
     """Return the full HDF5 file path for a run.
 

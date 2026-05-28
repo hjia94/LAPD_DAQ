@@ -524,6 +524,155 @@ def run_acquisition(save_path, config_path):
             hdf5_writer.record_shot_count(save_path, msa.scope_ips, shot_num)
 
 
+def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
+    """Parallel-mode grid acquisition: build the HDF5 skeleton, spool each shot.
+
+    Mirrors :func:`run_acquisition` (the legacy direct-grid / stationary path)
+    but, like the bmotion spooled path, the acquire process creates ``hdf5_path``
+    and writes its full skeleton (experiment/scope metadata, time arrays, and the
+    ``/Control/Positions`` group) up front, then spools each shot's raw traces to
+    the fast-disk ``spool_dir`` for a separate offload process to fill in.
+    """
+    from spooling import spool_format
+    from . import grid_spool_adapter
+
+    print('Starting spooled grid acquisition loop at', time.ctime())
+    config, raw_config_text = load_experiment_config(config_path)
+    num_duplicate_shots = int(config.get('nshots', 'num_duplicate_shots', fallback=1))
+    num_run_repeats = int(config.get('nshots', 'num_run_repeats', fallback=1))
+    shot_num = 0
+
+    has_position_config = 'position' in config and config.items('position')
+    if has_position_config:
+        pos_manager = PositionManager(
+            hdf5_path,
+            config_path,
+            num_duplicate_shots=num_duplicate_shots,
+            num_run_repeats=num_run_repeats,
+        )
+        if pos_manager.is_45deg:
+            raise RuntimeError("45-degree acquisition is not supported in spooled mode")
+    else:
+        pos_manager = None
+
+    with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
+        try:
+            print("Initializing HDF5 file...", end='')
+            msa.initialize_hdf5_base()
+            print("done")
+
+            if pos_manager is not None:
+                pos_manager.initialize_position_hdf5()
+                mc = pos_manager.initialize_motor()
+                if mc is None:
+                    print("\n[!] Warning: Failed to initialize motor controller; "
+                          "continuing stationary (motors disabled)")
+                total_shots = len(pos_manager.positions)
+            else:
+                mc = None
+                print("\nStationary acquisition - No position configuration found")
+                total_shots = num_duplicate_shots * num_run_repeats
+            print(f"Total shots: {total_shots}")
+
+            print("\nStarting initial acquisition...")
+            active_scopes = msa.initialize_scopes()
+            if not active_scopes:
+                raise RuntimeError("No valid data found from any scope. Aborting acquisition.")
+
+            spool_format.write_run_metadata(spool_dir, {
+                "writer": grid_spool_adapter.WRITER_TAG,
+                "hdf5_path": hdf5_path,
+                "config_scope_names": list(active_scopes.keys()),
+                "channel_descriptions": grid_spool_adapter.channel_descriptions(msa),
+                "nz": pos_manager.nz if pos_manager is not None else None,
+            })
+            print(f"Wrote run metadata to spool: {spool_dir}")
+
+            from .config import get_backpressure_limits
+            max_pending, min_free_gb = get_backpressure_limits(config)
+
+            with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
+                for n in range(total_shots):
+                    shot_num = n + 1
+                    coords = None
+
+                    # Backpressure: pause if the offload isn't draining the
+                    # spool fast enough (so we never overrun the spool disk).
+                    spool_format.wait_for_capacity(
+                        spool_dir, max_pending, min_free_gb, warn=tqdm.write)
+
+                    if pos_manager is not None and mc is not None:
+                        positions = pos_manager.positions[n]
+                        # positions is a structured record (shot_num, x, y[, z]).
+                        target = {'x': float(positions['x']), 'y': float(positions['y'])}
+                        if pos_manager.nz is not None:
+                            target['z'] = float(positions['z'])
+                        if not _spooled_grid_move(mc, pos_manager, target):
+                            tqdm.write(f"Skipping shot {shot_num} due to movement failure.")
+                            spool_format.write_shot(
+                                spool_dir,
+                                grid_spool_adapter.skipped_payload(
+                                    shot_num, "Motor movement failed", target),
+                            )
+                            pbar.update(1)
+                            continue
+
+                    msa.arm_scopes_for_trigger(active_scopes, verbose=False)
+                    all_data = msa.acquire_shot(active_scopes, shot_num, verbose=False)
+                    if not all_data:
+                        tqdm.write(f"Skipping shot {shot_num} - no valid data")
+                        spool_format.write_shot(
+                            spool_dir,
+                            grid_spool_adapter.skipped_payload(
+                                shot_num, "No valid data acquired", coords),
+                        )
+                        pbar.update(1)
+                        continue
+
+                    if pos_manager is not None and mc is not None:
+                        if pos_manager.nz is None:
+                            xpos, ypos = mc.probe_positions
+                            coords = {'x': xpos, 'y': ypos, 'z': None}
+                        else:
+                            xpos, ypos, zpos = mc.probe_positions
+                            coords = {'x': xpos, 'y': ypos, 'z': zpos}
+
+                    payload = grid_spool_adapter.all_data_to_payload(all_data, shot_num, coords)
+                    spool_format.write_shot(spool_dir, payload)
+                    pbar.update(1)
+
+        except KeyboardInterrupt as err:
+            print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+            raise RuntimeError() from err
+        finally:
+            spool_format.write_run_complete(spool_dir, shot_num)
+            print(f"Wrote RUN_COMPLETE (final_shot_num={shot_num}) to spool")
+
+
+def _spooled_grid_move(mc, pos_manager, target):
+    """Move the probe to ``target`` (a dict), returning True on success.
+
+    Mirrors the motion part of :func:`handle_movement` but, since the offload
+    owns the HDF5, it does NOT write skip metadata here — the caller spools a
+    skipped shot instead.
+    """
+    try:
+        mc.enable
+        if pos_manager.nz is None:
+            mc.probe_positions = (target['x'], target['y'])
+        else:
+            mc.probe_positions = (target['x'], target['y'], target['z'])
+        mc.wait_for_motion_complete()
+        mc.disable
+        return True
+    except KeyboardInterrupt:
+        mc.stop_now
+        raise
+    except Exception as e:
+        tqdm.write(f'Motor failed to move with {str(e)}')
+        return False
+
+
 # =============================================================================
 if __name__ == '__main__':
     save_path = 'test_multiscope.h5'

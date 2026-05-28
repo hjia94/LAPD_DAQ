@@ -9,7 +9,10 @@ behind per-path adapters (e.g. ``acquisition/spool_adapter.py``).
 from .spool_format import (
     ShotPayload,
     TracePayload,
+    free_space_bytes,
     iter_ready_shots,
+    pending_shot_count,
+    quarantine_shot,
     read_run_complete,
     read_run_metadata,
     read_shot,
@@ -22,7 +25,10 @@ from .spool_format import (
 __all__ = [
     "ShotPayload",
     "TracePayload",
+    "free_space_bytes",
     "iter_ready_shots",
+    "pending_shot_count",
+    "quarantine_shot",
     "read_run_complete",
     "read_run_metadata",
     "read_shot",

@@ -27,6 +27,7 @@ marker, so a half-written or interrupted shot is never consumed.
 import os
 import pickle
 import shutil
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -229,6 +230,89 @@ def delete_shot(spool_dir: str, shot_num: int) -> None:
         shutil.rmtree(shot_dir)
     if os.path.exists(done_path):
         os.remove(done_path)
+
+
+def quarantine_shot(spool_dir: str, shot_num: int) -> str:
+    """Move a poison shot aside so the offload can stop retrying it and drain.
+
+    Renames ``shot_N/`` to ``shot_N.failed/`` and drops the ``.done`` marker, so
+    :func:`iter_ready_shots` no longer returns it (it keys on ``.done``). The
+    data is preserved under ``.failed`` for manual inspection/recovery rather
+    than deleted. Returns the quarantine directory path.
+    """
+    shot_dir = os.path.join(spool_dir, _shot_dirname(shot_num))
+    failed_dir = shot_dir + ".failed"
+    done_path = shot_dir + ".done"
+    if os.path.exists(failed_dir):
+        shutil.rmtree(failed_dir)
+    if os.path.isdir(shot_dir):
+        os.replace(shot_dir, failed_dir)
+    if os.path.exists(done_path):
+        os.remove(done_path)
+    return failed_dir
+
+
+def pending_shot_count(spool_dir: str) -> int:
+    """Number of shots written but not yet offloaded (``.done`` markers present).
+
+    Acquisition uses this as a backpressure signal: a growing count means the
+    offload process can't keep up (or isn't running), so the spool disk is
+    filling.
+    """
+    return len(iter_ready_shots(spool_dir))
+
+
+def free_space_bytes(spool_dir: str) -> int:
+    """Bytes free on the filesystem holding ``spool_dir`` (0 if unavailable)."""
+    try:
+        return shutil.disk_usage(spool_dir).free
+    except OSError:
+        return 0
+
+
+def spool_over_capacity(spool_dir, max_pending_shots, min_free_gb):
+    """Return a reason string if the spool is over a backpressure limit, else None.
+
+    Over capacity means the offload isn't keeping up (or isn't running): either
+    too many undrained shots have piled up, or the spool disk is nearly full.
+    A limit of ``<= 0`` disables that particular check.
+    """
+    if max_pending_shots and max_pending_shots > 0:
+        pending = pending_shot_count(spool_dir)
+        if pending > max_pending_shots:
+            return f"{pending} shots pending offload (> {max_pending_shots})"
+    if min_free_gb and min_free_gb > 0:
+        free_gb = free_space_bytes(spool_dir) / (1024 ** 3)
+        if free_gb < min_free_gb:
+            return f"{free_gb:.1f} GB free on spool disk (< {min_free_gb} GB)"
+    return None
+
+
+def wait_for_capacity(spool_dir, max_pending_shots, min_free_gb,
+                      poll_seconds=2.0, warn=None, check_abort=None):
+    """Block until the spool is back under its backpressure limits.
+
+    Returns immediately when there is capacity. Otherwise warns once (via the
+    ``warn`` callback, defaulting to ``print``) and polls until the offload
+    process drains enough shots / frees enough space. ``check_abort`` (if given)
+    is polled each iteration; if it returns truthy the wait raises
+    KeyboardInterrupt so the acquire loop's existing Ctrl-C handling runs.
+
+    This is the safety valve for "offload to backup without filling up the PC
+    disk": acquisition pauses rather than overrunning the spool disk.
+    """
+    reason = spool_over_capacity(spool_dir, max_pending_shots, min_free_gb)
+    if reason is None:
+        return
+    (warn or print)(
+        f"Spool backpressure: {reason}. Pausing acquisition until the offload "
+        f"process catches up (is Offload_Run.py running and its target disk OK?)."
+    )
+    while spool_over_capacity(spool_dir, max_pending_shots, min_free_gb) is not None:
+        if check_abort is not None and check_abort():
+            raise KeyboardInterrupt("aborted while waiting for spool capacity")
+        time.sleep(poll_seconds)
+    (warn or print)("Spool backpressure cleared; resuming acquisition.")
 
 
 # --------------------------------------------------------------------------- #

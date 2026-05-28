@@ -10,6 +10,7 @@ from .config import load_experiment_config
 from .scope_runner import (
     MultiScopeAcquisition,
     run_acquisition,
+    run_acquisition_spooled,
     single_shot_acquisition,
     single_shot_acquisition_45,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "run_acquisition",
     "run_acquisition_bmotion",
     "run_acquisition_bmotion_spooled",
+    "run_acquisition_spooled",
     "single_shot_acquisition",
     "single_shot_acquisition_45",
 ]

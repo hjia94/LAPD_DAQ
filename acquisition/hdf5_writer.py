@@ -29,6 +29,7 @@ _SOURCE_FILES = (
     'acquisition/config.py',
     'acquisition/bmotion.py',
     'acquisition/spool_adapter.py',
+    'acquisition/grid_spool_adapter.py',
     'spooling/spool_format.py',
     'offload_runner.py',
 )
@@ -200,6 +201,28 @@ def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason):
             scope_group = f[scope_name]
             shot_group = scope_group.create_group(f'shot_{shot_num}')
             shot_group.attrs['skipped'] = True
+            shot_group.attrs['skip_reason'] = str(reason)
+            shot_group.attrs['acquisition_time'] = time.ctime()
+
+
+def mark_shot_failed_for_scopes(save_path, scope_names, shot_num, reason):
+    """Replace a shot's group with a failed marker (offload quarantine path).
+
+    Unlike :func:`mark_shot_skipped_for_scopes`, this first deletes any existing
+    ``shot_N`` group, so a shot whose data was written but failed read-back
+    verification leaves a clearly-marked failed group instead of silently
+    keeping unverified data. ``failed=True`` distinguishes it from an
+    intentionally skipped shot.
+    """
+    with h5py.File(save_path, 'a') as f:
+        for scope_name in scope_names:
+            scope_group = f[scope_name]
+            shot_name = f'shot_{shot_num}'
+            if shot_name in scope_group:
+                del scope_group[shot_name]
+            shot_group = scope_group.create_group(shot_name)
+            shot_group.attrs['skipped'] = True
+            shot_group.attrs['failed'] = True
             shot_group.attrs['skip_reason'] = str(reason)
             shot_group.attrs['acquisition_time'] = time.ctime()
 

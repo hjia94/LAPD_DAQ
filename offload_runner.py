@@ -25,47 +25,64 @@ from spooling import spool_format
 # Poll interval while waiting for new shots / the run-complete sentinel.
 _POLL_SECONDS = 0.5
 
+# How many times to retry a shot that fails to write/verify before quarantining
+# it (moving it aside so it can't hang the drain). A transient slow-disk hiccup
+# clears on the next pass; a genuinely corrupt shot is set aside after this.
+_MAX_RETRIES = 3
+
 
 def _get_adapter(writer_tag):
     """Return the offload adapter module for a run's ``writer`` tag."""
     if writer_tag == "acquisition":
         from acquisition import spool_adapter
         return spool_adapter
+    if writer_tag == "grid":
+        from acquisition import grid_spool_adapter
+        return grid_spool_adapter
     raise ValueError(
         f"No offload adapter for writer tag {writer_tag!r}. "
-        "Only 'acquisition' is supported so far."
+        "Supported: 'acquisition' (bmotion), 'grid'."
     )
 
 
-def run_offload(spool_dir, hdf5_path, config=None, poll_seconds=_POLL_SECONDS):
+def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
+                max_retries=_MAX_RETRIES):
     """Drain ``spool_dir`` into the destination HDF5 until RUN_COMPLETE, then exit.
+
+    The acquire process has already created the HDF5 file and written its full
+    skeleton (metadata, time arrays, positions groups); this loop only fills the
+    per-shot scope datasets and position rows, verifies each by read-back, and
+    deletes the spooled copy.
 
     Args:
         spool_dir: fast-disk spool directory written by the acquire process.
-        hdf5_path: destination HDF5 file on the slow/large disk. If the run
-            metadata records an ``hdf5_filename`` (it does for runs produced by
-            this codebase), that name is used inside ``dirname(hdf5_path)`` so
-            the offload always matches the file the acquire process intended,
-            even across a midnight date rollover.
-        config: optional ConfigParser; only used as a fallback by the HDF5
-            metadata writer when the spooled raw config text is empty.
+            The destination HDF5 path is read verbatim from the run metadata
+            (``meta["hdf5_path"]``) — it is computed exactly once, by the acquire
+            entry script, so the offload never recomputes it.
+        config: unused placeholder kept for call-site compatibility.
         poll_seconds: idle poll interval.
+        max_retries: per-shot write/verify attempts before the shot is moved to
+            ``shot_N.failed`` and skipped, so one corrupt shot cannot hang the
+            drain (and the spool can still empty at RUN_COMPLETE).
     """
     print(f"Offload: waiting for run metadata in {spool_dir} ...")
     _wait_for(lambda: spool_format.run_metadata_exists(spool_dir), poll_seconds)
 
     meta = spool_format.read_run_metadata(spool_dir)
+    hdf5_path = meta["hdf5_path"]
 
-    # Prefer the filename the acquire side recorded, under the configured dir.
-    meta_filename = meta.get("hdf5_filename")
-    if meta_filename:
-        hdf5_path = os.path.join(os.path.dirname(hdf5_path), meta_filename)
+    if not os.path.exists(hdf5_path):
+        raise FileNotFoundError(
+            f"Offload target HDF5 does not exist: {hdf5_path}. The acquire "
+            "process is expected to create it (skeleton) before offload runs."
+        )
 
     adapter = _get_adapter(meta.get("writer"))
-    print(f"Offload: writer={meta.get('writer')}, building HDF5 skeleton -> {hdf5_path}")
-    adapter.build_skeleton(hdf5_path, meta, config, meta.get("raw_config_text", ""))
+    print(f"Offload: writer={meta.get('writer')}, filling -> {hdf5_path}")
 
     processed = set()
+    failures = {}      # shot_num -> consecutive failure count
+    quarantined = []   # shot_nums moved aside after exhausting retries
     final_shot_num = None
 
     while True:
@@ -74,13 +91,36 @@ def run_offload(spool_dir, hdf5_path, config=None, poll_seconds=_POLL_SECONDS):
             try:
                 _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num)
                 processed.add(shot_num)
-            except Exception as e:  # keep the bin, report, move on
-                print(f"Offload ERROR on shot {shot_num}: {e} (bin kept for retry)")
+                failures.pop(shot_num, None)
+            except Exception as e:
+                failures[shot_num] = failures.get(shot_num, 0) + 1
+                if failures[shot_num] >= max_retries:
+                    # Poison shot: stop retrying so the run can drain. Mark the
+                    # HDF5 group as failed (so unverified data isn't silently
+                    # kept as if good), preserve the bin under shot_N.failed for
+                    # inspection, and stop counting it as pending.
+                    try:
+                        adapter.mark_shot_failed(
+                            hdf5_path, meta, shot_num,
+                            f"offload verification failed after {failures[shot_num]} attempts")
+                    except Exception as mark_err:
+                        print(f"Offload WARNING: could not mark shot {shot_num} "
+                              f"failed in HDF5: {mark_err}")
+                    dest = spool_format.quarantine_shot(spool_dir, shot_num)
+                    processed.add(shot_num)
+                    quarantined.append(shot_num)
+                    print(f"Offload ERROR on shot {shot_num}: {e} "
+                          f"-- quarantined after {failures[shot_num]} attempts -> {dest}")
+                else:
+                    print(f"Offload ERROR on shot {shot_num}: {e} "
+                          f"(attempt {failures[shot_num]}/{max_retries}, bin kept for retry)")
 
         complete = spool_format.read_run_complete(spool_dir)
         if complete is not None:
             final_shot_num = complete.get("final_shot_num")
-            # One more drain pass to make sure no late .done slipped in.
+            # One more drain pass to make sure no late .done slipped in. Shots
+            # that exhausted their retries are quarantined (not in iter_ready),
+            # so a persistently failing shot can no longer hang the run.
             remaining = [s for s in spool_format.iter_ready_shots(spool_dir)
                          if s not in processed]
             if not remaining:
@@ -92,18 +132,49 @@ def run_offload(spool_dir, hdf5_path, config=None, poll_seconds=_POLL_SECONDS):
     if final_shot_num is not None:
         adapter.finalize(hdf5_path, meta, final_shot_num)
         print(f"Offload: finalized run (final_shot_num={final_shot_num}).")
-    print(f"Offload complete. {len(processed)} shots written to {hdf5_path}")
+    n_ok = len(processed) - len(quarantined)
+    print(f"Offload complete. {n_ok} shots written to {hdf5_path}")
+    if quarantined:
+        print(f"WARNING: {len(quarantined)} shot(s) failed and were quarantined "
+              f"(shot_N.failed in {spool_dir}): {sorted(quarantined)}")
 
 
 def _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num):
-    """Write one shot, verify it read-back, then delete its spool copy."""
+    """Write one shot, verify it read-back, then delete its spool copy.
+
+    Idempotent: if ``shot_N`` already exists in the HDF5 (e.g. a previous
+    attempt wrote the datasets but was interrupted before the bin was deleted),
+    the write is skipped and the existing data is verified instead, so a retry
+    never trips ``write_shot_data``'s "shot already exists" guard.
+    """
     payload = spool_format.read_shot(spool_dir, shot_num)
-    adapter.write_shot(hdf5_path, payload, meta)
+
+    if not _shot_in_hdf5(hdf5_path, payload):
+        adapter.write_shot(hdf5_path, payload, meta)
 
     if not payload.skipped:
         _verify_shot_in_hdf5(hdf5_path, payload)
 
     spool_format.delete_shot(spool_dir, shot_num)
+
+
+def _shot_in_hdf5(hdf5_path, payload):
+    """True if every scope already has this shot's group written.
+
+    Used to make the offload idempotent across interruptions/retries. A skipped
+    shot is reported present once its skip group exists for any scope.
+    """
+    shot_name = f"shot_{payload.shot_num}"
+    with h5py.File(hdf5_path, "r") as f:
+        if payload.skipped:
+            return any(shot_name in f.get(sc, {}) for sc in f
+                       if isinstance(f.get(sc), h5py.Group))
+        if not payload.traces:
+            return False
+        for scope_name in payload.traces:
+            if scope_name not in f or shot_name not in f[scope_name]:
+                return False
+    return True
 
 
 def _verify_shot_in_hdf5(hdf5_path, payload):

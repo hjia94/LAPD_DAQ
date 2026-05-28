@@ -10,10 +10,11 @@ The user should edit this file to:
 Created on July 24.2025
 @author: Jia Han
 
-Parallel mode: if experiment_config.ini has a [storage] section with both
-spool_dir (fast disk) and hdf5_path (slow/large disk), acquisition writes shots
-to the spool and a separate `Offload_Run.py` process offloads them into the
-HDF5 file. Otherwise the legacy single-process path writes the HDF5 directly.
+Parallel mode: if experiment_config.ini has a [storage] section with a fast
+spool_dir, this process creates the HDF5 file + its skeleton (metadata, time
+arrays, positions) on the slow/large disk and then spools each shot's raw data
+to the fast disk; a separate `Offload_Run.py` process fills those shots into the
+same HDF5 file. Otherwise the legacy single-process path writes the HDF5 directly.
 """
 
 import datetime
@@ -65,34 +66,36 @@ def main():
     spool_dir, _hdf5_dir = get_storage_paths(config)
     spooled = bool(spool_dir)
 
+    # The acquire process creates the destination HDF5 (and writes its skeleton)
+    # in BOTH modes, so guard/overwrite it up front regardless of spooling.
+    if os.path.exists(hdf5_path):
+        while True:
+            response = input(f'File "{hdf5_path}" already exists. Overwrite? (y/n): ').lower()
+            if response in ['y', 'n']:
+                break
+            print("Please enter 'y' or 'n'")
+
+        if response == 'n':
+            print('Exiting without overwriting existing file')
+            sys.exit()
+        else:
+            print('Overwriting existing file')
+            os.remove(hdf5_path)  # Delete the existing file
+
     if spooled:
-        # Acquisition writes shots to the spool; Offload_Run.py builds the HDF5.
+        # Acquisition writes the HDF5 skeleton + spools per-shot data; a separate
+        # Offload_Run.py process fills the shots into the same HDF5.
         if not os.path.exists(spool_dir):
             os.makedirs(spool_dir)
         print(f'PARALLEL mode: spooling shots to {spool_dir}')
-        print(f'  Run Offload_Run.py to write the HDF5 file ({hdf5_path}).')
-    else:
-        # Legacy single-process: guard the destination HDF5 up front.
-        if os.path.exists(hdf5_path):
-            while True:
-                response = input(f'File "{hdf5_path}" already exists. Overwrite? (y/n): ').lower()
-                if response in ['y', 'n']:
-                    break
-                print("Please enter 'y' or 'n'")
-
-            if response == 'n':
-                print('Exiting without overwriting existing file')
-                sys.exit()
-            else:
-                print('Overwriting existing file')
-                os.remove(hdf5_path)  # Delete the existing file
+        print(f'  Run Offload_Run.py to fill the HDF5 file ({hdf5_path}).')
 
     print('Data run started at', datetime.datetime.now())
     t_start = time.time()
 
     try:
         if spooled:
-            run_acquisition_bmotion_spooled(spool_dir, toml_path, config_path)
+            run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path)
         else:
             run_acquisition_bmotion(hdf5_path, toml_path, config_path)
 

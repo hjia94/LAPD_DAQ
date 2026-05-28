@@ -356,16 +356,28 @@ class _SpoolShotSink:
     A separate offload process turns the spool into the HDF5 file.
     """
 
-    def __init__(self, msa, active_scopes, spool_dir, run_manager):
+    def __init__(self, msa, active_scopes, spool_dir, run_manager,
+                 max_pending_shots=0, min_free_gb=0.0):
         self.msa = msa
         self.active_scopes = active_scopes
         self.spool_dir = spool_dir
         self.run_manager = run_manager
+        self.max_pending_shots = max_pending_shots
+        self.min_free_gb = min_free_gb
+
+    def _await_capacity(self):
+        """Pause before acquiring if the spool is filling faster than offload."""
+        from spooling import spool_format
+        spool_format.wait_for_capacity(
+            self.spool_dir, self.max_pending_shots, self.min_free_gb,
+            warn=tqdm.write,
+        )
 
     def take_shot(self, shot_num, record_keys):
         from spooling import spool_format
         from . import spool_adapter
 
+        self._await_capacity()
         self.msa.arm_scopes_for_trigger(self.active_scopes, verbose=False)
         all_data = self.msa.acquire_shot(self.active_scopes, shot_num, verbose=False)
         if not all_data:
@@ -626,15 +638,19 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path):
             run_manager.terminate()
 
 
-def run_acquisition_bmotion_spooled(spool_dir, toml_path, config_path):
-    """Parallel-mode acquisition: write each shot to the fast-disk spool.
+def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path):
+    """Parallel-mode acquisition: build the HDF5 skeleton, spool each shot.
 
-    Mirrors :func:`run_acquisition_bmotion` but, instead of writing the HDF5
-    file directly, it writes the run metadata + per-shot bin files to
-    ``spool_dir`` for a separate offload process to consume. The scopes never
-    wait on the slow output disk. Per-shot order is unchanged: move + settle +
-    disable (per position), then arm -> acquire -> read position -> write
-    bin+done.
+    The acquire process owns the *initial* HDF5 file: it creates ``hdf5_path``
+    and writes everything known up front (experiment metadata, source code, raw
+    config, scope metadata, time arrays, and the empty ``Control/Positions``
+    skeleton) using the same writers as :func:`run_acquisition_bmotion`, then
+    closes the file and never reopens it. Only per-shot scope traces (+ their
+    headers/positions) go to the fast-disk ``spool_dir``; a separate offload
+    process fills those into the already-created HDF5.
+
+    Per-shot order is unchanged: move + settle + disable (per position), then
+    arm -> acquire -> read position -> write bin+done.
     """
     from spooling import spool_format
     from . import spool_adapter
@@ -651,10 +667,12 @@ def run_acquisition_bmotion_spooled(spool_dir, toml_path, config_path):
     total_shots = ctx["total_shots"]
 
     last_shot_num = 0
-    # MultiScopeAcquisition's save_path is unused on the spool path (no HDF5
-    # writes happen here), but the class still wants a value.
-    with MultiScopeAcquisition(spool_dir, config, raw_config_text) as msa:
+    with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
         try:
+            print("Initializing HDF5 file...", end='')
+            msa.initialize_hdf5_base()
+            print("done")
+
             print("\nStarting initial acquisition...")
             active_scopes = msa.initialize_scopes()
             if msa.scope_ips and not active_scopes:
@@ -662,14 +680,29 @@ def run_acquisition_bmotion_spooled(spool_dir, toml_path, config_path):
                     "No valid data found from any scope. Aborting acquisition."
                 )
 
-            meta = spool_adapter.build_run_metadata(
-                msa, active_scopes, run_manager, list(ml_order.keys()),
-                ml_order, execution_order, toml_path, total_shots,
+            configure_bmotion_hdf5_group(
+                hdf5_path, total_shots, len(ml_order), toml_path, run_manager,
+                list(ml_order.keys()), ml_order=ml_order,
+                execution_order=execution_order,
             )
-            spool_format.write_run_metadata(spool_dir, meta)
+
+            # Slim run-info: the offload only needs which adapter to use, the
+            # exact file to fill (computed once by the caller), and the channel
+            # descriptions used to label each shot's datasets. Everything else
+            # is already written into the HDF5 above.
+            spool_format.write_run_metadata(spool_dir, {
+                "writer": spool_adapter.WRITER_TAG,
+                "hdf5_path": hdf5_path,
+                "config_scope_names": list(active_scopes.keys()),
+                "channel_descriptions": spool_adapter.channel_descriptions(msa),
+            })
             print(f"Wrote run metadata to spool: {spool_dir}")
 
-            sink = _SpoolShotSink(msa, active_scopes, spool_dir, run_manager)
+            from .config import get_backpressure_limits
+            max_pending, min_free_gb = get_backpressure_limits(config)
+            sink = _SpoolShotSink(msa, active_scopes, spool_dir, run_manager,
+                                  max_pending_shots=max_pending,
+                                  min_free_gb=min_free_gb)
 
             if execution_order == "sequential":
                 last_shot_num = _run_sequential(

@@ -19,7 +19,9 @@ Verifies the loop invariants documented in commit 3e9c8a2:
 import contextlib
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -379,6 +381,91 @@ class BmotionLoopTests(unittest.TestCase):
                 hdf5_path, 4, 1, toml_path, rm, ["rt"],
                 ml_order={"rt": "forward"}, execution_order="interleaved",
             )
+
+
+class _FakeMSA:
+    """Minimal MultiScopeAcquisition stand-in for the spool sink test.
+
+    Only the per-shot methods the spool path calls are implemented; crucially
+    it has NO save_path and never opens an HDF5 file, so any HDF5 write from the
+    per-shot loop would have to come from the sink itself (the Bug 1 regression).
+    """
+
+    def __init__(self):
+        self.armed = 0
+        self.acquired = []
+
+    def arm_scopes_for_trigger(self, active_scopes, verbose=True):
+        self.armed += 1
+
+    def acquire_shot(self, active_scopes, shot_num, verbose=True):
+        self.acquired.append(shot_num)
+        data = {"C1": np.arange(8, dtype=np.int16)}
+        headers = {"C1": b"HDR"}
+        return {"lpscope": (["C1"], data, headers)}
+
+
+class SpoolSinkTests(unittest.TestCase):
+    """Regression for Bug 1: the per-shot spool path writes ONLY bins.
+
+    Before the fix, the acquire driver wrote scope metadata/time arrays straight
+    to its save_path (which was the spool directory) during scope init, and the
+    per-shot path was expected to fill the HDF5. This asserts the sink touches
+    only the spool: a shot's bins/headers/positions are spooled, and nothing
+    opens an HDF5 file.
+    """
+
+    def setUp(self):
+        self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
+        self._stdout_ctx.__enter__()
+        self.spool = tempfile.mkdtemp(prefix="spool_sink_")
+        self.mg = StubMotionGroup("A", make_grid_motion_list(nx=2, ny=1))
+        self.rm = StubRunManager({"a": self.mg})
+
+    def tearDown(self):
+        self._stdout_ctx.__exit__(None, None, None)
+
+    def test_spool_sink_writes_only_bins(self):
+        from spooling import spool_format
+
+        msa = _FakeMSA()
+        sink = bmotion_module._SpoolShotSink(
+            msa, active_scopes={"lpscope": 0}, spool_dir=self.spool,
+            run_manager=self.rm,
+        )
+        sink.take_shot(1, record_keys=["a"])
+
+        # Armed + acquired exactly once; shot published to the spool.
+        self.assertEqual(msa.armed, 1)
+        self.assertEqual(msa.acquired, [1])
+        self.assertEqual(spool_format.iter_ready_shots(self.spool), [1])
+
+        got = spool_format.read_shot(self.spool, 1)
+        np.testing.assert_array_equal(
+            got.traces["lpscope"][0].data, np.arange(8, dtype=np.int16))
+        self.assertEqual(got.traces["lpscope"][0].header, b"HDR")
+        # Position read back from the (stub) motion group is bundled in.
+        self.assertIn("A", got.coordinates)
+
+        # No HDF5 file was created anywhere in the spool by the per-shot path.
+        for name in os.listdir(self.spool):
+            self.assertFalse(name.endswith(".hdf5"),
+                             f"per-shot path unexpectedly wrote {name}")
+
+    def test_spool_sink_marks_skip_without_hdf5(self):
+        from spooling import spool_format
+
+        msa = _FakeMSA()
+        sink = bmotion_module._SpoolShotSink(
+            msa, active_scopes={"lpscope": 0}, spool_dir=self.spool,
+            run_manager=self.rm,
+        )
+        sink.mark_skipped(1, "motor failed", record_keys=["a"])
+
+        self.assertEqual(spool_format.iter_ready_shots(self.spool), [1])
+        got = spool_format.read_shot(self.spool, 1)
+        self.assertTrue(got.skipped)
+        self.assertEqual(got.skip_reason, "motor failed")
 
 
 if __name__ == "__main__":
