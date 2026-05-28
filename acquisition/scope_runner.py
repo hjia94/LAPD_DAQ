@@ -555,6 +555,9 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
     else:
         pos_manager = None
 
+    # Defined before the try so the finally can always report a correct count,
+    # even if setup fails before the shot loop (0 shots emitted).
+    shot_num = 0
     with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
         try:
             print("Initializing HDF5 file...", end='')
@@ -645,8 +648,15 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
             print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
             raise RuntimeError() from err
         finally:
-            spool_format.write_run_complete(spool_dir, shot_num)
-            print(f"Wrote RUN_COMPLETE (final_shot_num={shot_num}) to spool")
+            # Only signal completion if the run actually started (metadata
+            # written). If setup failed before that, there is nothing for the
+            # offload to finalize. shot_num is 0 here when no shot was emitted.
+            if spool_format.run_metadata_exists(spool_dir):
+                spool_format.write_run_complete(spool_dir, shot_num)
+                print(f"Wrote RUN_COMPLETE (final_shot_num={shot_num}) to spool")
+            else:
+                print("Run aborted before metadata was written; "
+                      "no RUN_COMPLETE emitted.")
 
 
 def _spooled_grid_move(mc, pos_manager, target):

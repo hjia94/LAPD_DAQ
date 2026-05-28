@@ -720,8 +720,19 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
             raise RuntimeError() from err
         finally:
             run_manager.terminate()
-            # `_run_*` return the next (unused) shot number; total_shots is the
-            # count actually emitted unless interrupted. Use whichever advanced.
-            final = last_shot_num - 1 if last_shot_num else total_shots
-            spool_format.write_run_complete(spool_dir, final)
-            print(f"Wrote RUN_COMPLETE (final_shot_num={final}) to spool")
+            # `_run_*` return the next (unused) shot number, so the count
+            # actually emitted is last_shot_num - 1. If the run aborted during
+            # setup (before any shot), last_shot_num is still 0 -> report 0
+            # rather than claiming total_shots completed (which would make the
+            # offload finalize a false shot_count on an empty file).
+            final = max(last_shot_num - 1, 0)
+            # Only signal completion if the run actually started (metadata
+            # written). If setup failed before that, there is nothing for the
+            # offload to finalize, and a RUN_COMPLETE with no metadata would
+            # just leave the offload waiting on metadata that never comes.
+            if spool_format.run_metadata_exists(spool_dir):
+                spool_format.write_run_complete(spool_dir, final)
+                print(f"Wrote RUN_COMPLETE (final_shot_num={final}) to spool")
+            else:
+                print("Run aborted before metadata was written; "
+                      "no RUN_COMPLETE emitted.")

@@ -356,6 +356,38 @@ class BackpressureTests(unittest.TestCase):
         self.assertGreater(spool_format.free_space_bytes(self.spool), 0)
 
 
+class SetupFailureTests(unittest.TestCase):
+    """A spooled run that aborts during setup (before any shot) must surface the
+    real error and NOT leave a misleading RUN_COMPLETE for the offload."""
+
+    def setUp(self):
+        self.spool = tempfile.mkdtemp(prefix="spool_setupfail_")
+        self.off_h5 = tempfile.mktemp(suffix=".hdf5")
+        # Config with NO scope_ips and NO position section: initialize_scopes
+        # returns {} so the grid runner raises "No valid data" before the loop
+        # and before write_run_metadata -- the exact setup-failure path.
+        self.cfg = tempfile.mktemp(suffix=".ini")
+        with open(self.cfg, "w") as f:
+            f.write("[experiment]\nname = setupfail\ndescription = t\n[nshots]\nnum_duplicate_shots = 1\n")
+
+    def tearDown(self):
+        for p in (self.off_h5, self.cfg):
+            if os.path.exists(p):
+                os.remove(p)
+
+    def test_grid_setup_failure_surfaces_real_error_no_run_complete(self):
+        from acquisition import run_acquisition_spooled
+        # Must raise the genuine RuntimeError, not a NameError from the finally.
+        with self.assertRaises(RuntimeError) as ctx:
+            run_acquisition_spooled(self.spool, self.off_h5, self.cfg)
+        self.assertNotIsInstance(ctx.exception, NameError)
+        self.assertIn("No valid data", str(ctx.exception))
+        # No RUN_COMPLETE written (metadata was never written either), so an
+        # offload would not finalize a false shot_count.
+        self.assertFalse(spool_format.run_complete_exists(self.spool))
+        self.assertFalse(spool_format.run_metadata_exists(self.spool))
+
+
 class OffloadMissingTargetTests(unittest.TestCase):
     """The offload must refuse to run if the acquire-created file is absent."""
 
