@@ -13,13 +13,17 @@ the ``acquisition`` (bmotion) one; a ``lapd_daq`` adapter can be added without
 touching this loop.
 """
 
+import logging
 import os
 import time
 
 import h5py
 import numpy as np
+from tqdm import tqdm
 
 from spooling import spool_format
+
+_log = logging.getLogger("offload")
 
 
 # Poll interval while waiting for new shots / the run-complete sentinel.
@@ -80,6 +84,9 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
     adapter = _get_adapter(meta.get("writer"))
     print(f"Offload: writer={meta.get('writer')}, filling -> {hdf5_path}")
 
+    total = meta.get("total_shots")  # None for older runs -> indeterminate bar
+    pbar = tqdm(total=total, desc="Offload", unit="shot", dynamic_ncols=True)
+
     processed = set()
     failures = {}      # shot_num -> consecutive failure count
     quarantined = []   # shot_nums moved aside after exhausting retries
@@ -92,6 +99,7 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
                 _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num)
                 processed.add(shot_num)
                 failures.pop(shot_num, None)
+                pbar.update(1)
             except Exception as e:
                 failures[shot_num] = failures.get(shot_num, 0) + 1
                 if failures[shot_num] >= max_retries:
@@ -104,16 +112,23 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
                             hdf5_path, meta, shot_num,
                             f"offload verification failed after {failures[shot_num]} attempts")
                     except Exception as mark_err:
-                        print(f"Offload WARNING: could not mark shot {shot_num} "
-                              f"failed in HDF5: {mark_err}")
+                        tqdm.write(f"Offload WARNING: could not mark shot {shot_num} "
+                                   f"failed in HDF5: {mark_err}")
+                        _log.warning("shot %s: could not mark failed in HDF5: %s",
+                                     shot_num, mark_err)
                     dest = spool_format.quarantine_shot(spool_dir, shot_num)
                     processed.add(shot_num)
                     quarantined.append(shot_num)
-                    print(f"Offload ERROR on shot {shot_num}: {e} "
-                          f"-- quarantined after {failures[shot_num]} attempts -> {dest}")
+                    pbar.update(1)
+                    tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
+                               f"-- quarantined after {failures[shot_num]} attempts -> {dest}")
+                    _log.warning("shot %s QUARANTINED after %d attempts: %s (moved -> %s)",
+                                 shot_num, failures[shot_num], e, dest)
                 else:
-                    print(f"Offload ERROR on shot {shot_num}: {e} "
-                          f"(attempt {failures[shot_num]}/{max_retries}, bin kept for retry)")
+                    tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
+                               f"(attempt {failures[shot_num]}/{max_retries}, bin kept for retry)")
+                    _log.warning("shot %s retry %d/%d: %s (bin kept)",
+                                 shot_num, failures[shot_num], max_retries, e)
 
         complete = spool_format.read_run_complete(spool_dir)
         if complete is not None:
@@ -129,18 +144,24 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
         if not ready and complete is None:
             time.sleep(poll_seconds)
 
+    pbar.close()
     if final_shot_num is not None:
         adapter.finalize(hdf5_path, meta, final_shot_num)
-        print(f"Offload: finalized run (final_shot_num={final_shot_num}).")
+        tqdm.write(f"Offload: finalized run (final_shot_num={final_shot_num}).")
+        _log.warning("finalized run final_shot_num=%s", final_shot_num)
         if complete and complete.get("terminated_early"):
-            print(f"NOTE: acquisition terminated early "
-                  f"({complete.get('abort_reason')}); HDF5 is complete and "
-                  f"consistent for the {final_shot_num} shots taken.")
+            tqdm.write(f"NOTE: acquisition terminated early "
+                       f"({complete.get('abort_reason')}); HDF5 is complete and "
+                       f"consistent for the {final_shot_num} shots taken.")
+            _log.warning("acquisition terminated early: %s", complete.get('abort_reason'))
     n_ok = len(processed) - len(quarantined)
-    print(f"Offload complete. {n_ok} shots written to {hdf5_path}")
+    tqdm.write(f"Offload complete. {n_ok} shots written to {hdf5_path}")
+    _log.warning("offload complete: %d shots written, %d quarantined -> %s",
+                 n_ok, len(quarantined), hdf5_path)
     if quarantined:
-        print(f"WARNING: {len(quarantined)} shot(s) failed and were quarantined "
-              f"(shot_N.failed in {spool_dir}): {sorted(quarantined)}")
+        tqdm.write(f"WARNING: {len(quarantined)} shot(s) failed and were quarantined "
+                   f"(shot_N.failed in {spool_dir}): {sorted(quarantined)}")
+        _log.warning("quarantined shots: %s", sorted(quarantined))
 
 
 def _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num):

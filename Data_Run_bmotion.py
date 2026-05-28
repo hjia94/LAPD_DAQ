@@ -23,6 +23,7 @@ import numpy as np
 import time
 import sys
 import logging
+import subprocess
 
 from acquisition import run_acquisition_bmotion, run_acquisition_bmotion_spooled
 from acquisition.config import (
@@ -88,7 +89,19 @@ def main():
         if not os.path.exists(spool_dir):
             os.makedirs(spool_dir)
         print(f'PARALLEL mode: spooling shots to {spool_dir}')
-        print(f'  Run Offload_Run.py to fill the HDF5 file ({hdf5_path}).')
+        # Auto-launch the offload in its own console window; it politely waits for
+        # run metadata (offload_runner._wait_for), so launching before metadata
+        # exists is safe. We detach (no wait) so it keeps draining after this
+        # acquire process exits.
+        offload_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'Offload_Run.py')
+        subprocess.Popen(
+            [sys.executable, offload_script,
+             '--spool-dir', spool_dir, '--config', config_path],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        print('  Launched Offload_Run.py in a new console window.')
 
     print('Data run started at', datetime.datetime.now())
     t_start = time.time()
@@ -111,8 +124,8 @@ def main():
         print('Time taken: %.2f hours' % ((time.time()-t_start)/3600))
 
         if spooled:
-            print(f'Shots spooled to "{spool_dir}". '
-                  f'Offload_Run.py writes the final HDF5 file.')
+            print(f'Shots spooled to "{spool_dir}". The auto-launched '
+                  f'Offload_Run.py console keeps draining into the HDF5 file.')
         elif os.path.isfile(hdf5_path):
             size = os.stat(hdf5_path).st_size/(1024*1024)
             print(f'Wrote file "{hdf5_path}", {size:.1f} MB')

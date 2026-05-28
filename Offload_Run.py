@@ -19,7 +19,9 @@ Usage:
     python Offload_Run.py
 """
 
+import argparse
 import datetime
+import logging
 import os
 import sys
 import time
@@ -35,23 +37,47 @@ from spooling import spool_format
 '''
 User set following
 '''
-base_path = r"E:\Shadow data\Pat"
-config_path = os.path.join(base_path, 'experiment_config.ini')
+DEFAULT_BASE_PATH = r"E:\Shadow data\Pat"
+
+
+def _parse_args():
+    p = argparse.ArgumentParser(description="Offload spooled shots into the HDF5.")
+    p.add_argument("--spool-dir", default=None,
+                   help="Override spool dir (else read from config [storage]).")
+    p.add_argument("--config", default=os.path.join(DEFAULT_BASE_PATH,
+                                                     "experiment_config.ini"),
+                   help="Path to experiment_config.ini.")
+    return p.parse_args()
+
 
 #===============================================================================================================================================
 def main():
+    args = _parse_args()
+    config_path = args.config
     config, _ = load_experiment_config(config_path)
-    spool_dir, hdf5_dir = get_storage_paths(config)
+    cfg_spool_dir, hdf5_dir = get_storage_paths(config)
+    spool_dir = args.spool_dir or cfg_spool_dir
 
     if not spool_dir or not hdf5_dir:
         print("No [storage] section with spool_dir + hdf5_dir found in "
               f"{config_path}. Nothing to offload.")
         sys.exit(1)
 
+    # Log failures/issues to a file in the spool folder (mirrors the acquire
+    # side's motor.log). A named logger keeps offload logging isolated from root.
+    os.makedirs(spool_dir, exist_ok=True)
+    log_path = os.path.join(spool_dir, "offload.log")
+    handler = logging.FileHandler(log_path)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    off_logger = logging.getLogger("offload")
+    off_logger.setLevel(logging.WARNING)
+    off_logger.addHandler(handler)
+
     # The offload neither computes nor creates the destination path: the acquire
     # process records the exact file (and creates it) in the spool metadata.
     print('Offload started at', datetime.datetime.now())
     print(f'  spool_dir = {spool_dir}')
+    print(f'  logging failures to {log_path}')
     t_start = time.time()
 
     hdf5_path = None

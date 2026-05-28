@@ -744,6 +744,7 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                 "hdf5_path": hdf5_path,
                 "config_scope_names": list(active_scopes.keys()),
                 "channel_descriptions": spool_adapter.channel_descriptions(msa),
+                "total_shots": total_shots,
             })
             print(f"Wrote run metadata to spool: {spool_dir}")
 
