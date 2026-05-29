@@ -190,6 +190,7 @@ class MultiScopeAcquisition:
     # -- HDF5 lifecycle (delegates to hdf5_writer) ---------------------------
     def initialize_hdf5_base(self):
         """Initialize HDF5 file structure for scopes and experiment metadata."""
+        print(f"HDF5 compression: {hdf5_writer._COMPRESSION_LABEL}")
         hdf5_writer.write_experiment_metadata(
             self.save_path,
             description=self.get_experiment_description(),

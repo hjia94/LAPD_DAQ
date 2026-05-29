@@ -21,6 +21,12 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 
+# Register Blosc2 filter so h5py can decompress datasets written with hdf5plugin.
+try:
+    import hdf5plugin as _hdf5plugin  # noqa: F401
+except ImportError:
+    pass
+
 from spooling import spool_format
 
 _log = logging.getLogger("offload")

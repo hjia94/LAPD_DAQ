@@ -13,6 +13,19 @@ import time
 import h5py
 import numpy as np
 
+# Prefer Blosc2 (bitshuffle+lz4) for int16 ADC data: bitshuffle groups bits by
+# significance and substantially outperforms byte-shuffle on correlated signals.
+# Fall back to lzf if hdf5plugin is not installed.
+try:
+    import hdf5plugin as _hdf5plugin
+    _COMPRESSION = _hdf5plugin.Blosc2(cname='lz4', filters=_hdf5plugin.Blosc2.BITSHUFFLE)
+    _COMPRESSION_KWARGS: dict = {"compression": _COMPRESSION, "shuffle": False, "fletcher32": True}
+    _COMPRESSION_LABEL = "blosc2/bitshuffle+lz4"
+except ImportError:
+    _hdf5plugin = None
+    _COMPRESSION_KWARGS = {"compression": "lzf", "shuffle": True, "fletcher32": True}
+    _COMPRESSION_LABEL = "lzf"
+
 
 # Files captured into the `source_code` HDF5 attribute for reproducibility.
 # Paths are resolved relative to the repository root at write time.
@@ -150,7 +163,7 @@ def write_time_array(save_path, scope_name, time_array, is_sequence):
 
 
 def write_shot_data(save_path, all_data, shot_num, channel_descriptions):
-    """Write shot_N for every scope (raw int16, lzf-compressed, fletcher32 on).
+    """Write shot_N for every scope (raw int16, blosc2/lzf-compressed, fletcher32 on).
 
     Args:
         save_path: HDF5 file path
@@ -182,9 +195,7 @@ def write_shot_data(save_path, all_data, shot_num, channel_descriptions):
                     data=trace_data,
                     dtype='int16',
                     chunks=chunk_size,
-                    compression='lzf',
-                    shuffle=True,
-                    fletcher32=True,
+                    **_COMPRESSION_KWARGS,
                 )
                 header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))
                 data_ds.attrs['description'] = channel_descriptions.get(

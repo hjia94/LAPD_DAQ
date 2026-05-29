@@ -20,6 +20,13 @@ import sys
 
 import numpy as np
 
+# Register Blosc2 (and other hdf5plugin filters) so h5py can decompress files
+# written with blosc compression. No-op if the package is not installed.
+try:
+    import hdf5plugin as _hdf5plugin  # noqa: F401
+except ImportError:
+    pass
+
 from lab_scopes.io.hdf5 import (
     read_hdf5_scope_channel_shots,
     read_hdf5_scope_data,
