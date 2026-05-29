@@ -351,6 +351,18 @@ def read_run_complete(spool_dir: str) -> Optional[dict]:
         return pickle.load(f)
 
 
+def clear_run_complete(spool_dir: str) -> None:
+    """Remove the RUN_COMPLETE sentinel so the spool can accept a resumed run.
+
+    Called when the user chooses to resume from a previous partial run: the
+    existing HDF5 and already-spooled shots are kept, but the old sentinel is
+    removed so the acquire process can write a new one when the resumed run ends.
+    """
+    path = os.path.join(spool_dir, _RUN_COMPLETE)
+    if os.path.exists(path):
+        os.remove(path)
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
