@@ -96,28 +96,68 @@ def get_storage_paths(config):
 def get_motion_recovery_opts(config):
     """Return motor-move recovery tunables from the optional ``[bmotion]`` keys.
 
-    Used by the bmotion acquisition loop to retry a failed/silently-missed motor
-    move through an escalating recovery ladder before terminating the run. Keys
+    Used by the bmotion acquisition loop to wait for arrival, verify, and retry a
+    failed/silently-missed motor move once before skipping the position. Keys
     (all optional, with defaults so existing configs need no change):
 
-      * ``move_attempts``        - total move attempts incl. the first (default 3)
-      * ``move_settle_timeout_s``- seconds to wait for motion to stop (default 30)
-      * ``reconnect_timeout_s``  - seconds to wait for a lost motor link to come
-                                   back via the bapsf_motion heartbeat (default 60)
+      * ``move_attempts``        - total move attempts incl. the first (default 30).
+                                   Each re-issue re-sends the same absolute target;
+                                   the library re-clears alarms / re-enables on the
+                                   re-issue, so repeated tries give a stuck axis
+                                   many chances to recover before the position is
+                                   skipped.
+      * ``move_retry_wait_s``    - seconds to wait between attempts before
+                                   soft-stopping and re-issuing (default 1).
+      * ``move_stall_timeout_s`` - seconds a move may make NO position progress
+                                   before it is treated as a real stall (default
+                                   10). A move that keeps advancing is never timed
+                                   out, so a slow-but-healthy long move is left to
+                                   finish instead of being killed mid-travel.
+      * ``move_max_time_s``      - absolute backstop ceiling for a single move, so
+                                   a hung link can't wait forever (default 300).
+      * ``position_progress_eps``- min per-axis position change (motion-space
+                                   units) that counts as "still progressing"
+                                   (default: ``position_tol / 4``).
       * ``position_tol``         - max |achieved - target| per axis, in motion-
                                    space units, to count a move as arrived (0.5)
+      * ``encoder_mismatch_tol_rev`` - max |encoder - step| disagreement (in motor
+                                   revolutions) before warning that the encoder
+                                   and commanded position have drifted apart
+                                   (default 0.01). Read-only check; never corrects.
 
-    Returns a dict with those four keys.
+    The legacy ``move_settle_timeout_s`` key is still accepted: if present and
+    ``move_max_time_s`` is absent, it is used as the backstop ceiling so existing
+    configs don't silently shorten the new ceiling.
+
+    Returns a dict consumed directly as ``move_with_recovery`` keyword args.
     """
     section = 'bmotion'
     if section not in config:
-        return {"attempts": 3, "settle_timeout": 30.0,
-                "reconnect_timeout": 60.0, "tol": 0.5}
+        tol = 0.5
+        return {"attempts": 30, "retry_wait": 1.0, "stall_timeout": 10.0,
+                "max_move_time": 300.0, "progress_eps": tol / 4, "tol": tol,
+                "encoder_mismatch_tol_rev": 0.01}
+
+    tol = config.getfloat(section, 'position_tol', fallback=0.5)
+
+    # Backstop ceiling: prefer the new key, fall back to the legacy settle key
+    # (so old configs keep their intent), else the new generous default.
+    if config.has_option(section, 'move_max_time_s'):
+        max_move_time = config.getfloat(section, 'move_max_time_s')
+    elif config.has_option(section, 'move_settle_timeout_s'):
+        max_move_time = config.getfloat(section, 'move_settle_timeout_s')
+    else:
+        max_move_time = 300.0
+
     return {
-        "attempts": config.getint(section, 'move_attempts', fallback=3),
-        "settle_timeout": config.getfloat(section, 'move_settle_timeout_s', fallback=30.0),
-        "reconnect_timeout": config.getfloat(section, 'reconnect_timeout_s', fallback=60.0),
-        "tol": config.getfloat(section, 'position_tol', fallback=0.5),
+        "attempts": config.getint(section, 'move_attempts', fallback=30),
+        "retry_wait": config.getfloat(section, 'move_retry_wait_s', fallback=1.0),
+        "stall_timeout": config.getfloat(section, 'move_stall_timeout_s', fallback=10.0),
+        "max_move_time": max_move_time,
+        "progress_eps": config.getfloat(section, 'position_progress_eps', fallback=tol / 4),
+        "tol": tol,
+        "encoder_mismatch_tol_rev": config.getfloat(
+            section, 'encoder_mismatch_tol_rev', fallback=0.01),
     }
 
 

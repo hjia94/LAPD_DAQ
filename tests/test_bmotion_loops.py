@@ -469,8 +469,10 @@ class SpoolSinkTests(unittest.TestCase):
 
 
 class TerminalMotorFailureTests(unittest.TestCase):
-    """A terminal MotorError mid-run must stop the loop cleanly (no raise),
-    record terminated_early in run_state, and preserve the partial shot count."""
+    """A MotorError (recovery exhausted) mid-run must NOT abort the run: the bad
+    position is skipped (its shots not taken) and the scan continues, with the
+    skipped position recorded in run_state. A merely-slow motor never reaches
+    here -- recovery only raises when the motor is genuinely stuck."""
 
     def setUp(self):
         self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
@@ -481,14 +483,15 @@ class TerminalMotorFailureTests(unittest.TestCase):
     def tearDown(self):
         self._stdout_ctx.__exit__(None, None, None)
 
-    def test_motor_error_breaks_loop_and_flags_run_state(self):
+    def test_motor_error_skips_position_and_continues(self):
         from acquisition.motor_recovery import MotorError
 
-        fail_at = 2
+        # Index 2 is unreachable; all other positions move fine.
+        dead_index = 2
         shot_calls = []
 
         def fake_move_with_recovery(rm, ml_order_dict, index, **kw):
-            if index >= fail_at:
+            if index == dead_index:
                 raise MotorError(f"dead motor at index {index}")
 
         def spy_take(msa, active_scopes, hdf5_path, run_manager,
@@ -515,13 +518,18 @@ class TerminalMotorFailureTests(unittest.TestCase):
             mr.move_with_recovery = _orig_real
             bmotion_module._take_shots_at_position = _orig_take
 
-        # Loop did not raise; it stopped at the failing position.
-        self.assertTrue(run_state["terminated_early"])
-        self.assertIn("dead motor", run_state["abort_reason"])
-        # Shots were taken at indices 0 and 1 only (failure at index 2).
-        self.assertEqual(shot_calls, [1, 2])
-        # Partial count returned reflects the shots actually taken.
-        self.assertEqual(shot_num, 3)
+        # Run was NOT aborted.
+        self.assertFalse(run_state["terminated_early"])
+        # The dead position was recorded as skipped.
+        self.assertEqual(len(run_state["skipped_positions"]), 1)
+        self.assertEqual(run_state["skipped_positions"][0]["motion_index"], dead_index)
+        self.assertIn("dead motor", run_state["skipped_positions"][0]["reason"])
+        # Shots were taken at every position EXCEPT the dead one (index 2). With
+        # nshots=1, the skipped position still advances the shot counter by 1, so
+        # the shot numbers stay contiguous across the gap.
+        self.assertEqual(shot_calls, [1, 2, 4, 5])
+        # 5 positions * 1 shot = 5 emitted/skipped slots -> next shot is 6.
+        self.assertEqual(shot_num, 6)
 
 
 if __name__ == "__main__":

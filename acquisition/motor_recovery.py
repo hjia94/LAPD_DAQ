@@ -11,19 +11,36 @@ exception we can rely on:
   the motor actor's heartbeat auto-reconnects in the background); a raw socket
   error may also bubble out of ``send_command``.
 
-Because scan positions are sequential, a motor that stays broken makes every
-later position unreachable -- so the policy is: retry a move through an
-escalating recovery ladder, and if it still fails, raise :class:`MotorError` so
-the caller can stop the run cleanly and finalize whatever data was acquired.
+This module is deliberately thin: ``bapsf_motion`` already handles most recovery
+internally, so we only add what the library does *not* do. Specifically, the
+library's ``Motor.move_to`` is fire-and-forget (sends ``DI``+``FP`` and returns;
+no wait, no arrival check) and ``Motor._moveable`` already runs ``alarm_reset``
+and re-``enable`` before every move and refuses a move on a real (non-limit)
+alarm; the heartbeat already auto-reconnects a dropped link in the background.
+So re-issuing a move is, by itself, the recovery -- the library re-clears alarms
+and re-enables for us. We therefore do **not** duplicate alarm-reset / enable /
+reconnect logic here (that churn -- repeated ``AR`` commands in particular -- is
+what risked desyncing the encoder).
 
-The recovery ladder (per :func:`move_with_recovery`) mirrors the library's own
-``Motor._moveable`` logic:
+What we add, and why each is needed:
 
-  1. soft-stop + re-issue the move (transient miss / stale queue state),
-  2. clear faults: ``alarm_reset`` (+ ``move_off_limit`` if on a limit) then
-     re-issue,
-  3. if any axis lost connection, wait for the heartbeat to restore it, then
-     re-issue.
+* **Wait for the move to actually finish, by progress not by clock.** This is the
+  core fix. A move that keeps advancing is *never* interrupted, so a slow-but-
+  healthy long move is left to finish. Killing it mid-travel (the old fixed-
+  timeout behavior) stranded the probe at a partial position and made every later
+  position read "did not reach target." See :func:`_settle`.
+* **Verify arrival.** Because targets are *absolute* and ``move_to`` is silent on
+  failure, the only way to know a move worked is to compare the achieved position
+  (on a fresh, non-cached read -- see :func:`_refresh_status`) to the target.
+* **One retry: soft-stop + re-issue.** If a move stalls or misses, soft-stop and
+  re-issue the same (absolute) target once. The library handles alarm-clear /
+  re-enable on that re-issue. No separate fault-clearing ladder.
+* **Encoder cross-check.** After arrival, warn (read-only) if the encoder (EP)
+  disagrees with the commanded/step position (IP) -- the independent check that
+  catches silent step loss / encoder slip.
+
+If the retry still fails, raise :class:`MotorError` so the caller can record the
+bad position and continue (skip-and-continue) or stop.
 
 All status reads go through defensive accessors so this module works against
 both the real actors and lightweight test stubs, and never itself raises an
@@ -111,6 +128,85 @@ def _alarm_messages(mg):
     return msgs
 
 
+def _scalar(val):
+    """Coerce a possibly-Quantity/AckFlags command return to a float, or None."""
+    if val is None:
+        return None
+    v = getattr(val, "value", val)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None  # AckFlags / NACK / non-numeric -> "unavailable"
+
+
+def encoder_step_mismatch(mg, tol_rev=0.01):
+    """Per-axis encoder-vs-step disagreement, as ``[(axis_idx, step_rev, enc_rev)]``.
+
+    The motor tracks two independent position counters: the commanded *step*
+    position (IP, what ``status["position"]`` reflects) and the *encoder* position
+    (EP, the physical feedback). They should track each other; a growing gap means
+    the motor lost steps or the encoder slipped -- exactly the "encoder doesn't
+    match motor position" condition worth flagging.
+
+    Both are read **directly** (bypassing the heartbeat cache) and converted to
+    motor revolutions using ``steps_per_rev`` (gearing) and ``encoder_resolution``
+    so they're comparable. An axis is reported only when both reads succeed and
+    ``|step_rev - enc_rev| > tol_rev``.
+
+    Read-only and best-effort: callers must have settled motion first (EP is a
+    buffered command and is refused while the motor is moving). Any axis whose
+    motor can't supply the values (stub, NACK, missing constants) is skipped
+    silently -- never warns spuriously, never writes/corrects anything.
+    """
+    bad = []
+    for idx, ax in enumerate(_axes(mg)):
+        motor = getattr(ax, "motor", ax)
+        send = getattr(motor, "send_command", None)
+        if not callable(send):
+            continue
+
+        # Read step (IP) and encoder (EP) positions directly. EP with no arg is a
+        # read (two_way); never pass a value or it would *write* the encoder.
+        try:
+            step = _scalar(send("get_position"))
+            enc = _scalar(send("encoder_position"))
+        except Exception:  # noqa: BLE001 - comms hiccup -> just skip this axis
+            continue
+        if step is None or enc is None:
+            continue
+
+        steps_per_rev = _scalar(getattr(motor, "steps_per_rev", None))
+        enc_res = None
+        motor_params = getattr(motor, "_motor", None)
+        if isinstance(motor_params, dict):
+            enc_res = _scalar(motor_params.get("encoder_resolution"))
+        if not steps_per_rev or not enc_res:
+            continue  # can't convert to a common unit -> skip
+
+        step_rev = step / steps_per_rev
+        enc_rev = enc / enc_res
+        if abs(step_rev - enc_rev) > tol_rev:
+            bad.append((idx, step_rev, enc_rev))
+    return bad
+
+
+def warn_on_encoder_mismatch(mg, tol_rev=0.01, log=print):
+    """Emit a clear warning per axis whose encoder/step positions disagree.
+
+    Thin wrapper over :func:`encoder_step_mismatch` used by the acquisition loop
+    after each settled move. Returns the mismatch list (empty if all agree).
+    """
+    bad = encoder_step_mismatch(mg, tol_rev=tol_rev)
+    name = mg.config.get("name", "?") if hasattr(mg, "config") else "?"
+    for idx, step_rev, enc_rev in bad:
+        log(f"WARNING: motion group '{name}' axis {idx}: encoder position "
+            f"({enc_rev:.4f} rev) disagrees with motor/step position "
+            f"({step_rev:.4f} rev) by {abs(step_rev - enc_rev):.4f} rev "
+            f"(> {tol_rev} rev tol). Motor may have lost steps or the encoder "
+            f"slipped; physical position may differ from the recorded value.")
+    return bad
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -127,19 +223,61 @@ def safe_stop(rm):
             print(f"safe_stop: motion group {key} stop failed: {e}")
 
 
-def _settle(rm, settle_timeout, poll=0.5):
-    """Wait until ``rm.is_moving`` clears or the timeout elapses.
+def _progress_position(rm, ml_order_dict):
+    """Concatenated (x, y, ...) of every selected group, for progress tracking."""
+    pos = []
+    for mg_key in ml_order_dict:
+        pos.extend(_position_tuple(rm.mgs[mg_key]))
+    return tuple(pos)
 
-    Returns True if motion stopped within the timeout, False if it timed out
-    (which is treated as a move failure by the caller).
+
+def _moved(prev, cur, eps):
+    """True if any coordinate changed by more than ``eps`` (i.e. still moving)."""
+    if prev is None or len(prev) != len(cur):
+        return True
+    return any(abs(c - p) > eps for p, c in zip(prev, cur))
+
+
+def _settle(rm, ml_order_dict, *, stall_timeout, max_move_time, progress_eps,
+            poll=0.5):
+    """Wait for motion to finish, tolerating slow-but-healthy long moves.
+
+    Unlike a fixed wall-clock timeout, this only gives up when the move stops
+    making progress: as long as any selected group's position keeps changing by
+    more than ``progress_eps`` it is considered healthy and we keep waiting --
+    so a legitimately long move is left to finish instead of being killed.
+
+    Returns one of:
+      * ``"settled"``  - ``rm.is_moving`` cleared (motion finished),
+      * ``"stalled"``  - still moving but no position progress for
+                         ``stall_timeout`` seconds (genuinely stuck),
+      * ``"timeout"``  - hit the absolute ``max_move_time`` backstop.
+
+    A fresh status read is forced before sampling position so progress is judged
+    on current data, not the heartbeat cache.
     """
     time.sleep(poll)
-    deadline = time.time() + settle_timeout
+    overall_deadline = time.time() + max_move_time
+    last_pos = None
+    last_progress = time.time()
+
     while rm.is_moving:
-        if time.time() > deadline:
-            return False
+        now = time.time()
+        if now > overall_deadline:
+            return "timeout"
+
+        for mg_key in ml_order_dict:
+            _refresh_status(rm.mgs[mg_key])
+        cur = _progress_position(rm, ml_order_dict)
+        if _moved(last_pos, cur, progress_eps):
+            last_pos = cur
+            last_progress = now
+        elif now - last_progress > stall_timeout:
+            return "stalled"
+
         time.sleep(poll)
-    return True
+
+    return "settled"
 
 
 def _disable_all(rm):
@@ -148,6 +286,24 @@ def _disable_all(rm):
             mg.drive.send_command("disable")
         except Exception as e:  # noqa: BLE001 - disable is best-effort
             print(f"disable failed for '{mg.config.get('name', '?')}': {e}")
+
+
+def _refresh_status(mg):
+    """Force a direct motor-status re-query so reads aren't fooled by the cache.
+
+    ``MotionGroup.position`` returns the heartbeat-cached ``status["position"]``
+    while the loop is live (updated only every ~0.2-1.5 s), so a read taken right
+    after a move/recovery step can be stale. Calling ``Motor.retrieve_motor_status``
+    issues only un-buffered commands (RS/IP/AL) and updates the cache, so a
+    subsequent ``mg.position`` reflects the motor's current state.
+
+    Best-effort and stub-tolerant: any axis/motor lacking the method is skipped.
+    """
+    for ax in _axes(mg):
+        motor = getattr(ax, "motor", ax)
+        fn = getattr(motor, "retrieve_motor_status", None)
+        if callable(fn):
+            _try(fn)
 
 
 def _arrived(mg, motion_index, tol):
@@ -171,16 +327,25 @@ def _resolve_indices(rm, ml_order_dict, index):
     return out
 
 
-def move_with_recovery(rm, ml_order_dict, index, *, attempts=3,
-                       settle_timeout=30.0, reconnect_timeout=60.0, tol=0.5,
-                       log=print):
-    """Move selected groups to ``index`` with escalating recovery on failure.
+def move_with_recovery(rm, ml_order_dict, index, *, attempts=30, retry_wait=1.0,
+                       stall_timeout=10.0, max_move_time=300.0, progress_eps=0.125,
+                       tol=0.5, encoder_mismatch_tol_rev=0.01, log=print):
+    """Move selected groups to ``index``, wait for arrival, verify, retry.
 
     Mirrors :func:`acquisition.bmotion.move_to_index` (move each group, wait for
-    motion to settle, disable) but adds: a settle timeout, position
-    verification, and a recovery ladder. Raises :class:`MotorError` if a group
-    cannot be moved/verified after ``attempts`` tries (after clearing faults and
-    waiting out any connection loss).
+    motion to settle, disable) but adds a *progress-aware* settle, position
+    verification, an encoder-vs-step sanity warning, and one retry. Raises
+    :class:`MotorError` if a group cannot be moved/verified after ``attempts``
+    tries.
+
+    Each attempt after the first waits ``retry_wait`` seconds, then soft-stops and
+    re-issues the same (absolute) target -- the library's ``Motor.move_to``
+    re-clears any alarm and re-enables the motor on its own, so there is no
+    separate fault-clearing or reconnect ladder here. The progress-aware settle is the key behavior: a move
+    that keeps making position progress is *never* interrupted, so a slow-but-
+    healthy long move is left to finish rather than being soft-stopped mid-travel
+    (which would strand the probe at a partial position and cascade "did not reach
+    target" into every later position).
 
     Out-of-range indices for a group are skipped (as the legacy mover did): a
     group whose motion list is shorter than the current raster index simply
@@ -190,20 +355,16 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=3,
     detail = "no successful move and no diagnostic captured"
 
     for attempt in range(1, attempts + 1):
-        # --- escalating recovery BETWEEN attempts (not before the first) ---
+        # Retry = wait, soft-stop the previous (failed) move, then re-issue. The
+        # library handles alarm-reset + re-enable when the move is re-sent, so we
+        # don't duplicate that here.
         if attempt >= 2:
-            log(f"Move retry {attempt}/{attempts} at index {index}: soft-stopping and re-issuing.")
+            log(f"Move retry {attempt}/{attempts} at index {index}: "
+                f"waiting {retry_wait}s, soft-stopping and re-issuing.")
+            if retry_wait > 0:
+                time.sleep(retry_wait)
             for mg_key in ml_order_dict:
                 _try(rm.mgs[mg_key].stop, soft=True)
-            _reenable(rm, ml_order_dict, log)
-        if attempt >= 3:
-            log(f"Move retry {attempt}/{attempts}: clearing alarms / backing off limits.")
-            _clear_faults(rm, ml_order_dict, log)
-
-        # If any selected group lost its connection, wait for the actor's
-        # heartbeat to restore it before issuing (don't burn an attempt racing
-        # a known-down link).
-        _await_reconnect(rm, ml_order_dict, reconnect_timeout, log)
 
         # --- issue the move ---
         try:
@@ -216,19 +377,23 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=3,
             log(f"Move command raised at index {index} (attempt {attempt}): {e}")
             continue
 
-        settled = _settle(rm, settle_timeout)
+        outcome = _settle(rm, ml_order_dict, stall_timeout=stall_timeout,
+                          max_move_time=max_move_time, progress_eps=progress_eps)
         _disable_all(rm)
-        if not settled:
-            detail = f"motion did not settle within {settle_timeout}s"
-            log(f"{detail} (attempt {attempt}).")
+        if outcome != "settled":
+            detail = (f"motion stalled (no progress for {stall_timeout}s)"
+                      if outcome == "stalled"
+                      else f"motion exceeded {max_move_time}s ceiling")
+            log(f"{detail} at index {index} (attempt {attempt}).")
             continue
 
-        # --- verify arrival + no active fault ---
+        # --- verify arrival (on fresh, non-cached reads) ---
         bad = []
         for mg_key, (motion_index, ml_size) in indices.items():
             if motion_index not in range(ml_size):
                 continue
             mg = rm.mgs[mg_key]
+            _refresh_status(mg)  # defeat stale heartbeat cache before judging
             if not _all_connected(mg):
                 bad.append((mg_key, "connection lost"))
             elif _has_alarm(mg):
@@ -238,6 +403,13 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=3,
                                     f"{_target_point(mg, motion_index)} "
                                     f"(at {_position_tuple(mg)})"))
         if not bad:
+            # Arrived. Sanity-check that the encoder agrees with the commanded
+            # position before declaring success (read-only; warns, never aborts).
+            for mg_key in indices:
+                motion_index, ml_size = indices[mg_key]
+                if motion_index in range(ml_size):
+                    warn_on_encoder_mismatch(rm.mgs[mg_key],
+                                             tol_rev=encoder_mismatch_tol_rev, log=log)
             return  # success
 
         detail = "; ".join(f"{rm.mgs[k].config.get('name', k)}: {why}" for k, why in bad)
@@ -250,7 +422,7 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=3,
 
 
 # --------------------------------------------------------------------------- #
-# Ladder steps
+# Misc
 # --------------------------------------------------------------------------- #
 def _try(fn, **kw):
     try:
@@ -263,52 +435,3 @@ def _try(fn, **kw):
             print(f"recovery step failed: {e}")
     except Exception as e:  # noqa: BLE001
         print(f"recovery step failed: {e}")
-
-
-def _reenable(rm, ml_order_dict, log):
-    for mg_key in ml_order_dict:
-        mg = rm.mgs[mg_key]
-        try:
-            mg.drive.send_command("enable")
-        except Exception as e:  # noqa: BLE001
-            log(f"re-enable failed for '{mg.config.get('name', mg_key)}': {e}")
-
-
-def _clear_faults(rm, ml_order_dict, log):
-    for mg_key in ml_order_dict:
-        mg = rm.mgs[mg_key]
-        for ax in _axes(mg):
-            motor = getattr(ax, "motor", ax)
-            st = _axis_status(ax)
-            if st.get("alarm") or st.get("fault"):
-                # Prefer the motor's explicit alarm_reset when present.
-                fn = getattr(motor, "alarm_reset", None)
-                if callable(fn):
-                    _try(fn)
-                else:
-                    send = getattr(motor, "send_command", None)
-                    if callable(send):
-                        _try(lambda: send("alarm_reset"))
-                limits = st.get("limits") or {}
-                if limits.get("CW") or limits.get("CCW"):
-                    fn = getattr(motor, "move_off_limit", None)
-                    if callable(fn):
-                        _try(fn)
-
-
-def _await_reconnect(rm, ml_order_dict, reconnect_timeout, log):
-    """If any selected group is disconnected, wait for the heartbeat to restore it."""
-    def all_up():
-        return all(_all_connected(rm.mgs[k]) for k in ml_order_dict)
-
-    if all_up():
-        return
-    log(f"Motor connection lost; waiting up to {reconnect_timeout}s for reconnect "
-        f"(bapsf_motion heartbeat auto-reconnects).")
-    deadline = time.time() + reconnect_timeout
-    while not all_up():
-        if time.time() > deadline:
-            log("Reconnect wait timed out.")
-            return
-        time.sleep(1.0)
-    log("Motor connection restored.")

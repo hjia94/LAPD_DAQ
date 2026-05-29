@@ -1,11 +1,18 @@
-"""Tests for acquisition.motor_recovery.move_with_recovery.
+"""Tests for acquisition.motor_recovery.move_with_recovery and helpers.
 
 Uses purpose-built fakes that mimic the bapsf_motion shapes the recovery code
 reads (mg.mb.motion_list.values, mg.position, mg.stop, mg.drive.axes[i].motor
-with a .status dict + alarm_reset/move_off_limit/send_command, mg.drive.
-send_command). Each fake injects a specific failure mode so we can assert the
-recovery ladder behaves: transient miss recovers, connection loss waits and
-recovers, a resettable alarm recovers, and a permanent fault raises MotorError.
+with a .status dict + alarm_reset/move_off_limit/send_command/retrieve_motor_status,
+mg.drive.send_command, rm.is_moving). Each fake injects a specific failure mode
+so we can assert the recovery ladder behaves:
+
+  * a slow-but-progressing move is left to finish (never soft-stopped),
+  * a genuinely stalled move escalates and (if it never recovers) raises,
+  * a transient miss recovers on retry,
+  * connection loss waits and recovers,
+  * a resettable alarm recovers,
+  * verification uses fresh (refreshed) position reads,
+  * encoder-vs-step disagreement is detected by encoder_step_mismatch.
 
 No bapsf_motion, hardware, or HDF5 needed.
 """
@@ -21,14 +28,18 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from acquisition import motor_recovery
-from acquisition.motor_recovery import move_with_recovery, MotorError, safe_stop
+from acquisition.motor_recovery import (
+    move_with_recovery, MotorError, safe_stop, encoder_step_mismatch,
+)
 
 
 class _Motor:
     def __init__(self):
         self.status = {"connected": True, "alarm": False, "fault": False,
-                       "limits": {"CW": False, "CCW": False}, "alarm_message": ""}
+                       "limits": {"CW": False, "CCW": False}, "alarm_message": "",
+                       "position": 0}
         self.alarm_reset_calls = 0
+        self.refresh_calls = 0
 
     def alarm_reset(self):
         self.alarm_reset_calls += 1
@@ -37,6 +48,9 @@ class _Motor:
 
     def move_off_limit(self):
         self.status["limits"] = {"CW": False, "CCW": False}
+
+    def retrieve_motor_status(self):
+        self.refresh_calls += 1
 
     def send_command(self, *a, **k):
         pass
@@ -99,9 +113,29 @@ class _FakeMG:
 
 
 class _RM:
+    """Run manager whose ``is_moving`` reflects each group's moving countdown.
+
+    A group that wants to model in-flight motion sets ``mg._moving_ticks`` > 0 and
+    optionally an ``mg._advance`` callable invoked each poll to step ``_pos``.
+    ``is_moving`` (read each settle poll) decrements the countdown and runs the
+    advance, so the progress-aware settle exercises real logic.
+    """
     def __init__(self, mgs):
         self.mgs = dict(mgs)
-        self.is_moving = False
+
+    @property
+    def is_moving(self):
+        any_moving = False
+        for mg in self.mgs.values():
+            ticks = getattr(mg, "_moving_ticks", 0)
+            if ticks > 0:
+                advance = getattr(mg, "_advance", None)
+                if callable(advance):
+                    advance(mg)
+                mg._moving_ticks = ticks - 1
+                if mg._moving_ticks > 0:
+                    any_moving = True
+        return any_moving
 
 
 def _target(mg, index):
@@ -137,13 +171,21 @@ def disconnect_then_reconnect(reconnect_on_attempt):
 
 
 def alarm_then_clear(mg, index, attempt):
+    """A limit/transient alarm on the first move; the *re-issue* clears it.
+
+    Models the real library: ``Motor.move_to`` runs ``_moveable`` which resets a
+    (limit) alarm and re-enables before moving -- so attempt 2 succeeds without
+    the recovery module ever sending its own alarm_reset.
+    """
     motor = mg.drive.axes[0].motor
     if attempt == 1:
         motor.status["alarm"] = True
-        motor.status["alarm_message"] = "drive fault"
+        motor.status["alarm_message"] = "limit"
         mg._pos = (999.0, 999.0)
     else:
-        # _clear_faults() will have called alarm_reset before this attempt.
+        # Re-issue: the library cleared the alarm and the move now lands.
+        motor.status["alarm"] = False
+        motor.status["alarm_message"] = ""
         mg._pos = _target(mg, index)
 
 
@@ -151,21 +193,59 @@ def never_arrive(mg, index, attempt):
     mg._pos = (999.0, 999.0)
 
 
+def slow_progress_then_arrive(ticks, step_frac=0.25):
+    """Model a long move: is_moving stays True for ``ticks`` polls, position
+    creeps toward the target a fraction each poll, arriving at the end."""
+    def b(mg, index, attempt):
+        target = np.asarray(_target(mg, index))
+        start = np.asarray(mg._pos)
+        mg._moving_ticks = ticks + 1  # +1 so the final poll clears is_moving
+        state = {"i": 0}
+
+        def advance(m):
+            state["i"] += 1
+            frac = min(1.0, state["i"] / ticks)
+            m._pos = tuple(start + (target - start) * frac)
+        mg._advance = advance
+    return b
+
+
+def stuck_while_moving(mg, index, attempt):
+    """Model a real stall: is_moving stays True but position never changes."""
+    mg._moving_ticks = 10_000  # effectively never settles on its own
+    mg._pos = (0.0, 0.0)
+    mg._advance = lambda m: None  # no progress -> stall detector should fire
+
+
 class MoveWithRecoveryTests(unittest.TestCase):
     def setUp(self):
-        # Make _settle / _await_reconnect fast.
+        # Make settle / reconnect polls instant.
         self._orig_sleep = motor_recovery.time.sleep
         motor_recovery.time.sleep = lambda *_a, **_k: None
+        # Deterministic, monotonic clock so stall/timeout windows are exact and
+        # don't depend on wall-clock speed.
+        self._t = {"now": 1000.0}
+        self._orig_time = motor_recovery.time.time
+
+        def fake_time():
+            self._t["now"] += 0.5  # each call advances 0.5 s
+            return self._t["now"]
+        motor_recovery.time.time = fake_time
 
     def tearDown(self):
         motor_recovery.time.sleep = self._orig_sleep
+        motor_recovery.time.time = self._orig_time
+
+    def _mg(self, behavior):
+        return _FakeMG("A", [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], behavior)
 
     def _run(self, behavior, **kw):
-        mg = _FakeMG("A", [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], behavior)
+        mg = self._mg(behavior)
         rm = _RM({"a": mg})
-        move_with_recovery(rm, {"a": "forward"}, 1,
-                           settle_timeout=1, reconnect_timeout=1, tol=0.5,
-                           log=lambda *_a: None, **kw)
+        kw.setdefault("stall_timeout", 5.0)
+        kw.setdefault("max_move_time", 1000.0)
+        kw.setdefault("tol", 0.5)
+        move_with_recovery(rm, {"a": "forward"}, 1, log=lambda *_a: None, **kw)
         return mg, rm
 
     def test_first_try_success(self):
@@ -173,31 +253,120 @@ class MoveWithRecoveryTests(unittest.TestCase):
         self.assertEqual(mg.position.value, (1.0, 1.0))
         self.assertEqual(mg.stop_calls, 0)  # no recovery needed
 
+    def test_slow_progressing_move_is_not_interrupted(self):
+        # A move that keeps progressing for many polls must finish on its own
+        # without any soft-stop / re-issue, even though it takes "long".
+        mg, _ = self._run(slow_progress_then_arrive(ticks=40), attempts=3,
+                          stall_timeout=2.0, max_move_time=10_000.0,
+                          progress_eps=0.001)
+        self.assertEqual(mg.stop_calls, 0)          # never interrupted
+        self.assertEqual(mg._attempt, 1)            # issued exactly once
+        np.testing.assert_allclose(mg.position.value, (1.0, 1.0), atol=1e-6)
+
+    def test_real_stall_escalates_and_raises(self):
+        with self.assertRaises(MotorError):
+            self._run(stuck_while_moving, attempts=2, stall_timeout=2.0,
+                      max_move_time=1000.0)
+
     def test_transient_miss_recovers_on_retry(self):
         mg, _ = self._run(miss_then_arrive(n_miss=1), attempts=3)
         self.assertEqual(mg.position.value, (1.0, 1.0))
         self.assertGreaterEqual(mg.stop_calls, 1)  # soft-stop ladder ran
 
-    def test_connection_loss_waits_then_recovers(self):
-        mg, _ = self._run(disconnect_then_reconnect(reconnect_on_attempt=2), attempts=3)
+    def test_connection_loss_recovers_on_reissue(self):
+        # Link drops during the first move; the re-issue (attempt 2) goes through.
+        mg, _ = self._run(disconnect_then_reconnect(reconnect_on_attempt=2), attempts=2)
         self.assertEqual(mg.position.value, (1.0, 1.0))
 
-    def test_resettable_alarm_recovers(self):
-        mg, _ = self._run(alarm_then_clear, attempts=3)
+    def test_resettable_alarm_recovers_via_reissue(self):
+        # The library clears a limit alarm on re-issue; the recovery module must
+        # NOT send its own alarm_reset (repeated AR is what risked encoder desync).
+        mg, _ = self._run(alarm_then_clear, attempts=2)
         self.assertEqual(mg.position.value, (1.0, 1.0))
-        self.assertGreaterEqual(mg.drive.axes[0].motor.alarm_reset_calls, 1)
+        self.assertEqual(mg.drive.axes[0].motor.alarm_reset_calls, 0)
 
     def test_permanent_failure_raises_motorerror(self):
         with self.assertRaises(MotorError):
-            self._run(never_arrive, attempts=3)
+            self._run(never_arrive, attempts=2)
+
+    def test_verification_forces_status_refresh(self):
+        mg, _ = self._run(always_arrive)
+        # _refresh_status must have queried the motor before verifying.
+        self.assertGreaterEqual(mg.drive.axes[0].motor.refresh_calls, 1)
+
+    def test_no_alarm_reset_for_plain_miss(self):
+        # A miss with no alarm should soft-stop + re-issue but NOT churn
+        # alarm_reset (which can desync the encoder on real hardware).
+        mg, _ = self._run(miss_then_arrive(n_miss=1), attempts=2)
+        self.assertEqual(mg.drive.axes[0].motor.alarm_reset_calls, 0)
 
     def test_out_of_range_index_is_skipped_not_failed(self):
         # index 5 is beyond the 3-point list -> no motion, treated as success.
-        mg = _FakeMG("A", [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], never_arrive)
+        mg = self._mg(never_arrive)
         rm = _RM({"a": mg})
         move_with_recovery(rm, {"a": "forward"}, 5, attempts=2,
-                           settle_timeout=1, reconnect_timeout=1, log=lambda *_a: None)
+                           stall_timeout=5.0, max_move_time=1000.0,
+                           log=lambda *_a: None)
         self.assertEqual(mg._attempt, 0)  # move_ml never called
+
+
+# --------------------------------------------------------------------------- #
+# Encoder-vs-step mismatch helper
+# --------------------------------------------------------------------------- #
+class _EncMotor:
+    """Motor exposing get_position (IP) and encoder_position (EP) reads plus the
+    scaling constants, for encoder_step_mismatch."""
+    def __init__(self, ip, ep, steps_per_rev=20000, enc_res=4000, support_ep=True):
+        self._ip = ip
+        self._ep = ep
+        self.steps_per_rev = steps_per_rev
+        self._motor = {"encoder_resolution": enc_res}
+        self._support_ep = support_ep
+        self.status = {"connected": True}
+
+    def send_command(self, command, *a, **k):
+        if command == "get_position":
+            return self._ip
+        if command == "encoder_position":
+            if a:  # a value was passed -> would be a WRITE; tests must never do this
+                raise AssertionError("encoder_position must be read-only here")
+            if not self._support_ep:
+                return None  # model NACK / unsupported
+            return self._ep
+        return None
+
+
+class _EncMG:
+    def __init__(self, motors):
+        self.config = {"name": "Enc"}
+        self.drive = type("D", (), {"axes": [type("Ax", (), {"motor": m})()
+                                             for m in motors]})()
+
+
+class EncoderMismatchTests(unittest.TestCase):
+    def test_no_mismatch_when_agree(self):
+        # 10000 steps / 20000 = 0.5 rev; 2000 counts / 4000 = 0.5 rev -> agree.
+        mg = _EncMG([_EncMotor(ip=10000, ep=2000)])
+        self.assertEqual(encoder_step_mismatch(mg, tol_rev=0.01), [])
+
+    def test_mismatch_flagged(self):
+        # step = 0.5 rev, encoder = 0.25 rev -> 0.25 rev gap > 0.01 tol.
+        mg = _EncMG([_EncMotor(ip=10000, ep=1000)])
+        bad = encoder_step_mismatch(mg, tol_rev=0.01)
+        self.assertEqual(len(bad), 1)
+        idx, step_rev, enc_rev = bad[0]
+        self.assertEqual(idx, 0)
+        self.assertAlmostEqual(step_rev, 0.5)
+        self.assertAlmostEqual(enc_rev, 0.25)
+
+    def test_unsupported_ep_is_skipped_silently(self):
+        mg = _EncMG([_EncMotor(ip=10000, ep=0, support_ep=False)])
+        self.assertEqual(encoder_step_mismatch(mg, tol_rev=0.01), [])
+
+    def test_missing_constants_skipped(self):
+        m = _EncMotor(ip=10000, ep=1000, enc_res=None)
+        mg = _EncMG([m])
+        self.assertEqual(encoder_step_mismatch(mg, tol_rev=0.01), [])
 
 
 class SafeStopTests(unittest.TestCase):
