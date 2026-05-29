@@ -40,6 +40,21 @@ User set following
 DEFAULT_BASE_PATH = r"E:\Shadow data\Pat"
 
 
+def _pause_before_exit():
+    """Keep the auto-launched console window open so its output stays readable.
+
+    Data_Run_bmotion.py spawns this script with CREATE_NEW_CONSOLE; that window
+    closes the instant the process exits, hiding any error/summary. Block on
+    input so the user can read it. Harmless when run manually in an existing
+    terminal; skipped if stdin isn't interactive (e.g. piped/CI).
+    """
+    try:
+        if sys.stdin and sys.stdin.isatty():
+            input("\nPress Enter to close this window...")
+    except (EOFError, OSError):
+        pass
+
+
 def _parse_args():
     p = argparse.ArgumentParser(description="Offload spooled shots into the HDF5.")
     p.add_argument("--spool-dir", default=None,
@@ -55,12 +70,17 @@ def main():
     args = _parse_args()
     config_path = args.config
     config, _ = load_experiment_config(config_path)
-    cfg_spool_dir, hdf5_dir = get_storage_paths(config)
+    cfg_spool_dir, _hdf5_dir = get_storage_paths(config)
     spool_dir = args.spool_dir or cfg_spool_dir
 
-    if not spool_dir or not hdf5_dir:
-        print("No [storage] section with spool_dir + hdf5_dir found in "
-              f"{config_path}. Nothing to offload.")
+    # Only spool_dir is required: the offload reads the destination HDF5 path
+    # from the spool metadata (meta["hdf5_path"]), never from the config's
+    # hdf5_dir. When launched with --spool-dir we proceed even if the config
+    # has no [storage] section.
+    if not spool_dir:
+        print("No spool_dir given (via --spool-dir or config [storage]). "
+              f"Nothing to offload. (config: {config_path})")
+        _pause_before_exit()
         sys.exit(1)
 
     # Log failures/issues to a file in the spool folder (mirrors the acquire
@@ -100,7 +120,16 @@ def main():
             print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
         else:
             print(f'File "{hdf5_path}" was not created')
+        _pause_before_exit()
 
 #===============================================================================================================================================
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        _pause_before_exit()
+        raise
