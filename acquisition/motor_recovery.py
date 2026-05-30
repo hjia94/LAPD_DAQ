@@ -47,7 +47,9 @@ both the real actors and lightweight test stubs, and never itself raises an
 AttributeError on a partially-implemented object.
 """
 
+import re
 import time
+import warnings
 
 import numpy as np
 
@@ -139,6 +141,108 @@ def _scalar(val):
         return None  # AckFlags / NACK / non-numeric -> "unavailable"
 
 
+# Negative-aware parse of the drive's raw "EP=<counts>" reply. The library's own
+# encoder_position recv regex is "EP=[0-9]+" (no '-?'), which fails to match a
+# negative encoder value and raises an uncaught AttributeError out of
+# send_command. We read the encoder through the documented low-level escape hatch
+# (Motor._send_raw_command) and parse it here instead, so negative encoder
+# positions (any move that crosses zero) are handled correctly without touching
+# the bapsf_motion library.
+_EP_RE = re.compile(r"EP=(-?\d+)")
+
+
+def _read_encoder_counts(motor):
+    """Read the encoder position (EP) in counts via the raw escape hatch.
+
+    Returns the signed integer encoder count, or None if the motor can't supply
+    it (no ``_send_raw_command``, comms hiccup, NACK / non-numeric reply). This
+    bypasses the library's buggy ``encoder_position`` recv regex which cannot
+    parse negative values; the raw reply (e.g. ``"EP=-12345"``) is parsed here.
+    """
+    raw = getattr(motor, "_send_raw_command", None)
+    if not callable(raw):
+        return None
+    try:
+        reply = raw("EP")
+    except Exception:  # noqa: BLE001 - comms hiccup / lost connection -> unavailable
+        return None
+    m = _EP_RE.search(str(reply))
+    return int(m.group(1)) if m else None
+
+
+def _encoder_resolution(motor):
+    """Encoder resolution (counts/rev) for ``motor``, or None.
+
+    Read from the motor's cached ``_motor`` params when present (matching
+    :func:`encoder_step_mismatch`), else via the unbuffered ``encoder_resolution``
+    command. Returns None if neither is available."""
+    motor_params = getattr(motor, "_motor", None)
+    if isinstance(motor_params, dict):
+        er = _scalar(motor_params.get("encoder_resolution"))
+        if er:
+            return er
+    send = getattr(motor, "send_command", None)
+    if callable(send):
+        try:
+            return _scalar(send("encoder_resolution"))
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def encoder_motion_space_position(mg):
+    """Probe position in motion space, derived from the ENCODER (EP).
+
+    Mirrors :attr:`MotionGroup.position` exactly -- it transforms the per-axis
+    drive-coordinate step vector to motion space via ``mg.transform(...,
+    to_coords="motion_space")`` -- but sources the per-axis value from the
+    encoder (EP) instead of the calculated trajectory position (IP). The Applied
+    Motion manual notes IP "is not always equal to actual position"; EP is the
+    physical feedback, so this is the *real* probe position.
+
+    Per axis: read EP counts (negative-safe, via :func:`_read_encoder_counts`)
+    and convert to motor steps using ``steps_per_rev`` (gearing) and
+    ``encoder_resolution`` (counts/rev)::
+
+        steps = ep_counts * steps_per_rev / encoder_resolution
+
+    The resulting step vector is fed through the same transform
+    ``MotionGroup.position`` uses, so the returned coordinates/units are
+    identical to today -- only the source (EP vs IP) changes.
+
+    Returns a ``(x, y[, ...])`` float tuple, or ``None`` if any axis can't supply
+    EP / the scaling constants, or the transform isn't available -- so callers can
+    fall back to ``mg.position`` (IP). Read-only; EP is buffered, so callers must
+    have settled motion first.
+    """
+    axes = _axes(mg)
+    if not axes:
+        return None
+
+    steps = []
+    for ax in axes:
+        motor = getattr(ax, "motor", ax)
+        counts = _read_encoder_counts(motor)
+        spr = _scalar(getattr(motor, "steps_per_rev", None))
+        enc_res = _encoder_resolution(motor)
+        if counts is None or not spr or not enc_res:
+            return None
+        steps.append(counts * spr / enc_res)
+
+    transform = getattr(mg, "transform", None)
+    if not callable(transform):
+        return None
+    try:
+        ms = transform(steps, to_coords="motion_space")
+    except Exception:  # noqa: BLE001 - transform math failure -> fall back to IP
+        return None
+    ms = np.asarray(getattr(ms, "value", ms)).squeeze()
+    try:
+        return tuple(float(v) for v in np.atleast_1d(ms))
+    except (TypeError, ValueError):
+        return None
+
+
 def encoder_step_mismatch(mg, tol_rev=0.01):
     """Per-axis encoder-vs-step disagreement, as ``[(axis_idx, step_rev, enc_rev)]``.
 
@@ -157,6 +261,11 @@ def encoder_step_mismatch(mg, tol_rev=0.01):
     buffered command and is refused while the motor is moving). Any axis whose
     motor can't supply the values (stub, NACK, missing constants) is skipped
     silently -- never warns spuriously, never writes/corrects anything.
+
+    The encoder (EP) is read via :func:`_read_encoder_counts` (the raw escape
+    hatch), which is negative-safe -- so an axis past zero is checked correctly
+    instead of being silently skipped by the library's buggy ``encoder_position``
+    read regex.
     """
     bad = []
     for idx, ax in enumerate(_axes(mg)):
@@ -165,21 +274,18 @@ def encoder_step_mismatch(mg, tol_rev=0.01):
         if not callable(send):
             continue
 
-        # Read step (IP) and encoder (EP) positions directly. EP with no arg is a
-        # read (two_way); never pass a value or it would *write* the encoder.
+        # Read step (IP) directly; read encoder (EP) via the negative-safe raw
+        # escape hatch (the library's encoder_position read can't parse negatives).
         try:
             step = _scalar(send("get_position"))
-            enc = _scalar(send("encoder_position"))
         except Exception:  # noqa: BLE001 - comms hiccup -> just skip this axis
             continue
+        enc = _read_encoder_counts(motor)
         if step is None or enc is None:
             continue
 
         steps_per_rev = _scalar(getattr(motor, "steps_per_rev", None))
-        enc_res = None
-        motor_params = getattr(motor, "_motor", None)
-        if isinstance(motor_params, dict):
-            enc_res = _scalar(motor_params.get("encoder_resolution"))
+        enc_res = _encoder_resolution(motor)
         if not steps_per_rev or not enc_res:
             continue  # can't convert to a common unit -> skip
 

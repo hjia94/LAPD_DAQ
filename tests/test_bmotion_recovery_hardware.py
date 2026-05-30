@@ -8,7 +8,9 @@ Three independent checks:
   - LONG MOTION: a slow full-range move must be left to finish (never timed out
     or interrupted mid-travel).
   - ENCODER: read encoder (EP) vs commanded/step (IP) position around a move and
-    confirm they track each other.
+    confirm they track each other. EP is read via the negative-safe raw escape
+    hatch (motor_recovery._read_encoder_counts), the same path production uses, so
+    a move crossing zero is handled instead of crashing on the library's EP regex.
   - FAILURE: command a known-unreachable index, confirm recovery raises
     MotorError, then confirm a subsequent good move still succeeds (guards the
     original "one failure poisons every later move" bug).
@@ -38,7 +40,8 @@ from _hardware_check_base import HardwareCheckBase
 # Path to the motion-config TOML (absolute path recommended).
 BMOTION_TOML_PATH = "bmotion_config.toml"
 
-# Motion group to drive: its name (e.g. "Hermes") or its TOML key.
+# Motion group to drive. Use the group's name (e.g. "Hermes") — recommended,
+# it's unambiguous. You may also use its index (0, 1, 2, ...) in TOML order.
 # None = use the first group in the TOML.
 MOTION_GROUP = None
 
@@ -122,17 +125,26 @@ class _RecoveryHardwareBase(HardwareCheckBase):
         print(f"[recovery check] driving motion group: '{self.mg_key}' (name='{name}')")
 
     def _select_mg_key(self):
-        """Resolve MOTION_GROUP (key or display name) to an mg key."""
+        """Resolve MOTION_GROUP (group name or integer index) to an mg key.
+
+        rm.mgs is keyed by integer index (0, 1, 2, ...) in TOML order. Accept a
+        display name, an int, or a string like "0"."""
         if MOTION_GROUP is None:
             return next(iter(self.rm.mgs))
-        if MOTION_GROUP in self.rm.mgs:
-            return MOTION_GROUP
+        # Match by configured display name (e.g. "Hermes").
         for key, mg in self.rm.mgs.items():
             if mg.config.get("name") == MOTION_GROUP:
                 return key
+        # Match by index, accepting int 0 or str "0".
+        try:
+            idx = int(MOTION_GROUP)
+            if idx in self.rm.mgs:
+                return idx
+        except (TypeError, ValueError):
+            pass
         self.skipTest(
             f"MOTION_GROUP={MOTION_GROUP!r} not found; "
-            f"available keys={list(self.rm.mgs.keys())}, "
+            f"available indices={list(self.rm.mgs.keys())}, "
             f"names={[mg.config.get('name') for mg in self.rm.mgs.values()]}"
         )
 
@@ -143,24 +155,83 @@ class _RecoveryHardwareBase(HardwareCheckBase):
             print(f"[recovery check] RunManager.terminate failed: {exc}")
         super().tearDown()
 
+    def _wait_until_idle(self, timeout_s=30.0, poll_s=0.2):
+        """Block until the driven group is fully stopped.
+
+        EP (encoder_position) is a *buffered* command: the drive NACKs it while
+        the motor is moving, so the encoder read must only happen when idle. We
+        force a fresh moving-status query (retrieve_motor_status is unbuffered /
+        safe mid-move) so we don't trust a stale heartbeat cache, then poll."""
+        mg = self.rm.mgs[self.mg_key]
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            for ax in mg.drive.axes:
+                try:
+                    ax.motor.send_command("retrieve_motor_status")
+                except Exception:  # noqa: BLE001 - best-effort refresh
+                    pass
+            if not self.rm.is_moving:
+                return True
+            time.sleep(poll_s)
+        print(f"[recovery check] WARNING: {self.mg_key} still moving after "
+              f"{timeout_s:.0f}s; encoder read may NACK")
+        return False
+
     def _print_ep_ip(self, when):
-        """Print encoder (EP) vs step (IP) position per axis, in revolutions."""
+        """Print encoder (EP) vs step (IP) position per axis, in revolutions.
+
+        Must be called when the motor is idle (EP is NACK'd while moving); call
+        _wait_until_idle() first. The encoder is read via the same negative-safe
+        raw escape hatch production uses (motor_recovery._read_encoder_counts), so
+        this exercises the identical path and works at negative positions (a move
+        that crosses zero) instead of crashing on the library's buggy EP regex.
+        On a read miss this reports *why* (still moving / no encoder, missing
+        encoder_resolution, etc.) instead of a generic 'unavailable', so a
+        hardware miss is diagnosable."""
+        from acquisition.motor_recovery import (
+            _read_encoder_counts, _encoder_resolution,
+        )
+
         mg = self.rm.mgs[self.mg_key]
         for idx, ax in enumerate(mg.drive.axes):
             motor = ax.motor
             ip = motor.send_command("get_position")
-            ep = motor.send_command("encoder_position")  # no arg => read
-            ip_v = getattr(ip, "value", ip)
-            ep_v = getattr(ep, "value", ep)
-            try:
-                spr = float(getattr(motor, "steps_per_rev").value)
-                er = float(motor._motor["encoder_resolution"])
-                ip_rev, ep_rev = float(ip_v) / spr, float(ep_v) / er
+            ep_counts = _read_encoder_counts(motor)  # negative-safe raw read
+
+            # A NACK / lost-connection / malformed IP read comes back as the
+            # motor's own ack_flags enum, not a number.
+            ack_flags = getattr(motor, "ack_flags", None)
+
+            def _is_ack(v):
+                return ack_flags is not None and isinstance(v, ack_flags)
+
+            # Identify the failure cause before attempting the math.
+            spr_q = getattr(motor, "steps_per_rev", None)
+            spr = getattr(spr_q, "value", spr_q)
+            er = _encoder_resolution(motor)
+
+            reason = None
+            if _is_ack(ip):
+                reason = (f"drive returned IP={ip.name} "
+                          f"(NACK'd while moving — is it still moving?)")
+            elif ep_counts is None:
+                reason = ("no encoder reading returned (still moving, or drive "
+                          "has no encoder)")
+            elif spr in (None, 0):
+                reason = "steps_per_rev (gearing) not available from the drive"
+            elif er in (None, 0):
+                reason = "encoder_resolution not available from the drive"
+
+            if reason is not None:
                 print(f"[recovery check] {self.mg_key} axis {idx} {when}: "
-                      f"step(IP)={ip_rev:.4f} rev  encoder(EP)={ep_rev:.4f} rev  "
-                      f"diff={abs(ip_rev - ep_rev):.4f} rev")
-            except (TypeError, ValueError, AttributeError, KeyError):
-                print(f"[recovery check] {self.mg_key} axis {idx} {when}: EP/IP unavailable")
+                      f"EP/IP unavailable — {reason}")
+                continue
+
+            ip_rev = float(getattr(ip, "value", ip)) / float(spr)
+            ep_rev = float(ep_counts) / float(er)
+            print(f"[recovery check] {self.mg_key} axis {idx} {when}: "
+                  f"step(IP)={ip_rev:.4f} rev  encoder(EP)={ep_rev:.4f} rev  "
+                  f"diff={abs(ip_rev - ep_rev):.4f} rev")
 
     def _move(self, index):
         from acquisition.motor_recovery import move_with_recovery
@@ -248,8 +319,15 @@ class BmotionEncoderHardwareCheck(_RecoveryHardwareBase):
         mg = self.rm.mgs[self.mg_key]
         ml_size = int(mg.mb.motion_list.shape[0])
 
+        # Read EP only when stopped — EP is NACK'd while the motor is moving.
+        self._wait_until_idle()
         self._print_ep_ip("before move")
+
         self._move(_ml_index("last", ml_size))
+
+        # move_with_recovery returns after settle, but force-confirm idle before
+        # the encoder read so a residual settle can't NACK the EP read.
+        self._wait_until_idle()
         self._print_ep_ip("after move")
 
         bad = encoder_step_mismatch(mg, tol_rev=ENCODER_TOL_REV)

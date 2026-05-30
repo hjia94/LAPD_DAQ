@@ -19,6 +19,11 @@ from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
 
 _POSITION_DTYPE = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
 
+# Names of motion groups for which we've already warned that the encoder position
+# was unavailable and we fell back to IP. Keeps read_bmotion_positions from
+# emitting that warning on every shot of a long scan (warn once per group).
+_ENCODER_FALLBACK_WARNED = set()
+
 
 class _LineTimeEstimator:
     """Line-based remaining-time estimate for a raster bmotion run.
@@ -287,14 +292,39 @@ def move_to_index(
 def read_bmotion_positions(rm, mg_keys):
     """Read each selected motion group's current position into a coords dict.
 
+    The recorded position is the **encoder** (EP) position pushed through the
+    motion group's transform -- the real physical probe position -- rather than
+    ``mg.position`` (which sources IP, the *calculated trajectory* position the
+    Applied Motion manual notes "is not always equal to actual position"). If the
+    encoder can't be read for a group (no encoder / missing constants / read
+    miss), it falls back to ``mg.position`` (IP) and warns, so a drive without an
+    encoder still records something rather than crashing.
+
     Returns ``{mg_name: (x, y)}`` so callers can either write it straight to
     HDF5 (in-process) or bundle it into a spooled shot payload (parallel mode).
     """
+    from .motor_recovery import encoder_motion_space_position, _refresh_status
+
     coords = {}
     for key in mg_keys:
         mg = rm.mgs[key]
-        positions = mg.position.value
-        coords[mg.config['name']] = (positions[0], positions[1])
+        name = mg.config['name']
+        # Force a fresh, idle-state status read so the encoder isn't NACK'd and
+        # the IP fallback isn't a stale heartbeat value.
+        _refresh_status(mg)
+        pos = encoder_motion_space_position(mg)
+        if pos is None:
+            pos = tuple(mg.position.value)
+            # Warn once per group per run, not once per shot, so a drive without
+            # an encoder doesn't flood the log on a long scan.
+            if name not in _ENCODER_FALLBACK_WARNED:
+                _ENCODER_FALLBACK_WARNED.add(name)
+                warnings.warn(
+                    f"motion group '{name}': encoder position unavailable; "
+                    f"recording IP (calculated trajectory) position instead, "
+                    f"which may not match the physical probe. (Warned once; "
+                    f"applies to all shots for this group.)")
+        coords[name] = (pos[0], pos[1])
     return coords
 
 
@@ -475,8 +505,22 @@ def _format_position_line(rm, mg_keys, motion_index, total_positions):
     except Exception:  # noqa: BLE001 - reporting must never break the run
         pass
 
+    def _xy(mg):
+        """Encoder (real) motion-space x/y, falling back to IP if unavailable.
+
+        Matches what read_bmotion_positions records, so the printed line reflects
+        the value that goes into the HDF5 file."""
+        try:
+            from .motor_recovery import encoder_motion_space_position
+            pos = encoder_motion_space_position(mg)
+            if pos is not None:
+                return pos[0], pos[1]
+        except Exception:  # noqa: BLE001 - reporting must never break the run
+            pass
+        return mg.position[0], mg.position[1]
+
     movers = " ".join(
-        f"{rm.mgs[k].config['name']} x={rm.mgs[k].position[0]:.2f} y={rm.mgs[k].position[1]:.2f}"
+        "{} x={:.2f} y={:.2f}".format(rm.mgs[k].config['name'], *_xy(rm.mgs[k]))
         for k in mg_keys
     )
     parts = [

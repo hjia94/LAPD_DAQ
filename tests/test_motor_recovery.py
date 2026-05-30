@@ -30,6 +30,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from acquisition import motor_recovery
 from acquisition.motor_recovery import (
     move_with_recovery, MotorError, safe_stop, encoder_step_mismatch,
+    encoder_motion_space_position, _read_encoder_counts,
 )
 
 
@@ -314,8 +315,12 @@ class MoveWithRecoveryTests(unittest.TestCase):
 # Encoder-vs-step mismatch helper
 # --------------------------------------------------------------------------- #
 class _EncMotor:
-    """Motor exposing get_position (IP) and encoder_position (EP) reads plus the
-    scaling constants, for encoder_step_mismatch."""
+    """Motor exposing get_position (IP) and the raw EP escape hatch plus the
+    scaling constants, for encoder_step_mismatch / encoder_motion_space_position.
+
+    EP is read the way production reads it -- via ``_send_raw_command("EP")``,
+    which returns the raw drive reply string (e.g. ``"EP=-12345"``) so the
+    negative-safe parse is exercised."""
     def __init__(self, ip, ep, steps_per_rev=20000, enc_res=4000, support_ep=True):
         self._ip = ip
         self._ep = ep
@@ -327,12 +332,20 @@ class _EncMotor:
     def send_command(self, command, *a, **k):
         if command == "get_position":
             return self._ip
+        if command == "encoder_resolution":
+            return self._motor.get("encoder_resolution")
         if command == "encoder_position":
             if a:  # a value was passed -> would be a WRITE; tests must never do this
                 raise AssertionError("encoder_position must be read-only here")
+            # Production no longer reads EP through send_command; flag if it does.
+            raise AssertionError("EP must be read via _send_raw_command, not send_command")
+        return None
+
+    def _send_raw_command(self, cmd):
+        if cmd == "EP":
             if not self._support_ep:
-                return None  # model NACK / unsupported
-            return self._ep
+                return None  # model NACK / unsupported / no encoder
+            return f"EP={self._ep}"
         return None
 
 
@@ -367,6 +380,87 @@ class EncoderMismatchTests(unittest.TestCase):
         m = _EncMotor(ip=10000, ep=1000, enc_res=None)
         mg = _EncMG([m])
         self.assertEqual(encoder_step_mismatch(mg, tol_rev=0.01), [])
+
+    def test_negative_encoder_handled(self):
+        # The regression: a negative EP (move crossed zero) must be read and
+        # compared, not crash or be silently skipped. step = -0.5 rev,
+        # encoder = -0.5 rev -> agree.
+        mg = _EncMG([_EncMotor(ip=-10000, ep=-2000)])
+        self.assertEqual(encoder_step_mismatch(mg, tol_rev=0.01), [])
+
+    def test_negative_encoder_mismatch_flagged(self):
+        # step = -0.5 rev, encoder = -0.25 rev -> 0.25 rev gap flagged.
+        mg = _EncMG([_EncMotor(ip=-10000, ep=-1000)])
+        bad = encoder_step_mismatch(mg, tol_rev=0.01)
+        self.assertEqual(len(bad), 1)
+        idx, step_rev, enc_rev = bad[0]
+        self.assertAlmostEqual(step_rev, -0.5)
+        self.assertAlmostEqual(enc_rev, -0.25)
+
+
+class ReadEncoderCountsTests(unittest.TestCase):
+    def test_parses_positive(self):
+        self.assertEqual(_read_encoder_counts(_EncMotor(ip=0, ep=12345)), 12345)
+
+    def test_parses_negative(self):
+        # The whole point: the library's EP=[0-9]+ regex can't do this.
+        self.assertEqual(_read_encoder_counts(_EncMotor(ip=0, ep=-12345)), -12345)
+
+    def test_unsupported_returns_none(self):
+        self.assertIsNone(
+            _read_encoder_counts(_EncMotor(ip=0, ep=0, support_ep=False)))
+
+    def test_no_raw_command_returns_none(self):
+        self.assertIsNone(_read_encoder_counts(object()))
+
+
+class _XformMG:
+    """Motion group stub with an encoder-bearing drive and a known transform.
+
+    transform(steps, to_coords="motion_space") here just scales motor steps to
+    motion-space cm: x_cm = steps / steps_per_rev * cm_per_rev, so a test can
+    assert the encoder-derived position is what gets returned."""
+    def __init__(self, motors, cm_per_rev=1.0, has_ip=None):
+        self.config = {"name": "Xf"}
+        self.drive = type("D", (), {"axes": [type("Ax", (), {"motor": m})()
+                                             for m in motors]})()
+        self._cm_per_rev = cm_per_rev
+        self._has_ip = has_ip  # tuple used by .position (the IP fallback)
+
+    def transform(self, steps, to_coords="motion_space"):
+        assert to_coords == "motion_space"
+        spr = 20000.0
+        return [s / spr * self._cm_per_rev for s in steps]
+
+    @property
+    def position(self):
+        if self._has_ip is None:
+            raise AssertionError("position (IP fallback) should not be used here")
+        return type("Q", (), {"value": list(self._has_ip)})()
+
+
+class EncoderMotionSpacePositionTests(unittest.TestCase):
+    def test_encoder_derived_position(self):
+        # ep=2000 counts, enc_res=4000 -> 0.5 rev -> 0.5*20000=10000 steps;
+        # 10000/20000*2.0 cm_per_rev = 1.0 cm per axis.
+        mg = _XformMG([_EncMotor(ip=0, ep=2000), _EncMotor(ip=0, ep=2000)],
+                      cm_per_rev=2.0)
+        pos = encoder_motion_space_position(mg)
+        self.assertEqual(len(pos), 2)
+        self.assertAlmostEqual(pos[0], 1.0)
+        self.assertAlmostEqual(pos[1], 1.0)
+
+    def test_negative_encoder_derived_position(self):
+        mg = _XformMG([_EncMotor(ip=0, ep=-2000), _EncMotor(ip=0, ep=-2000)],
+                      cm_per_rev=2.0)
+        pos = encoder_motion_space_position(mg)
+        self.assertAlmostEqual(pos[0], -1.0)
+        self.assertAlmostEqual(pos[1], -1.0)
+
+    def test_none_when_encoder_unavailable(self):
+        # No encoder support -> None, so the caller falls back to IP.
+        mg = _XformMG([_EncMotor(ip=0, ep=0, support_ep=False)])
+        self.assertIsNone(encoder_motion_space_position(mg))
 
 
 class SafeStopTests(unittest.TestCase):
