@@ -313,6 +313,46 @@ def warn_on_encoder_mismatch(mg, tol_rev=0.01, log=print):
     return bad
 
 
+def verify_encoder_zeroed(mg, tol_counts=2.0, log=print):
+    """Confirm a set-zero actually took, by reading the encoder back.
+
+    ``MotionGroup.set_zero`` / ``Motor.set_position(0)`` writes ``EP0`` then
+    ``SP0`` and relies on the drive's ``%`` ACK -- it does **not** read the
+    encoder back to confirm. The write is correct (the buggy ``EP=[0-9]+`` read
+    regex is short-circuited by the ``%`` ACK, so even negative writes are safe),
+    but a silently-failed zero (lost link mid-write, drive in a state that
+    rejected it) would go unnoticed.
+
+    This is the positive read-back check: after zeroing, read each axis's encoder
+    (EP) via the negative-safe raw escape hatch and confirm it reads ~0 (within
+    ``tol_counts`` encoder counts -- a couple of counts of end-of-write jitter is
+    normal). Returns the list of ``(axis_idx, ep_counts)`` for axes that did NOT
+    zero (empty == all good), warning on each.
+
+    Call this immediately after zeroing and while the motor is idle (EP is a
+    buffered command). Read-only: never writes or re-zeros -- it only reports.
+    """
+    name = mg.config.get("name", "?") if hasattr(mg, "config") else "?"
+    bad = []
+    for idx, ax in enumerate(_axes(mg)):
+        motor = getattr(ax, "motor", ax)
+        counts = _read_encoder_counts(motor)
+        if counts is None:
+            # Can't read the encoder -> can't confirm; surface it rather than
+            # silently claiming success.
+            log(f"WARNING: motion group '{name}' axis {idx}: could not read "
+                f"encoder to confirm set-zero (no encoder / read miss).")
+            bad.append((idx, None))
+            continue
+        if abs(counts) > tol_counts:
+            log(f"WARNING: motion group '{name}' axis {idx}: set-zero did not "
+                f"take -- encoder reads {counts} counts (> {tol_counts} tol). "
+                f"The EP0/SP0 write may have been rejected; re-zero before "
+                f"trusting recorded positions.")
+            bad.append((idx, counts))
+    return bad
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #

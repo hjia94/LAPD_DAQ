@@ -14,6 +14,9 @@ Three independent checks:
   - FAILURE: command a known-unreachable index, confirm recovery raises
     MotorError, then confirm a subsequent good move still succeeds (guards the
     original "one failure poisons every later move" bug).
+  - SET-ZERO (destructive, off by default): zero the group, then confirm the
+    encoder reads back ~0 -- catches a set-zero that the drive ACK'd but did not
+    actually apply.
 
 Only ``bmotion_config.toml`` is needed in the current working directory.
 
@@ -52,6 +55,9 @@ BMOTION_ALLOW_MOVE = True
 RUN_LONG_MOTION_CHECK = True     # slow full-range move must finish, not time out
 RUN_ENCODER_CHECK = True         # encoder (EP) vs step (IP) agreement around a move
 RUN_FAILURE_CHECK = True         # an unreachable target -> MotorError, then recovers
+# DESTRUCTIVE: set-zero redefines the origin for this group. Off by default even
+# with BMOTION_ALLOW_MOVE; only enable when you intend to re-zero this rig.
+RUN_SET_ZERO_CHECK = False       # zero the group, confirm encoder reads back ~0
 
 # For the FAILURE check only: a motion-list index for MOTION_GROUP that you KNOW
 # the probe physically cannot reach on this rig (blocked / past an obstruction).
@@ -340,6 +346,47 @@ class BmotionEncoderHardwareCheck(_RecoveryHardwareBase):
             self.fail(f"encoder disagrees with motor/step position: {detail}")
         print(f"[recovery check] encoder agrees with step position within "
               f"{ENCODER_TOL_REV} rev")
+
+
+# --------------------------------------------------------------------------- #
+class BmotionSetZeroHardwareCheck(_RecoveryHardwareBase):
+    """Set-zero must actually take: after zeroing, the encoder reads back ~0.
+
+    bapsf_motion's set_position(0) writes EP0/SP0 and trusts the drive's ACK
+    without reading the encoder back. This check zeroes the group and then
+    positively confirms each axis's encoder reads ~0 via the negative-safe raw
+    read (verify_encoder_zeroed) -- catching a silently-failed zero.
+
+    DESTRUCTIVE: this redefines the origin for the driven group, so it is gated
+    behind RUN_SET_ZERO_CHECK (off by default) in addition to BMOTION_ALLOW_MOVE.
+    """
+
+    run_flag = RUN_SET_ZERO_CHECK
+    label = "bmotion_set_zero"
+
+    def test_set_zero_is_confirmed_by_encoder(self) -> None:
+        from acquisition.motor_recovery import verify_encoder_zeroed
+
+        mg = self.rm.mgs[self.mg_key]
+
+        # Zero only when stopped (EP/SP writes are buffered).
+        self._wait_until_idle()
+        print(f"[recovery check] zeroing motion group '{self.mg_key}' "
+              f"(set_zero -> EP0/SP0)")
+        mg.set_zero()
+
+        # Confirm the write took, on a fresh idle read.
+        self._wait_until_idle()
+        self._print_ep_ip("after set_zero")
+
+        bad = verify_encoder_zeroed(mg, tol_counts=2.0, log=print)
+        if bad:
+            detail = "; ".join(
+                f"axis {i}: encoder={'unreadable' if c is None else c} counts"
+                for i, c in bad
+            )
+            self.fail(f"set-zero not confirmed by encoder read-back: {detail}")
+        print("[recovery check] set-zero confirmed: all axes read ~0 counts")
 
 
 # --------------------------------------------------------------------------- #

@@ -30,7 +30,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from acquisition import motor_recovery
 from acquisition.motor_recovery import (
     move_with_recovery, MotorError, safe_stop, encoder_step_mismatch,
-    encoder_motion_space_position, _read_encoder_counts,
+    encoder_motion_space_position, _read_encoder_counts, verify_encoder_zeroed,
 )
 
 
@@ -461,6 +461,36 @@ class EncoderMotionSpacePositionTests(unittest.TestCase):
         # No encoder support -> None, so the caller falls back to IP.
         mg = _XformMG([_EncMotor(ip=0, ep=0, support_ep=False)])
         self.assertIsNone(encoder_motion_space_position(mg))
+
+
+class VerifyEncoderZeroedTests(unittest.TestCase):
+    def test_all_zero_passes(self):
+        mg = _EncMG([_EncMotor(ip=0, ep=0), _EncMotor(ip=0, ep=0)])
+        self.assertEqual(verify_encoder_zeroed(mg, log=lambda *_a: None), [])
+
+    def test_small_jitter_within_tol_passes(self):
+        # A couple counts of end-of-write jitter is fine.
+        mg = _EncMG([_EncMotor(ip=0, ep=1), _EncMotor(ip=0, ep=-2)])
+        self.assertEqual(
+            verify_encoder_zeroed(mg, tol_counts=2.0, log=lambda *_a: None), [])
+
+    def test_nonzero_encoder_flagged(self):
+        # One axis didn't zero (reads 500 counts) -> reported.
+        mg = _EncMG([_EncMotor(ip=0, ep=0), _EncMotor(ip=0, ep=500)])
+        bad = verify_encoder_zeroed(mg, tol_counts=2.0, log=lambda *_a: None)
+        self.assertEqual(bad, [(1, 500)])
+
+    def test_negative_nonzero_encoder_flagged(self):
+        # Negative residual must also be caught (the regression-prone case).
+        mg = _EncMG([_EncMotor(ip=0, ep=-500)])
+        bad = verify_encoder_zeroed(mg, tol_counts=2.0, log=lambda *_a: None)
+        self.assertEqual(bad, [(0, -500)])
+
+    def test_unreadable_encoder_flagged_as_unconfirmed(self):
+        # Can't read EP -> can't confirm zero -> reported (axis, None).
+        mg = _EncMG([_EncMotor(ip=0, ep=0, support_ep=False)])
+        bad = verify_encoder_zeroed(mg, log=lambda *_a: None)
+        self.assertEqual(bad, [(0, None)])
 
 
 class SafeStopTests(unittest.TestCase):
