@@ -290,6 +290,25 @@ class MoveWithRecoveryTests(unittest.TestCase):
         with self.assertRaises(MotorError):
             self._run(never_arrive, attempts=2)
 
+    def test_not_reached_warns_and_carries_reason_into_motorerror(self):
+        # A move that never reaches the target must (1) print a WARNING on the
+        # run's log channel so the operator sees it live, and (2) carry the
+        # "did not reach target" reason in the MotorError -- that message is what
+        # the sink records into the HDF5 shot's skip_reason.
+        printed = []
+        mg = self._mg(never_arrive)
+        rm = _RM({"a": mg})
+        with self.assertRaises(MotorError) as ctx:
+            move_with_recovery(
+                rm, {"a": "forward"}, 1, attempts=2, stall_timeout=5.0,
+                max_move_time=1000.0, tol=0.5, log=printed.append)
+        # Print channel got a clear "did NOT reach target" warning.
+        self.assertTrue(
+            any("WARNING" in m and "did NOT reach target" in m for m in printed),
+            f"expected a print-channel warning about not reaching target; got {printed}")
+        # The reason propagates in the exception (-> HDF5 skip_reason).
+        self.assertIn("did not reach target", str(ctx.exception))
+
     def test_verification_forces_status_refresh(self):
         mg, _ = self._run(always_arrive)
         # _refresh_status must have queried the motor before verifying.
@@ -321,10 +340,12 @@ class _EncMotor:
     EP is read the way production reads it -- via ``_send_raw_command("EP")``,
     which returns the raw drive reply string (e.g. ``"EP=-12345"``) so the
     negative-safe parse is exercised."""
-    def __init__(self, ip, ep, steps_per_rev=20000, enc_res=4000, support_ep=True):
+    def __init__(self, ip, ep, steps_per_rev=20000, enc_res=4000, support_ep=True,
+                 units_per_rev=1.0):
         self._ip = ip
         self._ep = ep
         self.steps_per_rev = steps_per_rev
+        self.units_per_rev = units_per_rev  # physical units (cm) per rev
         self._motor = {"encoder_resolution": enc_res}
         self._support_ep = support_ep
         self.status = {"connected": True}
@@ -417,20 +438,22 @@ class ReadEncoderCountsTests(unittest.TestCase):
 class _XformMG:
     """Motion group stub with an encoder-bearing drive and a known transform.
 
-    transform(steps, to_coords="motion_space") here just scales motor steps to
-    motion-space cm: x_cm = steps / steps_per_rev * cm_per_rev, so a test can
-    assert the encoder-derived position is what gets returned."""
-    def __init__(self, motors, cm_per_rev=1.0, has_ip=None):
+    The helper feeds the transform per-axis drive positions in PHYSICAL units
+    (cm) -- the same thing MotionGroup.position feeds it -- not motor steps. This
+    transform applies a linear motion-space scale (default identity) so a test
+    can assert the encoder-derived cm position is what comes back out."""
+    def __init__(self, motors, ms_scale=1.0, has_ip=None):
         self.config = {"name": "Xf"}
         self.drive = type("D", (), {"axes": [type("Ax", (), {"motor": m})()
                                              for m in motors]})()
-        self._cm_per_rev = cm_per_rev
+        self._ms_scale = ms_scale
         self._has_ip = has_ip  # tuple used by .position (the IP fallback)
 
-    def transform(self, steps, to_coords="motion_space"):
+    def transform(self, cm, to_coords="motion_space"):
         assert to_coords == "motion_space"
-        spr = 20000.0
-        return [s / spr * self._cm_per_rev for s in steps]
+        # Input is drive position in cm; scale to motion space (identity by
+        # default). A real transform would apply the probe geometry here.
+        return [c * self._ms_scale for c in cm]
 
     @property
     def position(self):
@@ -441,25 +464,41 @@ class _XformMG:
 
 class EncoderMotionSpacePositionTests(unittest.TestCase):
     def test_encoder_derived_position(self):
-        # ep=2000 counts, enc_res=4000 -> 0.5 rev -> 0.5*20000=10000 steps;
-        # 10000/20000*2.0 cm_per_rev = 1.0 cm per axis.
-        mg = _XformMG([_EncMotor(ip=0, ep=2000), _EncMotor(ip=0, ep=2000)],
-                      cm_per_rev=2.0)
+        # The bug fix: convert encoder COUNTS -> cm before the transform, not to
+        # steps. ep=2000 counts, enc_res=4000 -> 0.5 rev; units_per_rev=2.0 cm/rev
+        # -> 1.0 cm per axis. Identity motion-space scale -> (1.0, 1.0) cm.
+        mg = _XformMG([_EncMotor(ip=0, ep=2000, units_per_rev=2.0),
+                       _EncMotor(ip=0, ep=2000, units_per_rev=2.0)])
         pos = encoder_motion_space_position(mg)
         self.assertEqual(len(pos), 2)
         self.assertAlmostEqual(pos[0], 1.0)
         self.assertAlmostEqual(pos[1], 1.0)
 
+    def test_realistic_cm_magnitude(self):
+        # Guard against the "weird numbers" regression: a real-ish encoder count
+        # must yield a sane cm value, not a raw step count. 0.508 cm/rev,
+        # enc_res=4000 counts/rev: 15 cm -> 15/0.508*4000 ~= 118110 counts.
+        counts = round(15.0 / 0.508 * 4000)
+        mg = _XformMG([_EncMotor(ip=0, ep=counts, enc_res=4000,
+                                 units_per_rev=0.508)])
+        pos = encoder_motion_space_position(mg)
+        self.assertAlmostEqual(pos[0], 15.0, places=2)  # ~15 cm, not ~118110
+
     def test_negative_encoder_derived_position(self):
-        mg = _XformMG([_EncMotor(ip=0, ep=-2000), _EncMotor(ip=0, ep=-2000)],
-                      cm_per_rev=2.0)
+        mg = _XformMG([_EncMotor(ip=0, ep=-2000, units_per_rev=2.0),
+                       _EncMotor(ip=0, ep=-2000, units_per_rev=2.0)])
         pos = encoder_motion_space_position(mg)
         self.assertAlmostEqual(pos[0], -1.0)
         self.assertAlmostEqual(pos[1], -1.0)
 
+    def test_none_when_units_per_rev_missing(self):
+        # Without units_per_rev we can't convert counts->cm -> None (fall back).
+        m = _EncMotor(ip=0, ep=2000, units_per_rev=None)
+        self.assertIsNone(encoder_motion_space_position(_XformMG([m])))
+
     def test_none_when_encoder_unavailable(self):
         # No encoder support -> None, so the caller falls back to IP.
-        mg = _XformMG([_EncMotor(ip=0, ep=0, support_ep=False)])
+        mg = _XformMG([_EncMotor(ip=0, ep=0, support_ep=False, units_per_rev=2.0)])
         self.assertIsNone(encoder_motion_space_position(mg))
 
 

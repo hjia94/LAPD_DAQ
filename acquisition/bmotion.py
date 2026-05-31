@@ -573,6 +573,34 @@ def _do_move(run_manager, ml_order_dict, motion_index, move_opts, run_state):
         return "skip"
 
 
+def _last_skip_reason(run_state, motion_index):
+    """Reason for the position just skipped, from run_state.
+
+    ``_do_move`` records each terminal motor failure in
+    ``run_state["skipped_positions"]`` as ``{"motion_index", "reason"}``; the most
+    recent entry is the position we are recording now. Falls back to a generic
+    message if (defensively) no entry is present."""
+    skipped = (run_state or {}).get("skipped_positions") or []
+    if skipped:
+        return skipped[-1]["reason"]
+    return f"motor failed to reach motion index {motion_index}"
+
+
+def _record_skipped_shots(msa, active_scopes, hdf5_path, run_manager, record_keys,
+                          shot_num, nshots, reason, sink):
+    """Record every shot of a skipped position into the HDF5 as skipped.
+
+    When a motor move fails (recovery exhausted) the position's shots are not
+    acquired, but they must still be written to the HDF5 with ``skipped=True`` and
+    the failure ``skip_reason`` -- otherwise the file is left with silent
+    empty/zero rows and no record that the probe never reached that position.
+    Falls back to the legacy in-process HDF5 sink when no sink is provided."""
+    if sink is None:
+        sink = _Hdf5ShotSink(msa, active_scopes, hdf5_path, run_manager)
+    for n in range(nshots):
+        _safe_mark_skipped(sink, shot_num + n, reason, record_keys)
+
+
 def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots,
                      total_shots, sink=None, move_opts=None, run_state=None,
                      start_shot=1):
@@ -604,8 +632,12 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
                 continue
 
             if _do_move(run_manager, ml_order, motion_index, move_opts, run_state) == "skip":
-                # Recovery exhausted for this position -> skip its shots and move
-                # on, keeping shot numbering / progress bar consistent.
+                # Recovery exhausted for this position -> record its shots as
+                # skipped (with the not-reached reason) in the HDF5, then move on,
+                # keeping shot numbering / progress bar consistent.
+                reason = _last_skip_reason(run_state, motion_index)
+                _record_skipped_shots(msa, active_scopes, hdf5_path, run_manager,
+                                      record_keys, shot_num, nshots, reason, sink)
                 shot_num += nshots
                 pbar.update(nshots)
                 continue
@@ -657,8 +689,12 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
 
                 if _do_move(run_manager, single_group_order, motion_index,
                             move_opts, run_state) == "skip":
-                    # Recovery exhausted for this position -> skip its shots and
+                    # Recovery exhausted for this position -> record its shots as
+                    # skipped (with the not-reached reason) in the HDF5, then
                     # continue the scan, keeping shot numbering consistent.
+                    reason = _last_skip_reason(run_state, motion_index)
+                    _record_skipped_shots(msa, active_scopes, hdf5_path, run_manager,
+                                          [mg_key], shot_num, nshots, reason, sink)
                     shot_num += nshots
                     pbar.update(nshots)
                     continue

@@ -190,25 +190,46 @@ def _encoder_resolution(motor):
     return None
 
 
+def _units_per_rev(ax, motor):
+    """Physical units translated per motor revolution (e.g. cm/rev), or None.
+
+    This is the axis-level scale that converts motor revolutions to the physical
+    drive units the transform expects. It lives on the |Axis| (``ax.units_per_rev``,
+    an astropy Quantity in units/rev); ``Axis.position`` uses it to report cm. We
+    read it from the axis first, falling back to the motor object for stubs that
+    expose it there. Returns a plain float (the unit magnitude), or None."""
+    for obj in (ax, motor):
+        upr = getattr(obj, "units_per_rev", None)
+        val = _scalar(upr)
+        if val:
+            return val
+    return None
+
+
 def encoder_motion_space_position(mg):
     """Probe position in motion space, derived from the ENCODER (EP).
 
     Mirrors :attr:`MotionGroup.position` exactly -- it transforms the per-axis
-    drive-coordinate step vector to motion space via ``mg.transform(...,
-    to_coords="motion_space")`` -- but sources the per-axis value from the
-    encoder (EP) instead of the calculated trajectory position (IP). The Applied
-    Motion manual notes IP "is not always equal to actual position"; EP is the
-    physical feedback, so this is the *real* probe position.
+    drive position to motion space via ``mg.transform(..., to_coords=
+    "motion_space")`` -- but sources the per-axis value from the encoder (EP)
+    instead of the calculated trajectory position (IP). The Applied Motion manual
+    notes IP "is not always equal to actual position"; EP is the physical
+    feedback, so this is the *real* probe position.
 
-    Per axis: read EP counts (negative-safe, via :func:`_read_encoder_counts`)
-    and convert to motor steps using ``steps_per_rev`` (gearing) and
-    ``encoder_resolution`` (counts/rev)::
+    The transform expects drive coordinates in the axis's **physical units** (cm),
+    NOT motor steps -- ``MotionGroup.position`` feeds it ``Drive.position`` which
+    is ``Axis.position`` in cm (``Axis.position`` converts the motor's step count
+    to cm via ``steps * units_per_rev / steps_per_rev``). So per axis we convert
+    the encoder count to the same physical units::
 
-        steps = ep_counts * steps_per_rev / encoder_resolution
+        cm = ep_counts / encoder_resolution * units_per_rev
 
-    The resulting step vector is fed through the same transform
-    ``MotionGroup.position`` uses, so the returned coordinates/units are
-    identical to today -- only the source (EP vs IP) changes.
+    where ``encoder_resolution`` is counts/rev and ``units_per_rev`` is cm/rev
+    (the axis's physical units per motor revolution). Feeding this cm vector
+    through the same transform yields the identical motion-space coordinates/units
+    as ``mg.position`` -- only the source (EP vs IP) changes. (Passing raw step
+    counts here instead of cm is what produced nonsense like ``41.73`` / ``14833``
+    where ``15`` / ``0`` cm was expected.)
 
     Returns a ``(x, y[, ...])`` float tuple, or ``None`` if any axis can't supply
     EP / the scaling constants, or the transform isn't available -- so callers can
@@ -219,21 +240,22 @@ def encoder_motion_space_position(mg):
     if not axes:
         return None
 
-    steps = []
+    cm = []
     for ax in axes:
         motor = getattr(ax, "motor", ax)
         counts = _read_encoder_counts(motor)
-        spr = _scalar(getattr(motor, "steps_per_rev", None))
         enc_res = _encoder_resolution(motor)
-        if counts is None or not spr or not enc_res:
+        upr = _units_per_rev(ax, motor)
+        if counts is None or not enc_res or not upr:
             return None
-        steps.append(counts * spr / enc_res)
+        # counts -> rev (encoder_resolution) -> physical units (units_per_rev)
+        cm.append(counts / enc_res * upr)
 
     transform = getattr(mg, "transform", None)
     if not callable(transform):
         return None
     try:
-        ms = transform(steps, to_coords="motion_space")
+        ms = transform(cm, to_coords="motion_space")
     except Exception:  # noqa: BLE001 - transform math failure -> fall back to IP
         return None
     ms = np.asarray(getattr(ms, "value", ms)).squeeze()
@@ -540,14 +562,22 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=30, retry_wait=1.0,
                 continue
             mg = rm.mgs[mg_key]
             _refresh_status(mg)  # defeat stale heartbeat cache before judging
+            name = mg.config.get("name", mg_key) if hasattr(mg, "config") else mg_key
             if not _all_connected(mg):
                 bad.append((mg_key, "connection lost"))
             elif _has_alarm(mg):
                 bad.append((mg_key, "; ".join(_alarm_messages(mg)) or "alarm/fault active"))
             elif not _arrived(mg, motion_index, tol):
-                bad.append((mg_key, f"did not reach target "
-                                    f"{_target_point(mg, motion_index)} "
-                                    f"(at {_position_tuple(mg)})"))
+                target = _target_point(mg, motion_index)
+                actual = _position_tuple(mg)
+                # Surface a failure to reach the requested position immediately on
+                # the run's print channel so a probe that didn't make it is visible
+                # live. The reason is also carried into the HDF5 skip_reason via the
+                # MotorError raised below (recorded by the sink's mark_skipped).
+                log(f"WARNING: motion group '{name}' did NOT reach target "
+                    f"{target} (at {actual}, tol {tol}) at index {index} "
+                    f"(attempt {attempt}/{attempts})")
+                bad.append((mg_key, f"did not reach target {target} (at {actual})"))
         if not bad:
             # Arrived. Sanity-check that the encoder agrees with the commanded
             # position before declaring success (read-only; warns, never aborts).
@@ -561,7 +591,8 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=30, retry_wait=1.0,
         detail = "; ".join(f"{rm.mgs[k].config.get('name', k)}: {why}" for k, why in bad)
         log(f"Move verification failed at index {index} (attempt {attempt}): {detail}")
 
-    # Exhausted all attempts.
+    # Exhausted all attempts. The message carries the not-reached detail; the
+    # caller records it into the HDF5 shot's skip_reason via mark_skipped.
     raise MotorError(
         f"Motor move to index {index} failed after {attempts} attempts: {detail}"
     )

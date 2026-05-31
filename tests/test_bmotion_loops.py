@@ -489,6 +489,7 @@ class TerminalMotorFailureTests(unittest.TestCase):
         # Index 2 is unreachable; all other positions move fine.
         dead_index = 2
         shot_calls = []
+        skip_calls = []  # (shot_num, reason) recorded into the HDF5 as skipped
 
         def fake_move_with_recovery(rm, ml_order_dict, index, **kw):
             if index == dead_index:
@@ -499,6 +500,10 @@ class TerminalMotorFailureTests(unittest.TestCase):
                      sink=None):
             shot_calls.append(shot_num)
             return shot_num + nshots_
+
+        class _SpySink:
+            def mark_skipped(self, shot_num, reason, record_keys):
+                skip_calls.append((shot_num, reason))
 
         run_state = {"terminated_early": False, "abort_reason": None}
         _orig_take = bmotion_module._take_shots_at_position
@@ -511,7 +516,7 @@ class TerminalMotorFailureTests(unittest.TestCase):
         try:
             shot_num = bmotion_module._run_interleaved(
                 StubMSA(), {"lpscope": 0}, "/dev/null", self.rm,
-                {"a": "forward"}, 1, 5, sink=object(),
+                {"a": "forward"}, 1, 5, sink=_SpySink(),
                 move_opts={"attempts": 2}, run_state=run_state,
             )
         finally:
@@ -524,6 +529,12 @@ class TerminalMotorFailureTests(unittest.TestCase):
         self.assertEqual(len(run_state["skipped_positions"]), 1)
         self.assertEqual(run_state["skipped_positions"][0]["motion_index"], dead_index)
         self.assertIn("dead motor", run_state["skipped_positions"][0]["reason"])
+        # The skipped position's shot was recorded into the HDF5 (via the sink's
+        # mark_skipped) with the not-reached reason -- not left as a silent gap.
+        self.assertEqual(len(skip_calls), 1)
+        skip_shot, skip_reason = skip_calls[0]
+        self.assertEqual(skip_shot, 3)  # shot at dead index 2 (1-based)
+        self.assertIn("dead motor", skip_reason)
         # Shots were taken at every position EXCEPT the dead one (index 2). With
         # nshots=1, the skipped position still advances the shot counter by 1, so
         # the shot numbers stay contiguous across the gap.
