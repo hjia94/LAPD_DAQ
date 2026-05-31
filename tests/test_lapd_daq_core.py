@@ -1,31 +1,37 @@
-"""Compatibility and adapter tests for lapd_daq.
+"""Core lapd_daq unit tests: config parsing, shot planning, and back-compat.
 
-Bundles three orthogonal back-compat / boundary subjects that share no
-production code but are all about *interoperating with legacy interfaces*:
+Three orthogonal but cohesive subjects:
 
-  * PhantomCameraAdapter cine-file output naming
-  * Data_Run_45deg sunset behavior (must refuse to run)
-  * HDF5 files produced by the new engine remain readable by the old
-    lab_scopes and pydaq readers, both for synthesised data and for files
-    built from real TRC fixtures
+  LoadRunConfigTests        -- experiment-config parser (grid detection, value
+                               preservation, camera-mode gating)
+  ShotPlanTests             -- AcquisitionRun.build_shot_plan() contract
+  AcquisitionImportHygieneTests -- acquisition package public-API surface
+  PhantomAdapterTests       -- PhantomCameraAdapter cine-file naming
+  DataRun45DegSunsetTests   -- legacy entrypoint sunset behavior
+  HDF5ReaderCompatibilityTests  -- new-engine HDF5 files remain readable by the
+                                   old lab_scopes and pydaq readers
+
+End-to-end engine runs (execute() with fake devices) live in
+test_daq_framework_combined.py; real-hardware coverage lives in the
+test_hardware_*.py and test_bmotion_*.py files.
 """
 
+import importlib
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import h5py
-import importlib
 import numpy as np
 
 from lapd_daq.config import load_run_config
-from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.devices.fakes import FakeScopeDevice, TRCReplayScopeDevice
+from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _lapd_daq_fixtures import CONFIG_TEXT
+from _lapd_daq_fixtures import CAMERA_CONFIG_TEXT, CONFIG_TEXT
 
 
 TRC_FIXTURE_DIR = Path(r"D:\data\raw data")
@@ -33,6 +39,93 @@ TRC_SOURCE_SHOTS = (0, 5)
 TRC_CHANNELS = ("C1", "C2", "C3", "C4")
 
 
+# --------------------------------------------------------------------------- #
+# Config parsing
+# --------------------------------------------------------------------------- #
+class LoadRunConfigTests(unittest.TestCase):
+    def test_config_loader_preserves_existing_ini_and_detects_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "experiment_config.txt"
+            config_path.write_text(CONFIG_TEXT, encoding="utf-8")
+
+            config = load_run_config(config_path, mode="grid")
+
+            self.assertEqual(config.num_duplicate_shots, 2)
+            self.assertEqual(config.motion.kind, "xy_grid")
+            self.assertEqual(config.scopes[0].name, "mockscope")
+            self.assertIn("Mock LAPD run", config.experiment_description)
+
+    def test_camera_config_does_not_enable_camera_outside_camera_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "experiment_config.txt"
+            config_path.write_text(CAMERA_CONFIG_TEXT, encoding="utf-8")
+
+            stationary = load_run_config(config_path, mode="stationary")
+            camera = load_run_config(config_path, mode="camera")
+
+            self.assertFalse(stationary.camera.enabled)
+            self.assertEqual(stationary.camera.parameters["exposure_us"], 40)
+            self.assertTrue(camera.camera.enabled)
+
+
+# --------------------------------------------------------------------------- #
+# Shot planner
+# --------------------------------------------------------------------------- #
+class ShotPlanTests(unittest.TestCase):
+    def test_grid_shot_plan_uses_duplicates_and_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "experiment_config.txt"
+            output_path = Path(tmp) / "mock.hdf5"
+            config_path.write_text(CONFIG_TEXT, encoding="utf-8")
+            config = load_run_config(config_path, mode="grid", output_path=output_path)
+            run = AcquisitionRun(
+                config,
+                devices=AcquisitionDevices(scopes=[FakeScopeDevice("mockscope")]),
+            )
+
+            plans = run.build_shot_plan()
+
+            self.assertEqual(len(plans), 8)
+            self.assertEqual(plans[0].position.coordinates, {"x": -1.0, "y": -2.0})
+            self.assertEqual(plans[1].duplicate_index, 1)
+            self.assertEqual(plans[-1].position.coordinates, {"x": 1.0, "y": 2.0})
+
+    def test_stationary_mode_ignores_position_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "experiment_config.txt"
+            output_path = Path(tmp) / "mock.hdf5"
+            config_path.write_text(CONFIG_TEXT, encoding="utf-8")
+            config = load_run_config(
+                config_path, mode="stationary", output_path=output_path,
+            )
+            run = AcquisitionRun(
+                config,
+                devices=AcquisitionDevices(scopes=[FakeScopeDevice("mockscope")]),
+            )
+
+            plans = run.build_shot_plan()
+
+            self.assertEqual(len(plans), 2)
+            self.assertIsNone(plans[0].position)
+
+
+# --------------------------------------------------------------------------- #
+# Import hygiene
+# --------------------------------------------------------------------------- #
+class AcquisitionImportHygieneTests(unittest.TestCase):
+    def test_acquisition_import_does_not_import_bmotion_or_scope_hardware(self):
+        sys.modules.pop("acquisition", None)
+        sys.modules.pop("acquisition.bmotion", None)
+
+        acquisition = importlib.import_module("acquisition")
+
+        self.assertTrue(callable(acquisition.run_acquisition))
+        self.assertTrue(callable(acquisition.run_acquisition_bmotion))
+        self.assertNotIn("acquisition.bmotion", sys.modules)
+
+
+# --------------------------------------------------------------------------- #
+# Phantom camera adapter
 # --------------------------------------------------------------------------- #
 class PhantomAdapterTests(unittest.TestCase):
     def test_phantom_adapter_saves_cine_to_configured_directory(self):
@@ -65,6 +158,8 @@ class PhantomAdapterTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Legacy entrypoint sunset
+# --------------------------------------------------------------------------- #
 class DataRun45DegSunsetTests(unittest.TestCase):
     def test_45deg_entrypoint_reports_unsupported_without_old_run_call(self):
         module = importlib.import_module("Data_Run_45deg")
@@ -75,6 +170,8 @@ class DataRun45DegSunsetTests(unittest.TestCase):
         self.assertIn("pre-refactor hardware PC workflow", str(context.exception))
 
 
+# --------------------------------------------------------------------------- #
+# HDF5 reader back-compatibility
 # --------------------------------------------------------------------------- #
 class HDF5ReaderCompatibilityTests(unittest.TestCase):
     def test_old_lab_scopes_hdf5_reader_reads_mock_generated_file(self):

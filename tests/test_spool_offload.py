@@ -31,10 +31,12 @@ import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from spooling import ShotPayload, TracePayload, spool_format
 from acquisition import bmotion, hdf5_writer, spool_adapter
 import offload_runner
+from _hdf5_assertions import assert_dataset_filters, assert_hdf5_scope_equivalent
 
 REFERENCE_HDF5 = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"
 
@@ -183,7 +185,7 @@ class OffloadEquivalenceTests(unittest.TestCase):
         spool_format.write_run_complete(self.spool, 2)
         offload_runner.run_offload(self.spool, poll_seconds=0.01)
 
-        _assert_hdf5_equivalent(self, self.direct_h5, self.off_h5)
+        assert_hdf5_scope_equivalent(self, self.direct_h5, self.off_h5)
 
     def test_offloaded_dataset_filters_and_dtype(self):
         _build_bmotion_skeleton(self.off_h5, total_shots=1)
@@ -196,10 +198,8 @@ class OffloadEquivalenceTests(unittest.TestCase):
 
         with h5py.File(self.off_h5, "r") as f:
             ds = f["lpscope/shot_1/C1_data"]
-            self.assertEqual(ds.dtype, np.dtype("int16"))
-            self.assertEqual(ds.compression, "lzf")
-            self.assertTrue(ds.shuffle)
-            self.assertTrue(ds.fletcher32)
+            assert_dataset_filters(self, ds, "int16", compression="lzf",
+                                   shuffle=True, fletcher32=True)
             self.assertEqual(ds.chunks, ds.shape)
 
 
@@ -627,36 +627,6 @@ def _ref_shaped_payload(shot_num):
     return ShotPayload(shot_num=shot_num, traces=traces,
                        coordinates={"<Athena>    p21_LP": (-15.0, 15.0)},
                        acquisition_time="Wed May 20 19:25:47 2026")
-
-
-def _assert_hdf5_equivalent(tc, path_a, path_b):
-    """Assert two HDF5 files have the same scope/shot/position structure."""
-    with h5py.File(path_a, "r") as a, h5py.File(path_b, "r") as b:
-        tc.assertEqual(sorted(a["lpscope"].keys()), sorted(b["lpscope"].keys()))
-        for shot in a["lpscope"]:
-            if not shot.startswith("shot_"):
-                continue
-            ga, gb = a["lpscope"][shot], b["lpscope"][shot]
-            tc.assertEqual(sorted(ga.keys()), sorted(gb.keys()))
-            for ds_name in ga:
-                da, db = ga[ds_name], gb[ds_name]
-                tc.assertEqual(da.dtype, db.dtype, ds_name)
-                if ds_name.endswith("_data"):
-                    tc.assertEqual(da.compression, db.compression, ds_name)
-                    tc.assertEqual(da.shuffle, db.shuffle, ds_name)
-                    tc.assertEqual(da.fletcher32, db.fletcher32, ds_name)
-                    tc.assertEqual(da.chunks, db.chunks, ds_name)
-                    np.testing.assert_array_equal(da[()], db[()])
-        # Positions equal.
-        pa = a["Control/Positions"]
-        pb = b["Control/Positions"]
-        tc.assertEqual(sorted(pa.keys()), sorted(pb.keys()))
-        for mg in pa:
-            np.testing.assert_array_equal(
-                pa[mg]["positions_array"][()], pb[mg]["positions_array"][()])
-        # shot_count equal.
-        tc.assertEqual(a["lpscope"].attrs.get("shot_count"),
-                       b["lpscope"].attrs.get("shot_count"))
 
 
 if __name__ == "__main__":

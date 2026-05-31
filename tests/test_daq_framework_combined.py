@@ -6,7 +6,7 @@ test that exercises the engine's fake grid-mode ``execute()`` and its
 ``Control/Positions/positions_array`` write.
 
 Real-hardware coverage lives elsewhere:
-  * real scopes / HDF5 reader compat -> tests/test_lapd_daq_compat.py + lab_scopes
+  * real scopes / HDF5 reader compat -> tests/test_lapd_daq_core.py
   * real bmotion runs -> tests/test_bmotion_hardware.py
   * real instruments -> tests/test_hardware_instruments.py
 
@@ -17,13 +17,13 @@ Run:
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
 import h5py
-import numpy as np
 
 from lapd_daq.config import load_run_config
 from lapd_daq.devices.fakes import (
@@ -33,6 +33,14 @@ from lapd_daq.devices.fakes import (
     FakeTriggerDevice,
 )
 from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hdf5_assertions import (
+    assert_channel_datasets,
+    assert_positions_array,
+    assert_run_status,
+    assert_scope_group,
+)
 
 # --------------------------------------------------------------------------- #
 # Instrument modes: "off" or "fake". The scope must be "fake" — the engine
@@ -212,40 +220,11 @@ class CombinedFrameworkAcquisitionTest(unittest.TestCase):
         with h5py.File(self.output_path, "r") as h5:
             self.assertEqual(h5.attrs.get("schema_version"), SCHEMA_VERSION)
             self.assertIn("Control/Run", h5, "Control/Run group missing")
-            self._check_scope_group(h5)
+            assert_scope_group(self, h5, SCOPE_NAME, self.plan.expected_shots,
+                               SCOPE_CHANNELS, points=SCOPE_POINTS)
             if self.plan.motion_mode != "off":
-                self._check_positions(h5)
-            self._check_run_status(h5)
-
-    def _check_scope_group(self, h5: h5py.File) -> None:
-        expected_shots = self.plan.expected_shots
-        self.assertIn(SCOPE_NAME, h5, f"Scope group {SCOPE_NAME!r} missing")
-        scope_group = h5[SCOPE_NAME]
-        self.assertEqual(scope_group.attrs.get("shot_count"), expected_shots)
-
-        first_shot = scope_group.get("shot_1")
-        self.assertIsNotNone(first_shot, "first shot subgroup missing")
-        self._check_scope_shot_channels(first_shot)
-        self.assertIn(f"shot_{expected_shots}", scope_group)
-
-    def _check_scope_shot_channels(self, shot_group: h5py.Group) -> None:
-        for channel in SCOPE_CHANNELS:
-            dataset = shot_group.get(f"{channel}_data")
-            self.assertIsNotNone(dataset, f"{channel}_data missing in {shot_group.name}")
-            self.assertGreater(dataset.shape[-1], 0, f"{channel}_data is empty")
-            self.assertEqual(dataset.shape[-1], SCOPE_POINTS)
-
-    def _check_positions(self, h5: h5py.File) -> None:
-        positions = h5.get("Control/Positions/positions_array")
-        self.assertIsNotNone(positions, "positions_array missing")
-        np.testing.assert_array_equal(
-            positions["shot_num"], np.arange(1, self.plan.expected_shots + 1)
-        )
-
-    def _check_run_status(self, h5: h5py.File) -> None:
-        status = h5.get("Control/Run/shot_status")
-        self.assertIsNotNone(status, "Control/Run/shot_status missing")
-        self.assertEqual(len(status), self.plan.expected_shots)
+                assert_positions_array(self, h5, self.plan.expected_shots)
+            assert_run_status(self, h5, self.plan.expected_shots)
 
 
 if __name__ == "__main__":
