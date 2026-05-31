@@ -19,6 +19,7 @@ Layered like this:
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from tqdm import tqdm
@@ -152,6 +153,23 @@ class MultiScopeAcquisition:
         self.config = config
         self.raw_config_text = raw_config_text
 
+        # Parallelism flags (all default true). Each gates an independent layer
+        # so it can be A/B-tested or disabled alone:
+        #   parallel_scope_arm   -- arm all scopes concurrently so they go live
+        #       within a tight window (avoids a slow-arming scope missing a
+        #       trigger edge at high rep rates -> scope desync).
+        #   parallel_scope_read  -- overlap the per-scope waveform transfers.
+        #   parallel_spool_write -- write each scope's spool files concurrently.
+        # The read/arm layers are pure network-I/O overlap and unconditionally
+        # good; spool-write parallelism helps on SSD/NVMe but can thrash a
+        # single spinning disk, hence the separate switch.
+        self.parallel_scope_arm = config.getboolean(
+            'acquisition', 'parallel_scope_arm', fallback=True)
+        self.parallel_scope_read = config.getboolean(
+            'acquisition', 'parallel_scope_read', fallback=True)
+        self.parallel_spool_write = config.getboolean(
+            'acquisition', 'parallel_spool_write', fallback=True)
+
         if 'scope_ips' in config:
             self.scope_ips = dict(config.items('scope_ips'))
         else:
@@ -272,8 +290,22 @@ class MultiScopeAcquisition:
                 print(f"Error closing scope {name}: {e}")
 
     # -- per-shot operations -------------------------------------------------
+    def _read_one_scope(self, name, mode):
+        """Read all traces from a single scope. Returns (traces, data, headers).
+
+        Pure per-scope work with no shared state, so it is safe to call from a
+        worker thread (one scope == one independent TCP/VICP transport).
+        """
+        scope = self.scopes[name]
+        if mode == 0:
+            return acquire_from_scope(scope, name)
+        elif mode == 1:
+            return acquire_from_scope_sequence(scope, name)
+        else:
+            raise ValueError(f"Invalid active_scopes value for {name}: {mode}")
+
     def acquire_shot(self, active_scopes, shot_num, verbose=True):
-        """Acquire data from all active scopes for one shot."""
+        """Acquire data from all active scopes for one shot (sequential)."""
         all_data = {}
         failed_scopes = []
 
@@ -281,14 +313,8 @@ class MultiScopeAcquisition:
             try:
                 if verbose:
                     print(f"Acquiring data from {name}...", end='')
-                scope = self.scopes[name]
 
-                if active_scopes[name] == 0:
-                    traces, data, headers = acquire_from_scope(scope, name)
-                elif active_scopes[name] == 1:
-                    traces, data, headers = acquire_from_scope_sequence(scope, name)
-                else:
-                    raise ValueError(f"Invalid active_scopes value for {name}: {active_scopes[name]}")
+                traces, data, headers = self._read_one_scope(name, active_scopes[name])
 
                 if traces:
                     all_data[name] = (traces, data, headers)
@@ -306,13 +332,82 @@ class MultiScopeAcquisition:
             print("done")
         return all_data
 
+    def acquire_shot_parallel(self, active_scopes, shot_num, verbose=True):
+        """Acquire data from all active scopes for one shot, reading scopes in
+        parallel threads.
+
+        Each scope owns its own TCP/VICP socket, and the waveform read is
+        blocking socket I/O that releases the GIL, so threads overlap the
+        transfers. Contract matches `acquire_shot`: returns the same
+        {name: (traces, data, headers)} dict, skips scopes that error or return
+        no data, and lets KeyboardInterrupt propagate to abort the run.
+        """
+        if len(active_scopes) <= 1:
+            # Nothing to overlap; avoid thread/executor overhead.
+            return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+
+        if verbose:
+            print(f"Acquiring data from {len(active_scopes)} scopes in parallel...", end='')
+
+        all_data = {}
+        failed_scopes = []
+
+        with ThreadPoolExecutor(max_workers=len(active_scopes)) as executor:
+            futures = {
+                executor.submit(self._read_one_scope, name, mode): name
+                for name, mode in active_scopes.items()
+            }
+            for future in futures:
+                name = futures[future]
+                try:
+                    traces, data, headers = future.result()
+                    if traces:
+                        all_data[name] = (traces, data, headers)
+                    else:
+                        print(f"Warning: No valid data from {name} for shot {shot_num}")
+                        failed_scopes.append(name)
+                except KeyboardInterrupt:
+                    print(f"\nScope acquisition interrupted for {name}")
+                    raise
+                except Exception as e:
+                    print(f"Error acquiring from {name}: {e}")
+                    failed_scopes.append(name)
+        if verbose:
+            print("done")
+        return all_data
+
+    def acquire_shot_dispatch(self, active_scopes, shot_num, verbose=True):
+        """Read all scopes for one shot, parallel or sequential per config."""
+        if self.parallel_scope_read:
+            return self.acquire_shot_parallel(active_scopes, shot_num, verbose=verbose)
+        return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
-        """Arm all scopes for trigger without waiting for completion (for parallel operation)."""
+        """Arm all scopes for trigger without waiting for completion.
+
+        Arming a single LeCroy scope is several blocking round-trips (a
+        TRIG_MODE write plus a verification poll loop), so arming scopes one
+        after another lets the first-armed scope go live well before the last
+        one is ready. At high rep rates a trigger edge landing in that gap is
+        captured by some scopes and missed by others, desyncing the run by a
+        shot. Arming concurrently shrinks that skew to roughly one scope's arm
+        latency. Each scope owns its own transport with no shared state, so the
+        threaded arm is safe; arm errors propagate (we do NOT swallow them) so a
+        scope that fails to arm aborts the shot rather than silently desyncing.
+        """
         if verbose:
             print("Arming scopes for trigger... ", end='')
-        for name in active_scopes:
-            scope = self.scopes[name]
-            scope.set_trigger_mode('SINGLE')
+        if self.parallel_scope_arm and len(active_scopes) > 1:
+            with ThreadPoolExecutor(max_workers=len(active_scopes)) as executor:
+                futures = {
+                    executor.submit(self.scopes[name].set_trigger_mode, 'SINGLE'): name
+                    for name in active_scopes
+                }
+                for future in futures:
+                    future.result()  # surface (re-raise) any per-scope arm failure
+        else:
+            for name in active_scopes:
+                self.scopes[name].set_trigger_mode('SINGLE')
         if verbose:
             print("armed")
 
@@ -328,7 +423,7 @@ def _lecroy_scope_class():
 # =============================================================================
 def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True):
     msa.arm_scopes_for_trigger(active_scopes, verbose=verbose)
-    all_data = msa.acquire_shot(active_scopes, shot_num, verbose=verbose)
+    all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=verbose)
 
     if all_data:
         if verbose:
@@ -622,7 +717,7 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                             continue
 
                     msa.arm_scopes_for_trigger(active_scopes, verbose=False)
-                    all_data = msa.acquire_shot(active_scopes, shot_num, verbose=False)
+                    all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=False)
                     if not all_data:
                         tqdm.write(f"Skipping shot {shot_num} - no valid data")
                         spool_format.write_shot(
@@ -642,7 +737,7 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                             coords = {'x': xpos, 'y': ypos, 'z': zpos}
 
                     payload = grid_spool_adapter.all_data_to_payload(all_data, shot_num, coords)
-                    spool_format.write_shot(spool_dir, payload)
+                    spool_format.write_shot(spool_dir, payload, parallel=msa.parallel_spool_write)
                     pbar.update(1)
 
         except KeyboardInterrupt as err:
@@ -694,5 +789,5 @@ if __name__ == '__main__':
         active_scopes = msa.initialize_scopes()
         print('Active scopes:', active_scopes)
         msa.arm_scopes_for_trigger(active_scopes)
-        all_data = msa.acquire_shot(active_scopes, 1)
+        all_data = msa.acquire_shot_dispatch(active_scopes, 1)
         print('Acquired data from scopes:', all_data.keys())

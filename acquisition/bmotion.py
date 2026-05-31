@@ -409,12 +409,12 @@ class _SpoolShotSink:
 
         self._await_capacity()
         self.msa.arm_scopes_for_trigger(self.active_scopes, verbose=False)
-        all_data = self.msa.acquire_shot(self.active_scopes, shot_num, verbose=False)
+        all_data = self.msa.acquire_shot_dispatch(self.active_scopes, shot_num, verbose=False)
         if not all_data:
             raise RuntimeError(f"No valid data acquired at shot {shot_num}")
         coords = read_bmotion_positions(self.run_manager, record_keys)
         payload = spool_adapter.all_data_to_payload(all_data, shot_num, coords)
-        spool_format.write_shot(self.spool_dir, payload)
+        spool_format.write_shot(self.spool_dir, payload, parallel=self.msa.parallel_spool_write)
 
     def mark_skipped(self, shot_num, reason, record_keys):
         from spooling import spool_format

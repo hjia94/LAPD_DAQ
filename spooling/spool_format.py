@@ -28,6 +28,7 @@ import os
 import pickle
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -108,11 +109,41 @@ def run_metadata_exists(spool_dir: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Per-shot write
 # --------------------------------------------------------------------------- #
-def write_shot(spool_dir: str, payload: ShotPayload) -> None:
+def _write_scope_files(tmp_dir, scope_name, traces):
+    """Write one scope's per-trace ``.bin``/``.hdr`` files into ``tmp_dir``.
+
+    Returns the scope's ``scope_meta`` list (one ``{channel, dtype, shape}`` per
+    trace, in trace order). Each scope writes only its own ``<scope>__*`` files,
+    so distinct scopes touch disjoint paths and this is safe to run in parallel
+    threads (``ndarray.tofile`` / file writes are blocking I/O that release the
+    GIL, so the writes overlap).
+    """
+    scope_meta = []
+    for tr in traces:
+        arr = np.asarray(tr.data, dtype=np.int16)
+        base = _trace_basename(scope_name, tr.channel)
+        arr.tofile(os.path.join(tmp_dir, base + ".bin"))
+        with open(os.path.join(tmp_dir, base + ".hdr"), "wb") as hf:
+            hf.write(bytes(tr.header))
+        scope_meta.append({
+            "channel": tr.channel,
+            "dtype": str(arr.dtype),
+            "shape": tuple(int(s) for s in arr.shape),
+        })
+    return scope_meta
+
+
+def write_shot(spool_dir: str, payload: ShotPayload, parallel: bool = False) -> None:
     """Write one shot to the spool and publish it with a ``.done`` marker.
 
     Writes into ``shot_N.tmp/``, atomically renames to ``shot_N/``, then creates
     the marker. Safe to call for both data shots and skipped shots.
+
+    When ``parallel`` is true and the shot has 2+ scopes, each scope's files are
+    written on its own worker thread so the per-scope writes overlap. The on-disk
+    result (file names, bytes, sidecar, and the atomic publish order) is identical
+    to the serial path — only the order bytes hit disjoint files changes — so the
+    offload reads back a byte-identical shot.
     """
     os.makedirs(spool_dir, exist_ok=True)
     shot_dir = os.path.join(spool_dir, _shot_dirname(payload.shot_num))
@@ -134,20 +165,23 @@ def write_shot(spool_dir: str, payload: ShotPayload) -> None:
     }
 
     if not payload.skipped:
-        for scope_name, traces in payload.traces.items():
-            scope_meta = []
-            for tr in traces:
-                arr = np.asarray(tr.data, dtype=np.int16)
-                base = _trace_basename(scope_name, tr.channel)
-                arr.tofile(os.path.join(tmp_dir, base + ".bin"))
-                with open(os.path.join(tmp_dir, base + ".hdr"), "wb") as hf:
-                    hf.write(bytes(tr.header))
-                scope_meta.append({
-                    "channel": tr.channel,
-                    "dtype": str(arr.dtype),
-                    "shape": tuple(int(s) for s in arr.shape),
-                })
-            sidecar["scopes"][scope_name] = scope_meta
+        scope_items = list(payload.traces.items())
+        if parallel and len(scope_items) > 1:
+            # One worker per scope, writing disjoint <scope>__* files. Collect
+            # results after the workers join, then store them in the original
+            # scope order so the sidecar matches the serial path exactly.
+            with ThreadPoolExecutor(max_workers=len(scope_items)) as executor:
+                futures = {
+                    executor.submit(_write_scope_files, tmp_dir, scope_name, traces): scope_name
+                    for scope_name, traces in scope_items
+                }
+                meta_by_scope = {futures[f]: f.result() for f in futures}
+            for scope_name, _traces in scope_items:
+                sidecar["scopes"][scope_name] = meta_by_scope[scope_name]
+        else:
+            for scope_name, traces in scope_items:
+                sidecar["scopes"][scope_name] = _write_scope_files(
+                    tmp_dir, scope_name, traces)
 
     with open(os.path.join(tmp_dir, _SHOT_META), "wb") as f:
         pickle.dump(sidecar, f, protocol=pickle.HIGHEST_PROTOCOL)
