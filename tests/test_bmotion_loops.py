@@ -394,6 +394,8 @@ class _FakeMSA:
     def __init__(self):
         self.armed = 0
         self.acquired = []
+        # Spool sink reads this when calling spool_format.write_shot(parallel=...).
+        self.parallel_spool_write = False
 
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
         self.armed += 1
@@ -403,6 +405,10 @@ class _FakeMSA:
         data = {"C1": np.arange(8, dtype=np.int16)}
         headers = {"C1": b"HDR"}
         return {"lpscope": (["C1"], data, headers)}
+
+    def acquire_shot_dispatch(self, active_scopes, shot_num, verbose=True):
+        # The spool sink reads through the dispatcher; mirror acquire_shot.
+        return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
 
 
 class SpoolSinkTests(unittest.TestCase):

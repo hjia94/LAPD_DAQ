@@ -142,6 +142,109 @@ class SpoolRoundTripTests(unittest.TestCase):
         self.assertEqual(spool_format.iter_ready_shots(self.spool), [7])
 
 
+def _make_two_scope_all_data(seq=False):
+    """Synthetic two-scope all_data (parallel-spool-write exercise)."""
+    rng = np.random.default_rng(99)
+    one = _make_all_data(seq)["lpscope"]
+    if seq:
+        d = rng.integers(-100, 100, size=(3, 64), dtype=np.int16)
+    else:
+        d = rng.integers(-30000, 30000, size=128, dtype=np.int16)
+    two = (["C1"], {"C1": d}, {"C1": b"HEADER-X-C1"})
+    return {"lpscope": one, "xrayscope": two}
+
+
+class ParallelSpoolWriteTests(unittest.TestCase):
+    """`write_shot(parallel=True)` must produce a byte-identical spool + schema.
+
+    Two scopes write disjoint <scope>__* files; parallelizing only reorders the
+    bytes hitting separate files, so the on-disk files, the sidecar, and the
+    reconstructed schema must all match the serial path exactly.
+    """
+
+    def setUp(self):
+        self.serial = tempfile.mkdtemp(prefix="spool_ser_")
+        self.par = tempfile.mkdtemp(prefix="spool_par_")
+
+    def _files(self, spool_dir, shot_num):
+        shot_dir = os.path.join(spool_dir, "shot_%06d" % shot_num)
+        out = {}
+        for name in sorted(os.listdir(shot_dir)):
+            with open(os.path.join(shot_dir, name), "rb") as f:
+                out[name] = f.read()
+        return out
+
+    def _assert_identical_and_correct(self, all_data, seq):
+        payload_s = spool_adapter.all_data_to_payload(all_data, 1, None)
+        payload_p = spool_adapter.all_data_to_payload(all_data, 1, None)
+        spool_format.write_shot(self.serial, payload_s, parallel=False)
+        spool_format.write_shot(self.par, payload_p, parallel=True)
+
+        # (a) identical on-disk files (bin/hdr bytes AND the pickled sidecar).
+        self.assertEqual(self._files(self.serial, 1), self._files(self.par, 1))
+
+        # (b) reconstructed schema matches the input arrays/headers per scope.
+        got = spool_format.read_shot(self.par, 1)
+        self.assertEqual(set(got.traces), {"lpscope", "xrayscope"})
+        for scope_name, (traces, data, headers) in all_data.items():
+            by_ch = {t.channel: t for t in got.traces[scope_name]}
+            self.assertEqual(set(by_ch), set(traces))
+            for ch in traces:
+                np.testing.assert_array_equal(by_ch[ch].data, data[ch])
+                self.assertEqual(by_ch[ch].data.dtype, np.int16)
+                self.assertEqual(by_ch[ch].header, headers[ch])
+
+    def test_realtime_parallel_matches_serial(self):
+        self._assert_identical_and_correct(_make_two_scope_all_data(False), seq=False)
+
+    def test_sequence_2d_parallel_matches_serial(self):
+        self._assert_identical_and_correct(_make_two_scope_all_data(True), seq=True)
+
+    def test_parallel_offloads_to_correct_hdf5_schema(self):
+        """End-to-end: parallel-written spool -> offload -> correct HDF5 schema."""
+        off_h5 = tempfile.mktemp(suffix=".hdf5")
+        try:
+            all_data = _make_two_scope_all_data(False)
+            # Build a two-scope skeleton (the shared helper is single-scope, so
+            # create both scope groups up front, then fill per-scope metadata).
+            ta = np.linspace(0, 1e-3, 128, dtype=np.float64)
+            hdf5_writer.write_experiment_metadata(
+                off_h5, description="unit-test run", source_code={"unit": "test"},
+                raw_config_text="[experiment]\n", config=None,
+                scope_names=["lpscope", "xrayscope"])
+            for sname, ip in (("lpscope", "127.0.0.1"), ("xrayscope", "127.0.0.2")):
+                hdf5_writer.write_scope_metadata(
+                    off_h5, scope_name=sname, description=sname,
+                    ip_address=ip, scope_type="LECROY,TEST,0,0")
+                hdf5_writer.write_time_array(off_h5, sname, ta, 0)
+
+            meta = {
+                "writer": "acquisition",
+                "hdf5_path": off_h5,
+                "config_scope_names": ["lpscope", "xrayscope"],
+                "channel_descriptions": {
+                    "lpscope_C1": "LP isat", "lpscope_C2": "LP vsweep",
+                    "xrayscope_C1": "xray",
+                },
+            }
+            spool_format.write_run_metadata(self.par, meta)
+            payload = spool_adapter.all_data_to_payload(all_data, 1, None)
+            spool_format.write_shot(self.par, payload, parallel=True)
+            spool_format.write_run_complete(self.par, 1)
+            offload_runner.run_offload(self.par, poll_seconds=0.01)
+
+            with h5py.File(off_h5, "r") as f:
+                for scope_name, (traces, data, _h) in all_data.items():
+                    for ch in traces:
+                        ds = f[f"{scope_name}/shot_1/{ch}_data"]
+                        self.assertEqual(ds.dtype, np.dtype("int16"))
+                        np.testing.assert_array_equal(ds[()], data[ch])
+                        self.assertIn(f"{ch}_header", f[f"{scope_name}/shot_1"])
+        finally:
+            if os.path.exists(off_h5):
+                os.remove(off_h5)
+
+
 class OffloadEquivalenceTests(unittest.TestCase):
     """Completeness gate: offloaded HDF5 must match the in-process writer output."""
 
