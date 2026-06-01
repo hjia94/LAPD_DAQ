@@ -31,7 +31,22 @@ scope = [
     "pyvisa-py",   # pure-Python VISA backend for the legacy PyVISA path
 ]
 bmotion = [
-    "bapsf-motion",
+    # Pinned to the BaPSF `patch_position_regex` branch (commit b151f0d), which
+    # fixes the encoder read for negative positions (the EP/SP/DI recv regexes)
+    # and adds the native encoder API (Motor/Axis/Drive/MotionGroup.encoder,
+    # Motor.counts_per_rev) that acquisition/motor_recovery.py now prefers. The
+    # released PyPI `bapsf-motion` still has the negative-EP bug, so we pin the
+    # exact commit until this work is merged upstream and released.
+    #
+    # When upstream releases a version with these fixes, replace this with the
+    # version spec (e.g. "bapsf-motion>=<ver>"). LAPD_DAQ keeps a manual fallback
+    # (raw EP read) so it still runs against an unpatched library, just without
+    # the immediate-IE benefits.
+    #
+    # Dev override: to co-develop against a local checkout, run
+    #     pip install -e ../../Bapsf/bapsf_motion
+    # AFTER installing this extra (re-running the extra re-fetches from git).
+    "bapsf-motion @ git+https://github.com/BaPSF/bapsf_motion.git@b151f0d7e20d239d3c4c7c2c86a4ccee10eba03e",
     "xarray",
 ]
 camera = []

@@ -170,6 +170,32 @@ def _read_encoder_counts(motor):
     return int(m.group(1)) if m else None
 
 
+def _encoder_counts(motor):
+    """Encoder reading in counts (signed), preferring the native API.
+
+    bapsf_motion ``patch_position_regex`` exposes ``Motor.encoder`` (counts, read
+    via the immediate ``IE`` command, negative-safe). Use it when available; fall
+    back to the raw ``_send_raw_command("EP")`` parse for an older library. Returns
+    a float count or None."""
+    native = _scalar(getattr(motor, "encoder", None))
+    if native is not None:
+        return native
+    counts = _read_encoder_counts(motor)
+    return float(counts) if counts is not None else None
+
+
+def _counts_per_rev(motor):
+    """Encoder counts per motor revolution, preferring native ``counts_per_rev``.
+
+    bapsf_motion ``patch_position_regex`` adds ``Motor.counts_per_rev``; older
+    libraries only expose it via the cached ``encoder_resolution``. Returns a
+    float or None."""
+    native = _scalar(getattr(motor, "counts_per_rev", None))
+    if native:
+        return native
+    return _encoder_resolution(motor)
+
+
 def _encoder_resolution(motor):
     """Encoder resolution (counts/rev) for ``motor``, or None.
 
@@ -206,36 +232,58 @@ def _units_per_rev(ax, motor):
     return None
 
 
-def encoder_motion_space_position(mg):
-    """Probe position in motion space, derived from the ENCODER (EP).
+def _coerce_position_tuple(value):
+    """Coerce a (possibly Quantity / array / None) motion-space value to a float
+    tuple of finite numbers, or None if it can't be (None, NaN, AckFlag, etc.)."""
+    if value is None:
+        return None
+    arr = np.asarray(getattr(value, "value", value)).squeeze()
+    try:
+        out = tuple(float(v) for v in np.atleast_1d(arr))
+    except (TypeError, ValueError):
+        return None
+    if not out or not all(np.isfinite(v) for v in out):
+        return None
+    return out
 
-    Mirrors :attr:`MotionGroup.position` exactly -- it transforms the per-axis
-    drive position to motion space via ``mg.transform(..., to_coords=
-    "motion_space")`` -- but sources the per-axis value from the encoder (EP)
-    instead of the calculated trajectory position (IP). The Applied Motion manual
-    notes IP "is not always equal to actual position"; EP is the physical
-    feedback, so this is the *real* probe position.
 
-    The transform expects drive coordinates in the axis's **physical units** (cm),
-    NOT motor steps -- ``MotionGroup.position`` feeds it ``Drive.position`` which
-    is ``Axis.position`` in cm (``Axis.position`` converts the motor's step count
-    to cm via ``steps * units_per_rev / steps_per_rev``). So per axis we convert
-    the encoder count to the same physical units::
+def _native_encoder_motion_space(mg):
+    """Motion-space encoder position from the library's native ``mg.encoder``.
+
+    ``MotionGroup.encoder`` (bapsf_motion ``patch_position_regex`` and later)
+    returns the encoder reading already pushed through the coordinate transform,
+    i.e. the real probe position in motion-space coordinates -- the EP-sourced
+    twin of ``mg.position``. Returns a float tuple, or None when the property is
+    absent (older library), errors, or yields a non-finite/None value (e.g. a
+    cold heartbeat cache), so the caller can fall back to the manual path."""
+    # Access inside the try: ``mg.encoder`` is a property that may raise (e.g. on
+    # a None cache or comms error), and a raising property is not caught by
+    # hasattr() -- only AttributeError is. A missing attribute lands here as
+    # AttributeError and is treated the same as "unavailable".
+    try:
+        enc = mg.encoder
+    except AttributeError:
+        return None  # older library without the native property
+    except Exception:  # noqa: BLE001 - property raised (None cache / comms)
+        return None
+    return _coerce_position_tuple(enc)
+
+
+def _manual_encoder_motion_space(mg):
+    """Motion-space encoder position computed by hand (compat fallback).
+
+    Used when the library lacks a working native ``mg.encoder`` (older
+    bapsf_motion on ``main``). Per axis: read EP counts (negative-safe, via
+    :func:`_read_encoder_counts`) and convert to the axis's physical units (cm)
+    the transform expects::
 
         cm = ep_counts / encoder_resolution * units_per_rev
 
-    where ``encoder_resolution`` is counts/rev and ``units_per_rev`` is cm/rev
-    (the axis's physical units per motor revolution). Feeding this cm vector
-    through the same transform yields the identical motion-space coordinates/units
-    as ``mg.position`` -- only the source (EP vs IP) changes. (Passing raw step
-    counts here instead of cm is what produced nonsense like ``41.73`` / ``14833``
-    where ``15`` / ``0`` cm was expected.)
-
-    Returns a ``(x, y[, ...])`` float tuple, or ``None`` if any axis can't supply
-    EP / the scaling constants, or the transform isn't available -- so callers can
-    fall back to ``mg.position`` (IP). Read-only; EP is buffered, so callers must
-    have settled motion first.
-    """
+    then feed the cm vector through the same ``mg.transform(..., to_coords=
+    "motion_space")`` that ``MotionGroup.position`` uses. Returns a float tuple,
+    or None if any axis can't supply EP / the scaling constants / the transform.
+    (Passing raw step counts here instead of cm is what produced nonsense like
+    ``41.73`` / ``14833`` where ``15`` / ``0`` cm was expected.)"""
     axes = _axes(mg)
     if not axes:
         return None
@@ -258,11 +306,26 @@ def encoder_motion_space_position(mg):
         ms = transform(cm, to_coords="motion_space")
     except Exception:  # noqa: BLE001 - transform math failure -> fall back to IP
         return None
-    ms = np.asarray(getattr(ms, "value", ms)).squeeze()
-    try:
-        return tuple(float(v) for v in np.atleast_1d(ms))
-    except (TypeError, ValueError):
-        return None
+    return _coerce_position_tuple(ms)
+
+
+def encoder_motion_space_position(mg):
+    """Probe position in motion space, derived from the ENCODER -- the *real*
+    physical probe position (the Applied Motion manual notes IP, the calculated
+    trajectory position behind ``mg.position``, "is not always equal to actual
+    position"; the encoder is the physical feedback).
+
+    Prefers the library's native :attr:`MotionGroup.encoder` (bapsf_motion
+    ``patch_position_regex`` and later), which already applies the coordinate
+    transform. Falls back to computing it by hand (:func:`_manual_encoder_motion_space`)
+    when running against an older library without that property, so this works on
+    both versions.
+
+    Returns a ``(x, y[, ...])`` float tuple in the same motion-space coordinates
+    as ``mg.position``, or ``None`` if neither path can supply a finite value --
+    so callers can fall back to ``mg.position`` (IP). Read-only; the encoder read
+    must happen with motion settled (callers refresh status first)."""
+    return _native_encoder_motion_space(mg) or _manual_encoder_motion_space(mg)
 
 
 def encoder_step_mismatch(mg, tol_rev=0.01):
@@ -284,10 +347,11 @@ def encoder_step_mismatch(mg, tol_rev=0.01):
     motor can't supply the values (stub, NACK, missing constants) is skipped
     silently -- never warns spuriously, never writes/corrects anything.
 
-    The encoder (EP) is read via :func:`_read_encoder_counts` (the raw escape
-    hatch), which is negative-safe -- so an axis past zero is checked correctly
-    instead of being silently skipped by the library's buggy ``encoder_position``
-    read regex.
+    The encoder is read via :func:`_encoder_counts`, which prefers the library's
+    native negative-safe ``Motor.encoder`` (immediate ``IE``) and falls back to the
+    raw ``EP`` escape hatch on older libraries -- either way an axis past zero is
+    checked correctly instead of being silently skipped by the library's old buggy
+    ``encoder_position`` read regex.
     """
     bad = []
     for idx, ax in enumerate(_axes(mg)):
@@ -296,18 +360,18 @@ def encoder_step_mismatch(mg, tol_rev=0.01):
         if not callable(send):
             continue
 
-        # Read step (IP) directly; read encoder (EP) via the negative-safe raw
-        # escape hatch (the library's encoder_position read can't parse negatives).
+        # Read step (IP) directly; read encoder counts via the native API
+        # (negative-safe) with a raw-EP fallback.
         try:
             step = _scalar(send("get_position"))
         except Exception:  # noqa: BLE001 - comms hiccup -> just skip this axis
             continue
-        enc = _read_encoder_counts(motor)
+        enc = _encoder_counts(motor)
         if step is None or enc is None:
             continue
 
         steps_per_rev = _scalar(getattr(motor, "steps_per_rev", None))
-        enc_res = _encoder_resolution(motor)
+        enc_res = _counts_per_rev(motor)
         if not steps_per_rev or not enc_res:
             continue  # can't convert to a common unit -> skip
 
@@ -346,19 +410,20 @@ def verify_encoder_zeroed(mg, tol_counts=2.0, log=print):
     rejected it) would go unnoticed.
 
     This is the positive read-back check: after zeroing, read each axis's encoder
-    (EP) via the negative-safe raw escape hatch and confirm it reads ~0 (within
-    ``tol_counts`` encoder counts -- a couple of counts of end-of-write jitter is
-    normal). Returns the list of ``(axis_idx, ep_counts)`` for axes that did NOT
-    zero (empty == all good), warning on each.
+    via :func:`_encoder_counts` (native negative-safe ``Motor.encoder`` with a raw
+    ``EP`` fallback) and confirm it reads ~0 (within ``tol_counts`` encoder counts
+    -- a couple of counts of end-of-write jitter is normal). Returns the list of
+    ``(axis_idx, counts)`` for axes that did NOT zero (empty == all good), warning
+    on each.
 
-    Call this immediately after zeroing and while the motor is idle (EP is a
-    buffered command). Read-only: never writes or re-zeros -- it only reports.
+    Call this immediately after zeroing and while the motor is idle. Read-only:
+    never writes or re-zeros -- it only reports.
     """
     name = mg.config.get("name", "?") if hasattr(mg, "config") else "?"
     bad = []
     for idx, ax in enumerate(_axes(mg)):
         motor = getattr(ax, "motor", ax)
-        counts = _read_encoder_counts(motor)
+        counts = _encoder_counts(motor)
         if counts is None:
             # Can't read the encoder -> can't confirm; surface it rather than
             # silently claiming success.
