@@ -22,7 +22,7 @@ Only ``bmotion_config.toml`` is needed in the current working directory.
 
 Run with:
 
-    pytest tests/test_bmotion_recovery_hardware.py -v -s
+    pytest tests/test_bmotion_recovery_hw.py -v -s
 """
 
 from __future__ import annotations

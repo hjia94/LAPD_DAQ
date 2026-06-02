@@ -1,8 +1,7 @@
 """Shared HDF5 structural assertion helpers for the lapd_daq test suite.
 
 Used by:
-  test_daq_framework_combined.py  -- engine output verification
-  test_spool_offload.py           -- offload equivalence and schema checks
+  test_daq_spool.py  -- offload equivalence and schema checks
 """
 
 import numpy as np

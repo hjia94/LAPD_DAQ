@@ -4,10 +4,10 @@ These run the complete ``run_acquisition_bmotion`` pipeline against real motors
 in both interleaved and sequential execution order and verify the resulting
 HDF5 layout. They are slow and exercise the whole stack, so they are kept
 separate from the fast motor-recovery diagnostics in
-``tests/test_bmotion_recovery_hardware.py`` (run those routinely; run these only
+``tests/test_bmotion_recovery_hw.py`` (run those routinely; run these only
 when validating the full acquisition path).
 
-Pattern mirrors tests/test_hardware_instruments.py:
+Gating pattern (shared with the other ``*_hw`` files):
   * Module-level RUN_* flag enables the test class.
   * BMOTION_ALLOW_MOVE is a separate destructive-action gate; without it
     the test fails fast rather than touching motors.
@@ -17,9 +17,9 @@ the current working directory.
 
 Run with:
 
-    pytest tests/test_bmotion_e2e_hardware.py -v -s
+    pytest tests/test_bmotion_e2e_hw.py -v -s
     # or
-    python -m unittest tests.test_bmotion_e2e_hardware -v
+    python -m unittest tests.test_bmotion_e2e_hw -v
 """
 
 from __future__ import annotations

@@ -1,9 +1,10 @@
 """Shared base class for hardware diagnostic tests.
 
 Provides the tempdir lifecycle and the run-flag/gate skip mechanism reused by
-the per-instrument hardware tests (test_hardware_scope/motion/camera) and the
-bmotion end-to-end checks (test_bmotion_hardware). Lives in a leading-underscore
-module so unittest discovery never collects the base class itself.
+the per-instrument hardware tests (test_scope_hw/test_motion_hw/test_camera_hw)
+and the bmotion hardware checks (test_bmotion_recovery_hw, test_bmotion_e2e_hw).
+Lives in a leading-underscore module so unittest discovery never collects the
+base class itself.
 
 Pure functions for those tests live in _hardware_check_helpers.py; this module
 is the one place that carries a unittest.TestCase subclass.

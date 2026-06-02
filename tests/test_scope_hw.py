@@ -5,7 +5,7 @@ Data_Run-style check, through the legacy acquisition path). Skipped by default
 so a normal run on a developer machine stays green; opt in by editing the flags
 at the top of this file.
 
-    pytest tests/test_hardware_scope.py -v -s
+    pytest tests/test_scope_hw.py -v -s
 """
 
 from __future__ import annotations

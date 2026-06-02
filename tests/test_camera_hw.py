@@ -4,7 +4,7 @@ Connects to the real Phantom camera through the lapd_daq adapter. Skipped by
 default so a normal run on a developer machine stays green; opt in by editing
 the flags at the top of this file.
 
-    pytest tests/test_hardware_camera.py -v -s
+    pytest tests/test_camera_hw.py -v -s
 """
 
 from __future__ import annotations

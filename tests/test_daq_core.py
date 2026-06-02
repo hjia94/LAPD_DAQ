@@ -11,9 +11,10 @@ Three orthogonal but cohesive subjects:
   HDF5ReaderCompatibilityTests  -- new-engine HDF5 files remain readable by the
                                    old lab_scopes and pydaq readers
 
-End-to-end engine runs (execute() with fake devices) live in
-test_daq_framework_combined.py; real-hardware coverage lives in the
-test_hardware_*.py and test_bmotion_*.py files.
+End-to-end acquisition is covered on the hardware PC by the ``*_hw.py`` files
+(test_scope_hw, test_motion_hw, test_camera_hw, test_bmotion_e2e_hw) and by the
+routine spooled+parallel DAQ plane run after changes; this module stops at the
+config/planning/back-compat units a successful run does not exercise.
 """
 
 import importlib

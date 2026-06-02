@@ -13,7 +13,7 @@ no hardware. Verifies:
 
 Run:
 
-    python -m unittest tests.test_parallel_scope_read
+    python -m unittest tests.test_daq_parallel
 """
 
 import sys

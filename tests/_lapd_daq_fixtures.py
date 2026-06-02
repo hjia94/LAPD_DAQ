@@ -1,12 +1,12 @@
 """Shared experiment_config.txt fixtures for the lapd_daq test suite.
 
-Three test modules (test_lapd_daq_config, test_lapd_daq_engine,
-test_lapd_daq_compat) need the same representative INI config. Defining
-it once here keeps them from drifting.
+Consumed by test_daq_core.py for its config-parser / shot-planning tests
+(the formerly-separate lapd_daq config/engine/compat modules were merged
+into test_daq_core). Defining the INI once here keeps tests from drifting.
 
 CONFIG_TEXT carries an inline comment on `num_duplicate_shots` because
-one consumer (test_lapd_daq_config) asserts that the loader tolerates
-inline comments. Consumers that don't care are unaffected.
+test_daq_core asserts that the loader tolerates inline comments. Consumers
+that don't care are unaffected.
 """
 
 CONFIG_TEXT = """
