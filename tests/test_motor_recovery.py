@@ -341,7 +341,7 @@ class _EncMotor:
     which returns the raw drive reply string (e.g. ``"EP=-12345"``) so the
     negative-safe parse is exercised."""
     def __init__(self, ip, ep, steps_per_rev=20000, enc_res=4000, support_ep=True,
-                 units_per_rev=1.0):
+                 units_per_rev=1.0, native=False):
         self._ip = ip
         self._ep = ep
         self.steps_per_rev = steps_per_rev
@@ -349,6 +349,11 @@ class _EncMotor:
         self._motor = {"encoder_resolution": enc_res}
         self._support_ep = support_ep
         self.status = {"connected": True}
+        # When native=True, expose the patch_position_regex API (Motor.encoder
+        # in counts, Motor.counts_per_rev) so tests can exercise the native path.
+        if native:
+            self.encoder = ep
+            self.counts_per_rev = enc_res
 
     def send_command(self, command, *a, **k):
         if command == "get_position":
@@ -417,6 +422,20 @@ class EncoderMismatchTests(unittest.TestCase):
         idx, step_rev, enc_rev = bad[0]
         self.assertAlmostEqual(step_rev, -0.5)
         self.assertAlmostEqual(enc_rev, -0.25)
+
+    def test_native_encoder_api_used_when_present(self):
+        # With the patch_position_regex API (Motor.encoder + counts_per_rev), the
+        # mismatch check reads the native encoder. step=0.5 rev, encoder=0.25 rev.
+        mg = _EncMG([_EncMotor(ip=10000, ep=1000, native=True)])
+        bad = encoder_step_mismatch(mg, tol_rev=0.01)
+        self.assertEqual(len(bad), 1)
+        idx, step_rev, enc_rev = bad[0]
+        self.assertAlmostEqual(step_rev, 0.5)
+        self.assertAlmostEqual(enc_rev, 0.25)
+
+    def test_native_encoder_agrees(self):
+        mg = _EncMG([_EncMotor(ip=10000, ep=2000, native=True)])
+        self.assertEqual(encoder_step_mismatch(mg, tol_rev=0.01), [])
 
 
 class ReadEncoderCountsTests(unittest.TestCase):
@@ -499,6 +518,64 @@ class EncoderMotionSpacePositionTests(unittest.TestCase):
     def test_none_when_encoder_unavailable(self):
         # No encoder support -> None, so the caller falls back to IP.
         mg = _XformMG([_EncMotor(ip=0, ep=0, support_ep=False, units_per_rev=2.0)])
+        self.assertIsNone(encoder_motion_space_position(mg))
+
+
+class _NativeEncMG:
+    """Motion group exposing the native bapsf_motion ``encoder`` property
+    (patch_position_regex and later): a motion-space Quantity-like value already
+    through the transform. ``manual`` is what the hand-rolled fallback would
+    return if the native path is skipped, so a test can prove which path ran."""
+    def __init__(self, encoder_value, manual_motors=None, ms_scale=1.0):
+        self.config = {"name": "Nat"}
+        self._encoder_value = encoder_value  # tuple, None, or "raise"
+        # Optional manual-path backing so we can assert fallback behaviour.
+        motors = manual_motors or []
+        self.drive = type("D", (), {"axes": [type("Ax", (), {"motor": m})()
+                                             for m in motors]})()
+        self._ms_scale = ms_scale
+
+    @property
+    def encoder(self):
+        if self._encoder_value == "raise":
+            raise RuntimeError("encoder read failed")
+        if self._encoder_value is None:
+            return None
+        return type("Q", (), {"value": list(self._encoder_value)})()
+
+    def transform(self, cm, to_coords="motion_space"):
+        assert to_coords == "motion_space"
+        return [c * self._ms_scale for c in cm]
+
+
+class NativeEncoderPreferenceTests(unittest.TestCase):
+    def test_uses_native_encoder_when_present(self):
+        # Native mg.encoder gives motion-space directly; helper returns it as-is
+        # and never touches the manual path (no motors configured).
+        mg = _NativeEncMG(encoder_value=(3.0, -4.0))
+        self.assertEqual(encoder_motion_space_position(mg), (3.0, -4.0))
+
+    def test_falls_back_to_manual_when_native_none(self):
+        # Cold heartbeat cache -> mg.encoder is None; helper falls back to the
+        # manual counts->cm path. ep=2000/enc_res=4000=0.5rev * 2.0 cm/rev = 1.0.
+        mg = _NativeEncMG(encoder_value=None,
+                          manual_motors=[_EncMotor(ip=0, ep=2000, units_per_rev=2.0)])
+        self.assertAlmostEqual(encoder_motion_space_position(mg)[0], 1.0)
+
+    def test_falls_back_to_manual_when_native_raises(self):
+        mg = _NativeEncMG(encoder_value="raise",
+                          manual_motors=[_EncMotor(ip=0, ep=2000, units_per_rev=2.0)])
+        self.assertAlmostEqual(encoder_motion_space_position(mg)[0], 1.0)
+
+    def test_falls_back_when_native_non_finite(self):
+        # A NaN/inf from the native path is treated as unavailable -> manual.
+        mg = _NativeEncMG(encoder_value=(float("nan"), 0.0),
+                          manual_motors=[_EncMotor(ip=0, ep=2000, units_per_rev=2.0)])
+        self.assertAlmostEqual(encoder_motion_space_position(mg)[0], 1.0)
+
+    def test_returns_none_when_both_paths_fail(self):
+        # Native None and no manual backing -> None (caller falls back to IP).
+        mg = _NativeEncMG(encoder_value=None)
         self.assertIsNone(encoder_motion_space_position(mg))
 
 
