@@ -181,13 +181,22 @@ def get_backpressure_limits(config):
 def resolve_hdf5_path(config, base_path, date=None):
     """Return the full HDF5 file path for a run.
 
-    Uses ``[storage] hdf5_dir`` as the output directory when set, otherwise
-    ``base_path``; the filename is always ``<exp_name>_<date>.hdf5`` built from
-    ``[experiment] name``. Both the acquisition and offload processes call this
-    so they target the same file.
+    Detection keys on the experiment ``name``: an existing ``<name>_*.hdf5`` from
+    any date is reused (so a run started before midnight and resumed the next day
+    targets the same file), else a fresh ``<name>_<today>.hdf5`` is minted. Both
+    the acquisition and offload processes call this so they target the same file.
+
+    ``date`` is accepted for backward compatibility; when given it forces that
+    exact dated filename (bypassing detection), which a few callers rely on.
     """
     import os as _os
 
     _spool_dir, hdf5_dir = get_storage_paths(config)
     out_dir = hdf5_dir or base_path
-    return _os.path.join(out_dir, hdf5_filename(get_experiment_name(config), date))
+    if date is not None:
+        return _os.path.join(out_dir, hdf5_filename(get_experiment_name(config), date))
+
+    # Delegate to the name-glob resolver (local import avoids a config<->run_paths
+    # import cycle: run_paths imports helpers from this module).
+    from .run_paths import resolve_run_paths
+    return resolve_run_paths(config, base_path, spool_root=None).hdf5_path

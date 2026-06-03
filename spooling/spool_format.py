@@ -24,6 +24,7 @@ created. The offload side ignores any shot directory that lacks a ``.done``
 marker, so a half-written or interrupted shot is never consumed.
 """
 
+import glob
 import os
 import pickle
 import shutil
@@ -104,6 +105,18 @@ def read_run_metadata(spool_dir: str) -> dict:
 
 def run_metadata_exists(spool_dir: str) -> bool:
     return os.path.exists(os.path.join(spool_dir, _META_RUN))
+
+
+def update_run_metadata(spool_dir: str, updates: dict) -> dict:
+    """Merge ``updates`` into the existing run metadata and rewrite it atomically.
+
+    Used on resume to record a new ``resume_from_shot`` without rebuilding the
+    whole bundle (the offload reads it to decide which shots to overwrite).
+    """
+    meta = read_run_metadata(spool_dir)
+    meta.update(updates)
+    _atomic_pickle(os.path.join(spool_dir, _META_RUN), meta)
+    return meta
 
 
 # --------------------------------------------------------------------------- #
@@ -395,6 +408,142 @@ def clear_run_complete(spool_dir: str) -> None:
     path = os.path.join(spool_dir, _RUN_COMPLETE)
     if os.path.exists(path):
         os.remove(path)
+
+
+_OFFLOAD_LOCK = "offload.lock"
+
+# A lock whose heartbeat hasn't been touched within this many seconds is treated
+# as stale (the offload died without cleaning up), so a new offload may take over.
+_LOCK_STALE_SECONDS = 30.0
+
+
+def offload_lock_is_live(spool_dir: str) -> bool:
+    """True if a live offload process currently holds this spool's lock.
+
+    "Live" means the lock file exists, its recorded PID is still running, and its
+    heartbeat (file mtime, refreshed by :func:`offload_lock_heartbeat`) is recent.
+    A stale lock (process gone or heartbeat old) reports False so a resume/next
+    run can take over the spool instead of refusing forever.
+    """
+    path = os.path.join(spool_dir, _OFFLOAD_LOCK)
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return False
+    if age > _LOCK_STALE_SECONDS:
+        return False
+    try:
+        with open(path, "r") as f:
+            pid = int(f.read().strip() or "-1")
+    except (OSError, ValueError):
+        return False
+    return _pid_alive(pid)
+
+
+def acquire_offload_lock(spool_dir: str) -> bool:
+    """Take the offload lock for this process. Returns False if one is live.
+
+    Writes our PID; the caller refreshes the heartbeat via
+    :func:`offload_lock_heartbeat` and removes it with
+    :func:`release_offload_lock` on exit.
+    """
+    if offload_lock_is_live(spool_dir):
+        return False
+    os.makedirs(spool_dir, exist_ok=True)
+    _atomic_pickle_bytes(os.path.join(spool_dir, _OFFLOAD_LOCK),
+                         str(os.getpid()).encode())
+    return True
+
+
+def offload_lock_heartbeat(spool_dir: str) -> None:
+    """Refresh the lock's mtime so it doesn't look stale during a long drain."""
+    path = os.path.join(spool_dir, _OFFLOAD_LOCK)
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def release_offload_lock(spool_dir: str) -> None:
+    """Remove the offload lock (best-effort) when the offload exits."""
+    path = os.path.join(spool_dir, _OFFLOAD_LOCK)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)            # POSIX: signal 0 just checks existence
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                # exists but owned by another user
+    except OSError:
+        # Windows has no os.kill(0) semantics; fall back to a tasklist check.
+        return _pid_alive_windows(pid)
+    return True
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True               # can't tell -> assume alive (don't double-launch)
+    return str(pid) in out.stdout
+
+
+def _atomic_pickle_bytes(path: str, data: bytes) -> None:
+    """Atomically write raw bytes (used for the small PID lock file)."""
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def rotate_spool(spool_dir: str) -> Optional[str]:
+    """Move an existing spool subfolder aside so a restart starts from empty.
+
+    On *restart* (redo the same-named run from shot 1) the old subfolder still
+    holds the aborted run's ``shot_*``/``RUN_COMPLETE``/``meta_run.pkl``; left in
+    place, the next offload would drain those stale shots into the fresh HDF5.
+    Renaming to ``<spool_dir>.superseded-<ts>`` preserves the data for inspection
+    while guaranteeing the caller can recreate a clean ``spool_dir``. Returns the
+    rotated path, or ``None`` if there was nothing to rotate.
+    """
+    if not os.path.isdir(spool_dir):
+        return None
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    superseded = f"{spool_dir}.superseded-{ts}"
+    os.replace(spool_dir, superseded)
+    return superseded
+
+
+def prune_superseded(spool_root: str, keep_days: float = 7.0) -> List[str]:
+    """Delete ``*.superseded-*`` folders older than ``keep_days`` in ``spool_root``.
+
+    Restart rotates old spools aside rather than deleting them (so data survives
+    for inspection); this housekeeping pass, run after an offload completes,
+    removes the stale rotations once they're past the retention window. Returns
+    the paths removed. Best-effort: a folder that can't be removed is skipped.
+    """
+    removed = []
+    cutoff = time.time() - keep_days * 86400
+    for path in glob.glob(os.path.join(spool_root, "*.superseded-*")):
+        try:
+            if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path)
+                removed.append(path)
+        except OSError:
+            continue
+    return removed
 
 
 # --------------------------------------------------------------------------- #
