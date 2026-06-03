@@ -517,6 +517,9 @@ def rotate_spool(spool_dir: str) -> Optional[str]:
     Renaming to ``<spool_dir>.superseded-<ts>`` preserves the data for inspection
     while guaranteeing the caller can recreate a clean ``spool_dir``. Returns the
     rotated path, or ``None`` if there was nothing to rotate.
+
+    This requires the prior acquire/offload processes to have released their
+    handles (log files, HDF5) on exit; they close them in their teardown paths.
     """
     if not os.path.isdir(spool_dir):
         return None

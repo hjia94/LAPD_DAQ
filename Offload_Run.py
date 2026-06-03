@@ -30,6 +30,7 @@ from acquisition.config import (
     get_storage_paths,
     load_experiment_config,
 )
+from acquisition.logging_utils import close_log_file_handlers
 from offload_runner import run_offload
 from spooling import spool_format
 
@@ -120,6 +121,11 @@ def main():
             print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
         else:
             print(f'File "{hdf5_path}" was not created')
+        # Close the log file BEFORE pausing: this process sits at the pause prompt
+        # until the user closes the window, so an open offload.log handle would
+        # otherwise block a later "restart" from rotating/removing the spool
+        # folder on Windows (the dir rename fails while a child file is open).
+        close_log_file_handlers(off_logger)
         _pause_before_exit()
 
 #===============================================================================================================================================

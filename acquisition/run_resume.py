@@ -164,12 +164,30 @@ def apply_action(action: str, run_paths, state: RunState, *,
         return StartPlan(spool_dir=spool_dir, start_shot=max(start_shot, 1))
 
     if action == RESTART:
+        # An offload that is still actively draining holds the HDF5 (mid-write)
+        # open; on Windows that blocks the delete/rotate below. A finished offload
+        # closes its handles (HDF5 per-shot, log on exit) even while paused, so
+        # only a live one is a problem -- warn so the operator closes it first.
+        if spool_dir and spool_format.offload_lock_is_live(spool_dir):
+            print("WARNING: an offload process is still draining this spool "
+                  f"({spool_dir}). Close its console window before restarting, "
+                  "or the old HDF5/spool will be locked.")
         if os.path.exists(run_paths.hdf5_path):
-            os.remove(run_paths.hdf5_path)
+            try:
+                os.remove(run_paths.hdf5_path)
+            except OSError as e:
+                raise RuntimeError(
+                    f"Could not delete {run_paths.hdf5_path}: {e}. Close any "
+                    "offload window still writing to it, then restart.") from e
         if spool_dir:
-            superseded = spool_format.rotate_spool(spool_dir)
-            if superseded:
-                print(f"Rotated old spool aside -> {superseded}")
+            try:
+                rotated = spool_format.rotate_spool(spool_dir)
+            except OSError as e:
+                raise RuntimeError(
+                    f"Could not rotate the old spool {spool_dir}: {e}. Close any "
+                    "offload window still attached to it, then restart.") from e
+            if rotated:
+                print(f"Rotated old spool aside -> {rotated}")
         return StartPlan(spool_dir=spool_dir, start_shot=1)
 
     raise ValueError(f"apply_action: unhandled action {action!r}")

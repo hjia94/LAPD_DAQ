@@ -29,6 +29,7 @@ from acquisition.config import (
     get_storage_paths,
     load_experiment_config,
 )
+from acquisition.logging_utils import close_log_file_handlers
 from acquisition.run_paths import resolve_run_paths
 from acquisition.run_resume import (
     QUIT,
@@ -161,6 +162,9 @@ def main():
             print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
         else:
             print(f'File "{hdf5_path}" was not created')
+
+        # Release motor.log so a later restart isn't blocked by an open handle.
+        close_log_file_handlers(logging.getLogger())
 
 
 #===============================================================================================================================================
