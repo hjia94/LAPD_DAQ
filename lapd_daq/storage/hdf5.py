@@ -142,6 +142,10 @@ class HDF5RunWriter:
 
     def finalize(self, results: list[ShotResult]) -> None:
         with h5py.File(self.path, "a") as h5:
+            # Overwrite the description from description.txt now that all shots are
+            # written, so edits made before/during the run are captured (the value
+            # written at initialize() was the launch-time content).
+            h5.attrs["description"] = self.config.experiment_description
             run_group = h5.require_group("Control").require_group("Run")
             dtype = np.dtype([
                 ("shot_num", ">u4"),

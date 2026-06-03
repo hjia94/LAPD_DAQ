@@ -12,6 +12,8 @@ from typing import Dict
 
 from tqdm import tqdm
 
+from . import config as config_module
+from . import hdf5_writer
 from .bmotion_config import resolve_bmotion_selection
 from .config import load_experiment_config
 from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
@@ -764,7 +766,8 @@ def _prepare_bmotion_run(toml_path, config_path):
     }
 
 
-def run_acquisition_bmotion(hdf5_path, toml_path, config_path, start_shot=1):
+def run_acquisition_bmotion(hdf5_path, toml_path, config_path, start_shot=1,
+                            description_path=None):
     print('Starting acquisition at', time.ctime())
 
     ctx = _prepare_bmotion_run(toml_path, config_path)
@@ -776,9 +779,13 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path, start_shot=1):
     execution_order = ctx["execution_order"]
     total_shots = ctx["total_shots"]
 
+    if description_path is None:
+        description_path = config_module.resolve_description_path_from_config(config_path)
+
     resuming = start_shot > 1
 
-    with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
+    with MultiScopeAcquisition(hdf5_path, config, raw_config_text,
+                               description_path=description_path) as msa:
         try:
             if not resuming:
                 print("Initializing HDF5 file...", end='')
@@ -819,10 +826,18 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path, start_shot=1):
             raise RuntimeError() from err
         finally:
             run_manager.terminate()
+            # Overwrite the description from description.txt now that all shots
+            # are written, so edits made before/during the run are captured.
+            # Guarded so a description read can never abort an otherwise-good run.
+            try:
+                hdf5_writer.write_description(
+                    hdf5_path, msa.get_experiment_description())
+            except Exception as e:
+                print(f"Warning: could not write final description: {e}")
 
 
 def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
-                                    start_shot=1):
+                                    start_shot=1, description_path=None):
     """Parallel-mode acquisition: build the HDF5 skeleton, spool each shot.
 
     The acquire process owns the *initial* HDF5 file: it creates ``hdf5_path``
@@ -858,9 +873,13 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
     execution_order = ctx["execution_order"]
     total_shots = ctx["total_shots"]
 
+    if description_path is None:
+        description_path = config_module.resolve_description_path_from_config(config_path)
+
     last_shot_num = start_shot - 1 if resuming else 0
     run_state = {"terminated_early": False, "abort_reason": None}
-    with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
+    with MultiScopeAcquisition(hdf5_path, config, raw_config_text,
+                               description_path=description_path) as msa:
         try:
             if not resuming:
                 print("Initializing HDF5 file...", end='')
@@ -893,6 +912,7 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                     "hdf5_path": hdf5_path,
                     "config_scope_names": list(active_scopes.keys()),
                     "channel_descriptions": spool_adapter.channel_descriptions(msa),
+                    "description_path": description_path,
                     "total_shots": total_shots,
                     "resume_from_shot": 1,
                 })

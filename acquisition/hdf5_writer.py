@@ -133,6 +133,18 @@ def _serialize_config(raw_config_text, config):
         return f"Error saving configuration: {str(e)}"
 
 
+def write_description(save_path, description):
+    """(Over)write the top-level experiment ``description`` attribute.
+
+    Idempotent: the description is written once at run start (whatever
+    ``description.txt`` holds then) and overwritten at run finalize (re-read from
+    ``description.txt`` after all shots are written), so the on-disk value
+    reflects the file as of run completion.
+    """
+    with h5py.File(save_path, 'a') as f:
+        f.attrs['description'] = description
+
+
 def write_scope_metadata(save_path, scope_name, description, ip_address, scope_type):
     """Write per-scope metadata attributes onto the scope group."""
     with h5py.File(save_path, 'a') as f:

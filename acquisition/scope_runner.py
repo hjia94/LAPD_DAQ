@@ -27,6 +27,7 @@ from tqdm import tqdm
 from motion import PositionManager
 
 from . import hdf5_writer
+from . import config as config_module
 from .config import load_experiment_config
 
 
@@ -139,12 +140,17 @@ def acquire_from_scope_sequence(scope, scope_name):
 class MultiScopeAcquisition:
     """Owns scope connections, performs acquisition, and forwards to hdf5_writer."""
 
-    def __init__(self, save_path, config, raw_config_text=""):
+    def __init__(self, save_path, config, raw_config_text="", description_path=None):
         """
         Args:
             save_path: path to save HDF5 file
             config: ConfigParser object with experiment configuration
             raw_config_text: Raw text content of the configuration file (optional)
+            description_path: full path to the run's ``description.txt`` (optional).
+                The free-text experiment description is read from this file rather
+                than from ``[experiment] description`` in the config, so the user
+                can edit it before or during a run. ``None`` falls back to the
+                placeholder description.
         """
         self.save_path = save_path
         self.scopes = {}
@@ -152,6 +158,7 @@ class MultiScopeAcquisition:
         self.time_arrays = {}
         self.config = config
         self.raw_config_text = raw_config_text
+        self.description_path = description_path
 
         # Parallelism flags (all default true). Each gates an independent layer
         # so it can be A/B-tested or disabled alone:
@@ -202,8 +209,15 @@ class MultiScopeAcquisition:
                                fallback=f'Channel {channel_name} - No description available')
 
     def get_experiment_description(self):
-        return self.config.get('experiment', 'description',
-                               fallback='No experiment description provided')
+        """Return the run description, read from ``description.txt``.
+
+        The description now lives in its own file (``description_path``) rather
+        than in the config. If no path was supplied, fall back to the placeholder
+        so the HDF5 ``description`` attribute is always present.
+        """
+        if not self.description_path:
+            return config_module.DESCRIPTION_PLACEHOLDER
+        return config_module.read_description_file(self.description_path)
 
     # -- HDF5 lifecycle (delegates to hdf5_writer) ---------------------------
     def initialize_hdf5_base(self):
@@ -553,7 +567,11 @@ def run_acquisition(save_path, config_path):
     else:
         pos_manager = None
 
-    with MultiScopeAcquisition(save_path, config, raw_config_text) as msa:
+    # description.txt lives next to the config (both in base_path).
+    description_path = config_module.resolve_description_path_from_config(config_path)
+
+    with MultiScopeAcquisition(save_path, config, raw_config_text,
+                               description_path=description_path) as msa:
         try:
             print("Initializing HDF5 file...", end='')
             msa.initialize_hdf5_base()
@@ -624,6 +642,14 @@ def run_acquisition(save_path, config_path):
 
         finally:
             hdf5_writer.record_shot_count(save_path, msa.scope_ips, shot_num)
+            # Overwrite the description from description.txt now that the run is
+            # over, so edits made before/during the run are captured. Guarded so
+            # a description read can never abort an otherwise-good run.
+            try:
+                hdf5_writer.write_description(
+                    save_path, msa.get_experiment_description())
+            except Exception as e:
+                print(f"Warning: could not write final description: {e}")
 
 
 def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
@@ -657,10 +683,14 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
     else:
         pos_manager = None
 
+    # description.txt lives next to the config (both in base_path).
+    description_path = config_module.resolve_description_path_from_config(config_path)
+
     # Defined before the try so the finally can always report a correct count,
     # even if setup fails before the shot loop (0 shots emitted).
     shot_num = 0
-    with MultiScopeAcquisition(hdf5_path, config, raw_config_text) as msa:
+    with MultiScopeAcquisition(hdf5_path, config, raw_config_text,
+                               description_path=description_path) as msa:
         try:
             print("Initializing HDF5 file...", end='')
             msa.initialize_hdf5_base()
@@ -689,6 +719,7 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                 "hdf5_path": hdf5_path,
                 "config_scope_names": list(active_scopes.keys()),
                 "channel_descriptions": grid_spool_adapter.channel_descriptions(msa),
+                "description_path": description_path,
                 "nz": pos_manager.nz if pos_manager is not None else None,
             })
             print(f"Wrote run metadata to spool: {spool_dir}")

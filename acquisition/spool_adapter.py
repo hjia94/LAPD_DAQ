@@ -21,6 +21,7 @@ import time
 import h5py
 import numpy as np
 
+from . import config as config_module
 from . import hdf5_writer
 
 WRITER_TAG = "acquisition"
@@ -108,10 +109,23 @@ def write_shot(hdf5_path, payload, meta):
 
 
 def finalize(hdf5_path, meta, final_shot_num):
-    """Write the per-scope shot_count attribute (run finalization)."""
+    """Write the per-scope shot_count attribute (run finalization).
+
+    Also overwrite the experiment description from ``description.txt`` now that
+    all shots are written: this is where the spooled run actually finishes, so a
+    description edited before/during the run (and up until the offload drains) is
+    captured here. Guarded so a description read can never fail the finalize.
+    """
     hdf5_writer.record_shot_count(
         hdf5_path, meta["config_scope_names"], final_shot_num
     )
+    description_path = meta.get("description_path")
+    if description_path:
+        try:
+            hdf5_writer.write_description(
+                hdf5_path, config_module.read_description_file(description_path))
+        except Exception as e:
+            print(f"Warning: could not write final description: {e}")
 
 
 def mark_shot_failed(hdf5_path, meta, shot_num, reason):
