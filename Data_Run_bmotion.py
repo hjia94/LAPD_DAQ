@@ -48,6 +48,10 @@ experiment name after the config is read.
 base_path = r"E:\Shadow data\Pat"
 config_path = os.path.join(base_path, 'experiment_config.ini')
 toml_path = os.path.join(base_path, 'bmotion_config.toml')
+# Free-text run description lives in its own file (not in experiment_config.ini),
+# so it can be written before or during the run. It is written into the HDF5
+# `description` attribute once at run start and overwritten at run end.
+description_path = os.path.join(base_path, 'description.txt')
 
 #===============================================================================================================================================
 # Partial-run detection and user prompt helpers
@@ -233,10 +237,12 @@ def main():
     try:
         if spooled:
             run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
-                                            start_shot=start_shot)
+                                            start_shot=start_shot,
+                                            description_path=description_path)
         else:
             run_acquisition_bmotion(hdf5_path, toml_path, config_path,
-                                    start_shot=start_shot)
+                                    start_shot=start_shot,
+                                    description_path=description_path)
 
     except KeyboardInterrupt:
         print('\n______Halted due to Ctrl-C______', '  at', time.ctime())

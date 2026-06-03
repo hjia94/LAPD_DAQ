@@ -22,9 +22,6 @@ xmax = 1
 ymin = -2
 ymax = 2
 
-[experiment]
-description = Mock LAPD run
-
 [scopes]
 MockScope = Fake LeCroy scope
 
@@ -41,3 +38,7 @@ CAMERA_CONFIG_TEXT = CONFIG_TEXT + """
 exposure_us = 40
 fps = 1000
 """
+
+# The run description now lives in description.txt next to the config, not in the
+# [experiment] section. Tests that need a description write this beside the config.
+DESCRIPTION_TEXT = "Mock LAPD run"

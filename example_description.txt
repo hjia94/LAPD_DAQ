@@ -1,0 +1,19 @@
+LAPD_DAQ hardware diagnostic template
+
+Purpose:
+- Run one real-scope Data_Run-style check without motor movement.
+- Run one real-motor Data_Run-style check with fake delayed scope data.
+
+Edit this description for the actual experiment before production runs.
+
+------------------------------------------------------------------------------
+This is the free-text run description. Copy this file to `description.txt` in
+the same folder as experiment_config.ini (your base_path) and edit it for your
+run.
+
+You can write or edit this file BEFORE or DURING the data run. Its contents are
+written into the HDF5 file's top-level `description` attribute once when the run
+starts, and OVERWRITTEN again when the run finishes (after all shots are
+written) -- so the final stored description reflects this file as of run
+completion. There is no formatting requirement: write as much free text as you
+like, over as many lines as you like.

@@ -216,7 +216,9 @@ Use this on the hardware PC after the mock dry run succeeds.
    num_run_repeats = 1
 
    [experiment]
-   description = Describe plasma conditions, probe setup, timing, and operator notes.
+   name = my_experiment
+   # The run description is no longer set here. Put it in a separate
+   # description.txt next to this config (see description.txt below).
 
    [scopes]
    BdotScope = LeCroy HDO4104 - 4GHz 20GS/s
@@ -228,6 +230,12 @@ Use this on the hardware PC after the mock dry run succeeds.
    [scope_ips]
    BdotScope = 192.168.7.63
    ```
+
+   Optionally create a `description.txt` next to the config with the free-text
+   run description (plasma conditions, probe setup, timing, operator notes). It
+   is written into the HDF5 `description` attribute at run start and overwritten
+   at run end, so you can write or edit it before or during the run. See
+   `example_description.txt`.
 
 4. For stationary acquisition, leave `[position]` empty or remove it:
 
@@ -394,7 +402,10 @@ Python config objects.
 Important sections:
 
 - `[nshots]`: `num_duplicate_shots`, `num_run_repeats`
-- `[experiment]`: human-readable run description stored in HDF5
+- `[experiment]`: experiment `name` (used to build the HDF5 filename). The
+  human-readable run description is no longer here -- it lives in a separate
+  `description.txt` next to the config and is written into the HDF5 `description`
+  attribute at run start, then overwritten at run end.
 - `[scopes]`: scope display names and descriptions
 - `[channels]`: channel descriptions using `ScopeName_C1` keys
 - `[scope_ips]`: direct scope IPs

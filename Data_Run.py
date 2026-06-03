@@ -4,7 +4,8 @@ Multi-scope data acquisition program with probe movement support.
 See multi_scope_acquisition.py for more details.
 
 Configuration and metadata:
-- Edit experiment_config.ini to set experiment description, scope/channel descriptions, and probe movement/position parameters.
+- Edit experiment_config.ini to set scope/channel descriptions and probe movement/position parameters.
+- Put the free-text run description in description.txt next to the config (written into HDF5 at run start, overwritten at run end).
 - Use this script to set file paths, scope and motor IP addresses, and other run-specific parameters.
 
 Created on Feb.14.2024

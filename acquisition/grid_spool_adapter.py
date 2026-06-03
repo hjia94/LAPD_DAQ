@@ -49,10 +49,13 @@ def write_shot(hdf5_path, payload, meta):
 
 
 def finalize(hdf5_path, meta, final_shot_num):
-    """Write the per-scope shot_count attribute (run finalization)."""
-    hdf5_writer.record_shot_count(
-        hdf5_path, meta["config_scope_names"], final_shot_num
-    )
+    """Write the per-scope shot_count attribute and overwrite the description.
+
+    Delegates to :func:`acquisition.spool_adapter.finalize`, which also re-reads
+    ``description.txt`` (via ``meta["description_path"]``) now that all shots are
+    written, so the description edited before/during the run is captured.
+    """
+    spool_adapter.finalize(hdf5_path, meta, final_shot_num)
 
 
 def mark_shot_failed(hdf5_path, meta, shot_num, reason):
