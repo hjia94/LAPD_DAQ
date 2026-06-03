@@ -7,6 +7,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+DESCRIPTION_FILENAME = "description.txt"
+
+# Written into the HDF5 ``description`` attribute when no usable description.txt
+# is found, so a downstream reader can tell the prose was never filled in.
+DESCRIPTION_PLACEHOLDER = (
+    "No experiment description provided "
+    "(description.txt not found next to the config)"
+)
+
+
+def read_description_file(description_path: str | Path | None) -> str:
+    """Read the free-text run description from ``description.txt``.
+
+    The description lives in its own file next to the config (it is no longer a
+    config value). A missing/empty/unreadable file never raises; it returns
+    :data:`DESCRIPTION_PLACEHOLDER` instead, so a description problem can never
+    abort an acquisition.
+    """
+    if not description_path:
+        return DESCRIPTION_PLACEHOLDER
+    try:
+        text = Path(description_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return DESCRIPTION_PLACEHOLDER
+    except Exception:
+        return DESCRIPTION_PLACEHOLDER
+    return text if text.strip() else DESCRIPTION_PLACEHOLDER
+
+
 @dataclass(frozen=True)
 class ScopeConfig:
     name: str
@@ -45,7 +74,7 @@ class RunConfig:
     config_path: Path
     raw_text: str
     mode: str
-    experiment_description: str
+    description_path: Path
     scopes: list[ScopeConfig]
     channel_descriptions: dict[str, str]
     num_duplicate_shots: int = 1
@@ -54,6 +83,16 @@ class RunConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     output_path: Path | None = None
+
+    @property
+    def experiment_description(self) -> str:
+        """Current run description, read live from ``description.txt``.
+
+        Read on access (not cached) so the value written at run start and the
+        value overwritten at run finalize each reflect the file's contents at
+        that moment.
+        """
+        return read_description_file(self.description_path)
 
 
 def load_run_config(config_path: str | Path, mode: str = "stationary",
@@ -104,9 +143,9 @@ def load_run_config(config_path: str | Path, mode: str = "stationary",
         config_path=path,
         raw_text=raw_text,
         mode=mode,
-        experiment_description=parser.get(
-            "experiment", "description", fallback="No experiment description provided"
-        ),
+        # The run description lives in description.txt next to the config, not in
+        # the [experiment] section. Read live at run start/finalize.
+        description_path=(path.parent / DESCRIPTION_FILENAME).resolve(),
         scopes=scopes,
         channel_descriptions=_items(parser, "channels"),
         num_duplicate_shots=parser.getint("nshots", "num_duplicate_shots", fallback=1),

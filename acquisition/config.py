@@ -6,6 +6,60 @@ the resulting HDF5 file.
 """
 
 import configparser
+import os
+
+
+DESCRIPTION_FILENAME = "description.txt"
+
+# Written into the HDF5 ``description`` attribute when no usable description.txt
+# is found. Kept as a recognizable sentinel so a downstream reader (or the user)
+# can tell the prose was never filled in, rather than silently empty.
+DESCRIPTION_PLACEHOLDER = (
+    "No experiment description provided "
+    "(description.txt not found in base_path)"
+)
+
+
+def read_description_file(description_path):
+    """Read the free-text experiment description from ``description_path``.
+
+    ``description_path`` is the full path to the ``description.txt`` file (see
+    :func:`resolve_description_path`). Mirrors the tolerant style of
+    :func:`load_experiment_config`: a missing/empty/unreadable file never raises;
+    it returns :data:`DESCRIPTION_PLACEHOLDER` and prints a warning instead, so a
+    description problem can never abort an otherwise-good acquisition.
+    """
+    try:
+        with open(description_path, 'r') as f:
+            text = f.read()
+    except FileNotFoundError:
+        print(f"Warning: description file not found: {description_path}. "
+              "Using placeholder description.")
+        return DESCRIPTION_PLACEHOLDER
+    except Exception as e:
+        print(f"Warning: could not read description file {description_path}: {e}. "
+              "Using placeholder description.")
+        return DESCRIPTION_PLACEHOLDER
+
+    if not text.strip():
+        return DESCRIPTION_PLACEHOLDER
+    return text
+
+
+def resolve_description_path(base_path):
+    """Return the full path to ``description.txt`` inside ``base_path``."""
+    return os.path.abspath(os.path.join(base_path, DESCRIPTION_FILENAME))
+
+
+def resolve_description_path_from_config(config_path):
+    """Return the ``description.txt`` path that sits next to ``config_path``.
+
+    ``description.txt`` lives in the run-inputs directory alongside
+    ``experiment_config.ini``; the acquisition entry points derive it from the
+    config path so the spooled offload (a separate process) and the acquire
+    process agree on one absolute path.
+    """
+    return resolve_description_path(os.path.dirname(os.path.abspath(config_path)))
 
 
 def load_experiment_config(config_path='experiment_config.ini'):
@@ -40,9 +94,9 @@ def load_experiment_config(config_path='experiment_config.ini'):
     if 'channels' not in config:
         config.add_section('channels')
 
-    # Set default values if not present
-    if not config.get('experiment', 'description', fallback=None):
-        config.set('experiment', 'description', 'No experiment description provided')
+    # NOTE: the run description is NOT read from the config any more. It lives in
+    # description.txt (see read_description_file / resolve_description_path); any
+    # [experiment] description key in the config is ignored.
 
     return config, raw_config_text
 

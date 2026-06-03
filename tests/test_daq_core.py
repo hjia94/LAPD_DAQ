@@ -32,7 +32,7 @@ from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _lapd_daq_fixtures import CAMERA_CONFIG_TEXT, CONFIG_TEXT
+from _lapd_daq_fixtures import CAMERA_CONFIG_TEXT, CONFIG_TEXT, DESCRIPTION_TEXT
 
 
 TRC_FIXTURE_DIR = Path(r"D:\data\raw data")
@@ -48,12 +48,14 @@ class LoadRunConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "experiment_config.txt"
             config_path.write_text(CONFIG_TEXT, encoding="utf-8")
+            (Path(tmp) / "description.txt").write_text(DESCRIPTION_TEXT, encoding="utf-8")
 
             config = load_run_config(config_path, mode="grid")
 
             self.assertEqual(config.num_duplicate_shots, 2)
             self.assertEqual(config.motion.kind, "xy_grid")
             self.assertEqual(config.scopes[0].name, "mockscope")
+            # Description now read live from description.txt next to the config.
             self.assertIn("Mock LAPD run", config.experiment_description)
 
     def test_camera_config_does_not_enable_camera_outside_camera_modes(self):
@@ -222,9 +224,6 @@ class HDF5ReaderCompatibilityTests(unittest.TestCase):
 [nshots]
 num_duplicate_shots = 2
 num_run_repeats = 1
-
-[experiment]
-description = TRC replay compatibility test
 
 [scopes]
 mockscope = TRC replay scope
