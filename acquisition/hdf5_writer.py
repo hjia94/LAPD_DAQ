@@ -174,7 +174,8 @@ def write_time_array(save_path, scope_name, time_array, is_sequence):
         time_ds.attrs['dtype'] = str(time_array.dtype)
 
 
-def write_shot_data(save_path, all_data, shot_num, channel_descriptions):
+def write_shot_data(save_path, all_data, shot_num, channel_descriptions,
+                    overwrite=False):
     """Write shot_N for every scope (raw int16, blosc2/lzf-compressed, fletcher32 on).
 
     Args:
@@ -182,13 +183,19 @@ def write_shot_data(save_path, all_data, shot_num, channel_descriptions):
         all_data: {scope_name: (traces, data, headers)} as produced by acquire_shot
         shot_num: 1-based shot number
         channel_descriptions: {(scope_name, trace): description_string}
+        overwrite: when True, replace an existing shot_N group instead of raising.
+            Used on resume, where the probe's last position is re-taken and its
+            shots must be overwritten with fresh data (numbering stays
+            contiguous). When False, an existing shot is a programming error.
     """
     with h5py.File(save_path, 'a', libver='latest', rdcc_nbytes=0) as f:
         for scope_name, (traces, data, headers) in all_data.items():
             scope_group = f[scope_name]
             shot_name = f'shot_{shot_num}'
             if shot_name in scope_group:
-                raise RuntimeError(f"Shot {shot_num} already exists for scope {scope_name}.")
+                if not overwrite:
+                    raise RuntimeError(f"Shot {shot_num} already exists for scope {scope_name}.")
+                del scope_group[shot_name]
             shot_group = scope_group.create_group(shot_name)
             shot_group.attrs['acquisition_time'] = time.ctime()
 

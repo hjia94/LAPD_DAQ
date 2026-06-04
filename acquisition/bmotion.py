@@ -351,15 +351,21 @@ class _Hdf5ShotSink:
     """Per-shot sink that writes straight into the final HDF5 file (legacy,
     in-process behaviour). Used when no parallel spool is configured."""
 
-    def __init__(self, msa, active_scopes, hdf5_path, run_manager):
+    def __init__(self, msa, active_scopes, hdf5_path, run_manager,
+                 resume_from_shot=1):
         self.msa = msa
         self.active_scopes = active_scopes
         self.hdf5_path = hdf5_path
         self.run_manager = run_manager
+        # Shots >= resume_from_shot (when resuming) overwrite the stale groups
+        # left by the partial run; 1 means a fresh run (never overwrite).
+        self.resume_from_shot = resume_from_shot
 
     def take_shot(self, shot_num, record_keys):
         # arm + acquire + write scope data to HDF5 (as single_shot_acquisition).
-        single_shot_acquisition(self.msa, self.active_scopes, shot_num, verbose=False)
+        overwrite = self.resume_from_shot > 1 and shot_num >= self.resume_from_shot
+        single_shot_acquisition(self.msa, self.active_scopes, shot_num,
+                                verbose=False, overwrite=overwrite)
         record_bmotion_positions(
             hdf5_path=self.hdf5_path, shotnum=shot_num,
             rm=self.run_manager, mg_keys=record_keys,
@@ -802,12 +808,18 @@ def run_acquisition_bmotion(hdf5_path, toml_path, config_path, start_shot=1,
                     execution_order=execution_order,
                 )
 
+            # Explicit sink carries the resume boundary so a re-taken position
+            # overwrites its stale shots (resume_from_shot=1 on a fresh run).
+            sink = _Hdf5ShotSink(msa, active_scopes, hdf5_path, run_manager,
+                                 resume_from_shot=start_shot)
             if execution_order == "sequential":
                 _run_sequential(msa, active_scopes, hdf5_path, run_manager,
-                                ml_order, nshots, total_shots, start_shot=start_shot)
+                                ml_order, nshots, total_shots, sink=sink,
+                                start_shot=start_shot)
             else:
                 _run_interleaved(msa, active_scopes, hdf5_path, run_manager,
-                                 ml_order, nshots, total_shots, start_shot=start_shot)
+                                 ml_order, nshots, total_shots, sink=sink,
+                                 start_shot=start_shot)
 
         except KeyboardInterrupt as err:
             print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
@@ -893,7 +905,8 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                 # Slim run-info: the offload only needs which adapter to use, the
                 # exact file to fill (computed once by the caller), and the channel
                 # descriptions used to label each shot's datasets. Everything else
-                # is already written into the HDF5 above.
+                # is already written into the HDF5 above. resume_from_shot=1 means
+                # "no overwrite" for the offload.
                 spool_format.write_run_metadata(spool_dir, {
                     "writer": spool_adapter.WRITER_TAG,
                     "hdf5_path": hdf5_path,
@@ -901,10 +914,21 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                     "channel_descriptions": spool_adapter.channel_descriptions(msa),
                     "description_path": description_path,
                     "total_shots": total_shots,
+                    "resume_from_shot": 1,
                 })
                 print(f"Wrote run metadata to spool: {spool_dir}")
             else:
-                print("Resuming: spool run metadata already present, not overwriting")
+                # Record where this resume re-enters so the offload overwrites the
+                # re-taken position's stale shots instead of skipping them, and
+                # drop a provisional RUN_COMPLETE: if this resumed run dies during
+                # setup, the offload still has a sentinel to exit on rather than
+                # waiting forever (it is overwritten with the real one at the end).
+                spool_format.update_run_metadata(
+                    spool_dir, {"resume_from_shot": start_shot})
+                spool_format.write_run_complete(
+                    spool_dir, start_shot - 1, terminated_early=True,
+                    abort_reason="resume in progress (provisional)")
+                print(f"Resuming: overwrite boundary set to shot {start_shot}")
 
             from .config import get_backpressure_limits, get_motion_recovery_opts
             max_pending, min_free_gb = get_backpressure_limits(config)

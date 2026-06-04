@@ -246,14 +246,19 @@ class MultiScopeAcquisition:
         self.time_arrays[scope_name] = time_array
         hdf5_writer.write_time_array(self.save_path, scope_name, time_array, is_sequence)
 
-    def update_scope_hdf5(self, all_data, shot_num):
-        """Append a shot of scope data to the HDF5 file (raw int16)."""
+    def update_scope_hdf5(self, all_data, shot_num, overwrite=False):
+        """Append a shot of scope data to the HDF5 file (raw int16).
+
+        ``overwrite`` replaces an existing shot group; set on a non-spooled resume
+        that re-takes the probe's last position over its stale shots.
+        """
         descriptions = {
             (scope_name, tr): self.get_channel_description(f"{scope_name}_{tr}")
             for scope_name, (traces, _data, _headers) in all_data.items()
             for tr in traces
         }
-        hdf5_writer.write_shot_data(self.save_path, all_data, shot_num, descriptions)
+        hdf5_writer.write_shot_data(self.save_path, all_data, shot_num, descriptions,
+                                    overwrite=overwrite)
 
     # -- scope lifecycle -----------------------------------------------------
     def initialize_scopes(self):
@@ -435,14 +440,15 @@ def _lecroy_scope_class():
 # =============================================================================
 # Per-shot orchestration (used by run_acquisition and external callers)
 # =============================================================================
-def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True):
+def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True,
+                            overwrite=False):
     msa.arm_scopes_for_trigger(active_scopes, verbose=verbose)
     all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=verbose)
 
     if all_data:
         if verbose:
             print('Updating scope data to HDF5...')
-        msa.update_scope_hdf5(all_data, shot_num)
+        msa.update_scope_hdf5(all_data, shot_num, overwrite=overwrite)
     else:
         tqdm.write(f"Warning: No valid data acquired at shot {shot_num}")
 

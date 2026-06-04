@@ -100,7 +100,11 @@ def write_shot(hdf5_path, payload, meta):
 
     all_data = _payload_to_all_data(payload)
     descriptions = _descriptions_for(all_data, meta)
-    hdf5_writer.write_shot_data(hdf5_path, all_data, payload.shot_num, descriptions)
+    # On resume the probe's last position is re-taken; those shots overwrite the
+    # stale groups left by the partial run (resume_from_shot marks the boundary).
+    overwrite = payload.shot_num >= meta.get("resume_from_shot", 1) > 1
+    hdf5_writer.write_shot_data(hdf5_path, all_data, payload.shot_num, descriptions,
+                                overwrite=overwrite)
     _write_positions(hdf5_path, payload, meta)
 
 
