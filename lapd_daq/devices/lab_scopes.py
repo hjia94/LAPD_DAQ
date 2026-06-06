@@ -41,7 +41,7 @@ class LabScopesLeCroyScopeAdapter:
         # arm_single clears the sweep counter then sets SINGLE, returning the
         # reference channel polled for the fresh-sweep completion check. The
         # channel is cached so later shots skip arm_single's channel discovery
-        # (a per-shot scan of C1..C8 :TRACE? queries).
+        # (a per-shot scan of C1..C4 :TRACE? queries).
         self._arm_channel = self._require_scope().arm_single(channel=self._arm_channel)
 
     def acquire(self, shot_num: int) -> ScopeShot:

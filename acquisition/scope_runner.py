@@ -444,7 +444,7 @@ class MultiScopeAcquisition:
         completion check reads an unambiguous fresh-sweep transition on the
         returned channel. The reference channel is cached after the first shot
         and passed back in, so later shots skip arm_single's channel discovery
-        (a per-shot scan of C1..C8 :TRACE? queries).
+        (a per-shot scan of C1..C4 :TRACE? queries).
         """
         cached = self._arm_channels.get(name)
         self._arm_channels[name] = self.scopes[name].arm_single(channel=cached)
