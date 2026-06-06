@@ -52,8 +52,32 @@ class FakeScope:
     def displayed_traces(self):
         return list(self._traces)
 
+    def displayed_channels(self):
+        # Only the Cn traces are real acquisition channels.
+        return tuple(t for t in self._traces if t.startswith("C"))
+
+    def validate_channel(self, ch):
+        return ch
+
+    def clear_sweeps(self):
+        pass
+
+    def sweeps_per_acq(self, channel):
+        # A fresh acquisition has always completed in the fake (counter >= 1).
+        return 1
+
+    def wait_for_single_complete(self, channel, timeout=100, poll=0.02):
+        return self.sweeps_per_acq(channel) >= 1
+
+    def arm_single(self, channel=None):
+        # Mirrors LeCroyScope.arm_single: clear + SINGLE, return ref channel.
+        self.clear_sweeps()
+        self.set_trigger_mode("SINGLE")
+        chans = self.displayed_channels()
+        return channel if channel is not None else (chans[0] if chans else None)
+
     def set_trigger_mode(self, mode):
-        # Empty-string query path used by stop_triggering: report STOP at once.
+        # Empty-string query path: report STOP at once.
         if mode == "":
             return "STOP"
         # 'SINGLE' arm path.
@@ -88,6 +112,7 @@ def _make_msa(scopes, parallel_read=True, parallel_arm=True):
     msa.scopes = dict(scopes)
     msa.figures = {}
     msa.time_arrays = {}
+    msa._arm_channels = {}
     msa.scope_ips = {name: "0.0.0.0" for name in scopes}
     msa.parallel_scope_read = parallel_read
     msa.parallel_scope_arm = parallel_arm
@@ -182,17 +207,33 @@ class DispatchRoutingTest(unittest.TestCase):
 
 
 class ParallelArmTest(unittest.TestCase):
-    def test_arms_overlap(self):
-        # Two scopes, each arm takes 0.2s. Parallel arm should be ~0.2s not ~0.4s.
+    def test_slaves_overlap_master_armed_last(self):
+        # Master is armed LAST and serially; the slaves arm concurrently. With 3
+        # scopes each taking 0.2s, parallel slaves (~0.2s) + master (~0.2s) is
+        # ~0.4s, well under the all-serial 0.6s.
         scopes = {
             "A": FakeScope(["C1"], arm_seconds=0.2),
             "B": FakeScope(["C2"], arm_seconds=0.2),
+            "C": FakeScope(["C3"], arm_seconds=0.2),  # master (last in scope_ips)
         }
         msa = _make_msa(scopes, parallel_arm=True)
         t0 = time.perf_counter()
-        msa.arm_scopes_for_trigger(scopes.keys(), verbose=False)
+        msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
         elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 0.35, f"arms did not overlap (took {elapsed:.3f}s)")
+        self.assertLess(elapsed, 0.55, f"slaves did not overlap (took {elapsed:.3f}s)")
+
+    def test_master_is_last_in_scope_ips(self):
+        # The last scope listed in scope_ips is the master regardless of the
+        # active_scopes iteration order.
+        scopes = {
+            "A": FakeScope(["C1"]),
+            "B": FakeScope(["C2"]),
+            "C": FakeScope(["C3"]),
+        }
+        msa = _make_msa(scopes)
+        self.assertEqual(msa._master_scope({"A": 0, "B": 0, "C": 0}), "C")
+        # If the master is inactive, fall back to the last active per scope_ips.
+        self.assertEqual(msa._master_scope({"A": 0, "B": 0}), "B")
 
     def test_sequential_arm_is_slower(self):
         scopes = {
@@ -201,19 +242,22 @@ class ParallelArmTest(unittest.TestCase):
         }
         msa = _make_msa(scopes, parallel_arm=False)
         t0 = time.perf_counter()
-        msa.arm_scopes_for_trigger(scopes.keys(), verbose=False)
+        msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
         elapsed = time.perf_counter() - t0
         self.assertGreater(elapsed, 0.28, "sequential arm should sum the arm times")
 
     def test_arm_error_propagates(self):
-        # A failed arm must abort the shot, not be silently swallowed.
+        # A failed slave arm must abort the shot, not be silently swallowed.
+        # B and C are slaves (A would be master as last? no -- C is last). Make a
+        # non-master scope raise so the error surfaces from the slave arm join.
         scopes = {
-            "A": FakeScope(["C1"]),
-            "B": FakeScope(["C2"], arm_raise=RuntimeError("arm failed")),
+            "A": FakeScope(["C1"], arm_raise=RuntimeError("arm failed")),
+            "B": FakeScope(["C2"]),
+            "C": FakeScope(["C3"]),  # master
         }
         msa = _make_msa(scopes, parallel_arm=True)
         with self.assertRaises(RuntimeError):
-            msa.arm_scopes_for_trigger(scopes.keys(), verbose=False)
+            msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
 
 
 if __name__ == "__main__":

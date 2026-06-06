@@ -19,6 +19,9 @@ class LabScopesLeCroyScopeAdapter:
         self.timeout = timeout
         self.scope = None
         self._time_array = None
+        # Reference channel chosen at arm time (arm_single), polled for the
+        # fresh-sweep completion check during acquire.
+        self._arm_channel = None
 
     def connect(self) -> None:
         from lab_scopes.lecroy import LeCroyScope
@@ -35,13 +38,19 @@ class LabScopesLeCroyScopeAdapter:
         self._time_array = self.scope.time_array(traces[0])
 
     def arm(self) -> None:
-        self._require_scope().set_trigger_mode("SINGLE")
+        # arm_single clears the sweep counter then sets SINGLE, returning the
+        # reference channel polled for the fresh-sweep completion check. The
+        # channel is cached so later shots skip arm_single's channel discovery
+        # (a per-shot scan of C1..C8 :TRACE? queries).
+        self._arm_channel = self._require_scope().arm_single(channel=self._arm_channel)
 
     def acquire(self, shot_num: int) -> ScopeShot:
         scope = self._require_scope()
+        # Wait once for a fresh acquisition (sweep-counter based) before reading
+        # every trace -- one completed sweep means all channels are ready.
+        _stop_triggering(scope, self._arm_channel)
         traces = []
         for trace_name in scope.displayed_traces():
-            _stop_triggering(scope)
             raw, header = scope.acquire(trace_name, raw=True)
             traces.append(
                 ScopeTrace(
@@ -75,13 +84,22 @@ class LabScopesLeCroyScopeAdapter:
         return self.scope
 
 
-def _stop_triggering(scope, retry: int = 500) -> None:
-    for _ in range(retry):
-        current_mode = scope.set_trigger_mode("")
-        if current_mode[0:4] == "STOP":
-            return
-        time.sleep(0.05)
-    raise RuntimeError("Scope did not enter STOP state")
+def _stop_triggering(scope, channel=None, timeout: float = 25.0) -> None:
+    """Block until the scope completes a *fresh* single acquisition.
+
+    Uses the monotonic sweep counter (cleared by ``arm_single``) rather than the
+    ambiguous ``TRIG_MODE STOP`` state, so a leftover STOP from a previous shot
+    or a fast free-running trigger cannot be mistaken for a new acquisition.
+    ``channel`` is the reference channel cleared at arm time; if None the first
+    displayed channel is used. (Default timeout matches the old 500*0.05 s budget.)
+    """
+    if channel is None:
+        channels = scope.displayed_channels()
+        channel = channels[0] if channels else None
+    if channel is None:
+        raise RuntimeError("Scope has no displayed channel to poll for completion")
+    if not scope.wait_for_single_complete(channel, timeout=timeout):
+        raise RuntimeError("Scope did not complete a fresh acquisition")
 
 
 LabScopesLeCroyAdapter = LabScopesLeCroyScopeAdapter
