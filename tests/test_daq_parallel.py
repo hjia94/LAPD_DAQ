@@ -42,12 +42,15 @@ class FakeScope:
     """
 
     def __init__(self, traces, read_seconds=0.0, arm_seconds=0.0,
-                 raise_exc=None, arm_raise=None):
+                 raise_exc=None, arm_raise=None, ready=True):
         self._traces = list(traces)
         self.read_seconds = read_seconds
         self.arm_seconds = arm_seconds
         self.raise_exc = raise_exc
         self.arm_raise = arm_raise
+        # When False, the scope never reports trigger-ready (INR bit clear), so
+        # arm_single_and_confirm returns ready=False -> the slave arm aborts.
+        self.ready = ready
 
     def displayed_traces(self):
         return list(self._traces)
@@ -76,7 +79,22 @@ class FakeScope:
         chans = self.displayed_channels()
         return channel if channel is not None else (chans[0] if chans else None)
 
-    def set_trigger_mode(self, mode):
+    def read_inr(self):
+        return 0x2000 if self.ready else 0
+
+    def wait_for_trigger_ready(self, timeout=5.0, poll=0.01):
+        return bool(self.read_inr() & 0x2000)
+
+    def arm_single_and_confirm(self, channel=None, ready_timeout=5.0):
+        # Mirrors LeCroyScope.arm_single_and_confirm: arm, then confirm ready.
+        ch = self.arm_single(channel=channel)
+        return ch, self.wait_for_trigger_ready(timeout=ready_timeout)
+
+    def arm_master_single(self, channel=None, retries=3):
+        # Mirrors LeCroyScope.arm_master_single: arm with strict SIN check.
+        return self.arm_single(channel=channel)
+
+    def set_trigger_mode(self, mode, accept_stop_as_armed=True):
         # Empty-string query path: report STOP at once.
         if mode == "":
             return "STOP"
@@ -117,6 +135,8 @@ def _make_msa(scopes, parallel_read=True, parallel_arm=True):
     msa.parallel_scope_read = parallel_read
     msa.parallel_scope_arm = parallel_arm
     msa.parallel_spool_write = True
+    msa.slave_ready_timeout = 5.0
+    msa._sync_warned = False
     return msa
 
 
@@ -258,6 +278,80 @@ class ParallelArmTest(unittest.TestCase):
         msa = _make_msa(scopes, parallel_arm=True)
         with self.assertRaises(RuntimeError):
             msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
+
+    def test_slave_not_ready_aborts_shot(self):
+        # A slave whose INR never reports trigger-ready must abort the shot
+        # (raise) so the master is never armed against an unready slave.
+        scopes = {
+            "A": FakeScope(["C1"], ready=False),  # slave never becomes ready
+            "B": FakeScope(["C2"]),  # master (last)
+        }
+        msa = _make_msa(scopes, parallel_arm=False)
+        msa.slave_ready_timeout = 0.05  # keep the test fast
+        with self.assertRaises(RuntimeError):
+            msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
+
+    def test_master_not_gated_by_its_own_readiness(self):
+        # The master is armed via arm_master_single (no INR ready wait), so a
+        # master that does not report ready does NOT abort the shot.
+        scopes = {
+            "A": FakeScope(["C1"]),  # slave, ready
+            "B": FakeScope(["C2"], ready=False),  # master, not "ready" but fine
+        }
+        msa = _make_msa(scopes, parallel_arm=False)
+        msa.slave_ready_timeout = 0.05
+        # Should not raise.
+        msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
+
+
+class SyncTimestampWarningTest(unittest.TestCase):
+    def _run_dispatch_with_stamps(self, stamps):
+        """Run acquire_shot_dispatch once with patched per-scope trigger stamps.
+
+        ``stamps`` maps scope name -> trigger timestamp returned by the patched
+        wavedesc_trigger_timestamp (keyed off the fake header bytes, which encode
+        the trace name and thus the scope). Returns captured stdout.
+        """
+        scopes = {"A": FakeScope(["C1"]), "B": FakeScope(["C2"])}  # B is master
+        active = {"A": 0, "B": 0}
+        msa = _make_msa(scopes)
+
+        # Fake header -> scope name. FakeScope.acquire returns b"hdr-<trace>",
+        # and trace C1 belongs to A, C2 to B.
+        trace_to_scope = {"C1": "A", "C2": "B"}
+
+        def fake_translate(self_scope, header_bytes):
+            return header_bytes  # pass through; the patched ts reads it
+
+        def fake_ts(hdr):
+            tr = hdr.decode().split("-", 1)[1]
+            return stamps[trace_to_scope[tr]]
+
+        import io
+        from contextlib import redirect_stdout
+
+        for fs in scopes.values():
+            fs.translate_header_bytes = (
+                lambda hb, _f=fake_translate, _s=fs: _f(_s, hb))
+
+        buf = io.StringIO()
+        with mock.patch("lab_scopes.lecroy.wavedesc_trigger_timestamp",
+                        side_effect=fake_ts):
+            with redirect_stdout(buf):
+                msa.acquire_shot_dispatch(active, 1, verbose=False)
+                # Second shot must never warn again even if still desynced.
+                msa.acquire_shot_dispatch(active, 2, verbose=False)
+        return buf.getvalue(), msa
+
+    def test_warns_once_when_desynced(self):
+        out, msa = self._run_dispatch_with_stamps({"A": 100.0, "B": 100.9})
+        self.assertEqual(out.count("[sync warning]"), 1)
+        self.assertTrue(msa._sync_warned)
+
+    def test_no_warning_when_synced(self):
+        out, msa = self._run_dispatch_with_stamps({"A": 100.0, "B": 100.001})
+        self.assertNotIn("[sync warning]", out)
+        self.assertTrue(msa._sync_warned)
 
 
 if __name__ == "__main__":

@@ -201,6 +201,18 @@ class MultiScopeAcquisition:
         self.parallel_spool_write = config.getboolean(
             'acquisition', 'parallel_spool_write', fallback=True)
 
+        # Seconds to wait for a slave scope to report (via its INR register) that
+        # its trigger is armed and ready before the master is armed. The master's
+        # trigger-out drives the slaves, so a slave that is not yet ready would
+        # miss the master's edge and desync the run; we abort the shot instead.
+        self.slave_ready_timeout = config.getfloat(
+            'acquisition', 'slave_ready_timeout', fallback=5.0)
+
+        # One-time cross-scope trigger-timestamp sanity warning (advisory only;
+        # see _warn_if_trigger_timestamps_desynced). Flipped True after it fires
+        # so it prints at most once per run.
+        self._sync_warned = False
+
         if 'scope_ips' in config:
             self.scope_ips = dict(config.items('scope_ips'))
         else:
@@ -423,8 +435,59 @@ class MultiScopeAcquisition:
     def acquire_shot_dispatch(self, active_scopes, shot_num, verbose=True):
         """Read all scopes for one shot, parallel or sequential per config."""
         if self.parallel_scope_read:
-            return self.acquire_shot_parallel(active_scopes, shot_num, verbose=verbose)
-        return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+            all_data = self.acquire_shot_parallel(active_scopes, shot_num, verbose=verbose)
+        else:
+            all_data = self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+        self._warn_if_trigger_timestamps_desynced(all_data, active_scopes)
+        return all_data
+
+    def _warn_if_trigger_timestamps_desynced(self, all_data, active_scopes):
+        """Advisory-only: warn ONCE if scopes' trigger timestamps disagree.
+
+        Reads the trigger time from each scope's WAVEDESC (first trace this shot)
+        and, if the master and any slave differ by more than ~one inter-edge
+        interval, prints a single warning. This is a sanity hint that the
+        master/slave arming may be capturing different edges -- it is NOT
+        authoritative because each scope's real-time clock may not be
+        synchronized, so it never raises and never writes to the log file.
+        Fires at most once per run and is fully swallowed on any error.
+        """
+        if self._sync_warned or len(all_data) < 2:
+            return
+        try:
+            from lab_scopes.lecroy import wavedesc_trigger_timestamp
+
+            master = self._master_scope(active_scopes)
+            stamps = {}
+            for name, (traces, _data, headers) in all_data.items():
+                if not traces:
+                    continue
+                hdr = self.scopes[name].translate_header_bytes(headers[traces[0]])
+                ts = wavedesc_trigger_timestamp(hdr)
+                if ts is not None:
+                    stamps[name] = ts
+            if master not in stamps or len(stamps) < 2:
+                return
+
+            # Tolerance: a generous fraction of a second. We cannot know the
+            # timer's rep rate here, so use a fixed small window -- a same-edge
+            # capture differs by ~ the trigger-out propagation (sub-ms); a
+            # one-shot desync differs by a full inter-edge interval.
+            tol = 0.5
+            master_ts = stamps[master]
+            desynced = {n: (ts - master_ts) for n, ts in stamps.items()
+                        if n != master and abs(ts - master_ts) > tol}
+            if desynced:
+                deltas = ", ".join(f"{n} {d:+.3f}s" for n, d in desynced.items())
+                print(f"\n[sync warning] scope trigger timestamps disagree with "
+                      f"master '{master}': {deltas}. This MAY indicate the scopes "
+                      f"captured different edges, but can also be a clock-sync "
+                      f"artifact (scope RTCs are not synchronized). Advisory only.")
+        except Exception:
+            pass
+        finally:
+            # Mark as done regardless: only ever attempt this check once.
+            self._sync_warned = True
 
     def _master_scope(self, active_scopes):
         """Return the master scope name: the last scope listed in [scope_ips]
@@ -437,17 +500,36 @@ class MultiScopeAcquisition:
         # Fallback: no scope_ips ordering available, use last active scope.
         return list(active_scopes)[-1] if active_scopes else None
 
-    def _arm_one(self, name):
-        """Arm a single scope for one trigger and record its reference channel.
+    def _arm_slave(self, name):
+        """Arm a slave scope and confirm via INR that it is trigger-ready.
 
-        Uses arm_single (CLEAR_SWEEPS + TRIG_MODE SINGLE) so the subsequent
-        completion check reads an unambiguous fresh-sweep transition on the
-        returned channel. The reference channel is cached after the first shot
-        and passed back in, so later shots skip arm_single's channel discovery
-        (a per-shot scan of C1..C4 :TRACE? queries).
+        Uses arm_single_and_confirm (CLEAR_SWEEPS + TRIG_MODE SINGLE + poll the
+        scope's INR trigger-ready bit). The master's trigger-out drives the
+        slaves, so a slave that is not yet listening on EXT would miss the
+        master's edge and desync the run; if the slave does not report ready
+        within slave_ready_timeout we RAISE so the shot aborts rather than
+        silently desyncing. The reference channel is cached after the first shot
+        and passed back in, so later shots skip channel discovery (a per-shot
+        scan of C1..C4 :TRACE? queries).
         """
         cached = self._arm_channels.get(name)
-        self._arm_channels[name] = self.scopes[name].arm_single(channel=cached)
+        channel, ready = self.scopes[name].arm_single_and_confirm(
+            channel=cached, ready_timeout=self.slave_ready_timeout)
+        self._arm_channels[name] = channel
+        if not ready:
+            raise RuntimeError(
+                f"Slave scope {name} did not report trigger-ready within "
+                f"{self.slave_ready_timeout}s; aborting shot to avoid desync")
+
+    def _arm_master(self, name):
+        """Arm the master scope last, requiring a real SIN (not an instant STOP).
+
+        arm_master_single does not accept an immediate STOP as armed, so the
+        master never silently fires (driving the slaves) before this returns.
+        Reference channel is cached/reused like the slave path.
+        """
+        cached = self._arm_channels.get(name)
+        self._arm_channels[name] = self.scopes[name].arm_master_single(channel=cached)
 
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
         """Arm all scopes for trigger, master armed LAST.
@@ -459,14 +541,17 @@ class MultiScopeAcquisition:
         edge, one scope is the *master*: its hardware trigger-out is wired to
         the other scopes' EXT trigger input (set up in hardware; trigger sources
         configured manually on each scope). Slaves therefore cannot fire until
-        the master fires, so arming the master last -- only after every slave is
-        confirmed live -- forces all scopes onto the same edge.
+        the master fires.
 
-        Slaves may still be armed concurrently (parallel_scope_arm) to minimise
-        skew between them; we join all slave arms before arming the master. Each
-        scope owns its own transport with no shared state, so the threaded arm is
-        safe; arm errors propagate (we do NOT swallow them) so a scope that fails
-        to arm aborts the shot rather than silently desyncing.
+        The fix for the observed desync: each slave is confirmed trigger-READY
+        (via its INR status register, _arm_slave) before the master is armed, and
+        the master is armed with a strict SIN check (_arm_master) so it cannot
+        fire before that confirmation. Slaves may still be armed concurrently
+        (parallel_scope_arm) to minimise skew; we join all slave arms -- which
+        also surfaces a not-ready slave as a raised error -- before arming the
+        master. Each scope owns its own transport with no shared state, so the
+        threaded arm is safe; arm errors propagate (we do NOT swallow them) so a
+        scope that fails to arm or confirm ready aborts the shot.
         """
         if verbose:
             print("Arming scopes for trigger... ", end='')
@@ -474,23 +559,24 @@ class MultiScopeAcquisition:
         master = self._master_scope(active_scopes)
         slaves = [name for name in active_scopes if name != master]
 
-        # Arm all slaves first and confirm they are live before the master goes.
+        # Arm all slaves first and confirm each is trigger-ready before the
+        # master goes. A slave that fails to confirm raises here and aborts.
         if slaves:
             if self.parallel_scope_arm and len(slaves) > 1:
                 with ThreadPoolExecutor(max_workers=len(slaves)) as executor:
                     futures = {
-                        executor.submit(self._arm_one, name): name for name in slaves
+                        executor.submit(self._arm_slave, name): name for name in slaves
                     }
                     for future in futures:
                         future.result()  # surface (re-raise) any per-scope arm failure
             else:
                 for name in slaves:
-                    self._arm_one(name)
+                    self._arm_slave(name)
 
         # Master last: its trigger-out drives the slaves, so no slave can fire
-        # until every slave is already armed and the master itself goes live.
+        # until every slave is already armed+ready and the master goes live.
         if master is not None:
-            self._arm_one(master)
+            self._arm_master(master)
 
         if verbose:
             print(f"armed (master={master})")

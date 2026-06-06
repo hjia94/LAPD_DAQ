@@ -38,11 +38,13 @@ class LabScopesLeCroyScopeAdapter:
         self._time_array = self.scope.time_array(traces[0])
 
     def arm(self) -> None:
-        # arm_single clears the sweep counter then sets SINGLE, returning the
-        # reference channel polled for the fresh-sweep completion check. The
-        # channel is cached so later shots skip arm_single's channel discovery
-        # (a per-shot scan of C1..C4 :TRACE? queries).
-        self._arm_channel = self._require_scope().arm_single(channel=self._arm_channel)
+        # This adapter drives a single scope, which is therefore the master:
+        # arm_master_single clears the sweep counter then sets SINGLE with a
+        # strict SIN check (no slaves to gate, so no INR readiness wait needed).
+        # It returns the reference channel polled for the fresh-sweep completion
+        # check; the channel is cached so later shots skip channel discovery (a
+        # per-shot scan of C1..C4 :TRACE? queries).
+        self._arm_channel = self._require_scope().arm_master_single(channel=self._arm_channel)
 
     def acquire(self, shot_num: int) -> ScopeShot:
         scope = self._require_scope()
