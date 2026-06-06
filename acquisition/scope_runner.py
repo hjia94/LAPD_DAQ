@@ -35,17 +35,17 @@ from .config import load_experiment_config
 # Single-scope helpers
 # =============================================================================
 def stop_triggering(scope, channel=None, timeout=25.0):
-    """Block until the scope has completed a *fresh* single acquisition.
+    """Block until the scope is STOPped AND a *fresh* single acquisition landed.
 
-    Uses the monotonic sweep counter (``sweeps_per_acq``) rather than the
-    ambiguous ``TRIG_MODE STOP`` state: the scope reads STOP both before any
-    trigger and after a previous one, so with a fast free-running timer the old
-    STOP-only check could return on a stale STOP (reading old/desynced data) or
-    hang. ``arm_single`` clears the counter at arm time, so a value >= 1 here
-    means a new edge was captured for this shot.
+    Two-stage check (``wait_for_stop_then_complete``): wait for ``TRIG_MODE STOP``
+    as a fast hint, then confirm via the monotonic sweep counter
+    (``sweeps_per_acq``) that a new edge was actually captured this shot. STOP
+    alone is ambiguous (the scope reads STOP both before any trigger and after a
+    previous one); ``arm_single`` clears the counter at arm time, so a counter
+    >= 1 here unambiguously means fresh data exists.
 
     ``channel`` is the reference channel cleared at arm time; if None, the first
-    displayed channel is used. Returns True on a fresh acquisition, False on
+    displayed channel is used. Returns True when fresh data exists, False on
     timeout. (Default timeout matches the old 500 * 0.05 s budget.)
     """
     try:
@@ -55,7 +55,7 @@ def stop_triggering(scope, channel=None, timeout=25.0):
         if channel is None:
             print('Scope has no displayed channel to poll for completion')
             return False
-        if scope.wait_for_single_complete(channel, timeout=timeout):
+        if scope.wait_for_stop_then_complete(channel, timeout=timeout):
             return True
     except KeyboardInterrupt:
         print('Keyboard interrupted in stop_triggering')
@@ -112,15 +112,19 @@ def init_acquire_from_scope(scope, scope_name):
 def acquire_from_scope(scope, scope_name, ref_channel=None):
     """Acquire data from a single scope with optimized speed (int16/raw).
 
-    Waits once for a fresh acquisition to complete (sweep-counter based, polled
-    on ``ref_channel`` cleared at arm time) before reading every displayed trace
-    for this shot. Polling per-trace is unnecessary -- one completed sweep means
-    all channels of that sweep are ready.
+    Per-scope steps of one shot:
+      4. check the scope is STOPped and a fresh sweep landed (stop_triggering:
+         TRIG_MODE STOP hint -> sweep-counter confirm on ``ref_channel`` cleared
+         at arm time);
+      5. if so, data exists -> read every displayed trace (one completed sweep
+         means all channels of that sweep are ready, so no per-trace polling);
+      otherwise raise so the shot is recorded as having no valid data.
     """
     data = {}
     headers = {}
     active_traces = []
 
+    # Step 4: check STOP + fresh-sweep. Step 5: data exists only if it returns True.
     if stop_triggering(scope, ref_channel) is not True:
         raise Exception('Scope did not complete a fresh acquisition')
 
@@ -467,7 +471,12 @@ class MultiScopeAcquisition:
                 if ts is not None:
                     stamps[name] = ts
             if master not in stamps or len(stamps) < 2:
+                # Not enough parseable timestamps to compare yet; try again next
+                # shot rather than permanently disabling the check.
                 return
+
+            # We have a real comparison -- this is the one-and-only attempt.
+            self._sync_warned = True
 
             # Tolerance: a generous fraction of a second. We cannot know the
             # timer's rep rate here, so use a fixed small window -- a same-edge
@@ -485,9 +494,6 @@ class MultiScopeAcquisition:
                       f"artifact (scope RTCs are not synchronized). Advisory only.")
         except Exception:
             pass
-        finally:
-            # Mark as done regardless: only ever attempt this check once.
-            self._sync_warned = True
 
     def _master_scope(self, active_scopes):
         """Return the master scope name: the last scope listed in [scope_ips]
@@ -593,7 +599,21 @@ def _lecroy_scope_class():
 # =============================================================================
 def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True,
                             overwrite=False):
+    """Run one shot end to end.
+
+    Per-shot sequence:
+      1. New shot: the caller's loop is sequential, so the previous shot's reads
+         are already complete before we get here (no extra guard needed); the
+         arm-time CLEAR_SWEEPS resets each scope's counter so this shot is
+         distinguishable.
+      2-3. Arm scopes (arm_scopes_for_trigger): slaves first, master last.
+      4-6. For each scope (in parallel): check STOP + fresh sweep, flag that data
+         exists, then acquire its traces (acquire_shot_dispatch ->
+         acquire_from_scope). 7. Write, then return so the loop advances.
+    """
+    # Steps 2-3: arm slaves then master.
     msa.arm_scopes_for_trigger(active_scopes, verbose=verbose)
+    # Steps 4-6: per scope -- check STOP+fresh, flag data exists, acquire (parallel).
     all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=verbose)
 
     if all_data:

@@ -72,6 +72,10 @@ class FakeScope:
     def wait_for_single_complete(self, channel, timeout=100, poll=0.02):
         return self.sweeps_per_acq(channel) >= 1
 
+    def wait_for_stop_then_complete(self, channel, timeout=100, poll=0.02):
+        # Fake is always STOPped with a fresh sweep available.
+        return self.sweeps_per_acq(channel) >= 1
+
     def arm_single(self, channel=None):
         # Mirrors LeCroyScope.arm_single: clear + SINGLE, return ref channel.
         self.clear_sweeps()
@@ -90,11 +94,11 @@ class FakeScope:
         ch = self.arm_single(channel=channel)
         return ch, self.wait_for_trigger_ready(timeout=ready_timeout)
 
-    def arm_master_single(self, channel=None, retries=3):
-        # Mirrors LeCroyScope.arm_master_single: arm with strict SIN check.
+    def arm_master_single(self, channel=None):
+        # Mirrors LeCroyScope.arm_master_single: arm exactly once.
         return self.arm_single(channel=channel)
 
-    def set_trigger_mode(self, mode, accept_stop_as_armed=True):
+    def set_trigger_mode(self, mode):
         # Empty-string query path: report STOP at once.
         if mode == "":
             return "STOP"

@@ -87,20 +87,22 @@ class LabScopesLeCroyScopeAdapter:
 
 
 def _stop_triggering(scope, channel=None, timeout: float = 25.0) -> None:
-    """Block until the scope completes a *fresh* single acquisition.
+    """Block until the scope is STOPped AND a *fresh* single acquisition landed.
 
-    Uses the monotonic sweep counter (cleared by ``arm_single``) rather than the
-    ambiguous ``TRIG_MODE STOP`` state, so a leftover STOP from a previous shot
-    or a fast free-running trigger cannot be mistaken for a new acquisition.
-    ``channel`` is the reference channel cleared at arm time; if None the first
-    displayed channel is used. (Default timeout matches the old 500*0.05 s budget.)
+    Two-stage check (``wait_for_stop_then_complete``): wait for ``TRIG_MODE STOP``
+    as a fast hint, then confirm via the monotonic sweep counter (cleared by
+    ``arm_master_single``) that a new edge was actually captured. STOP alone is
+    ambiguous (read both before any trigger and after a previous one), so the
+    counter is the authority -- a leftover STOP from a prior shot reads counter 0
+    and is never mistaken for fresh data. ``channel`` is the reference channel
+    cleared at arm time; if None the first displayed channel is used.
     """
     if channel is None:
         channels = scope.displayed_channels()
         channel = channels[0] if channels else None
     if channel is None:
         raise RuntimeError("Scope has no displayed channel to poll for completion")
-    if not scope.wait_for_single_complete(channel, timeout=timeout):
+    if not scope.wait_for_stop_then_complete(channel, timeout=timeout):
         raise RuntimeError("Scope did not complete a fresh acquisition")
 
 
