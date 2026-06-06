@@ -34,20 +34,34 @@ from .config import load_experiment_config
 # =============================================================================
 # Single-scope helpers
 # =============================================================================
-def stop_triggering(scope, retry=500):
-    retry_count = 0
-    while retry_count < retry:
-        try:
-            current_mode = scope.set_trigger_mode("")
-            if current_mode[0:4] == 'STOP':
-                return True
-            time.sleep(0.05)
-        except KeyboardInterrupt:
-            print('Keyboard interrupted in stop_triggering')
-            raise
-        retry_count += 1
+def stop_triggering(scope, channel=None, timeout=25.0):
+    """Block until the scope is STOPped AND a *fresh* single acquisition landed.
 
-    print('Scope did not enter STOP state')
+    Two-stage check (``wait_for_stop_then_complete``): wait for ``TRIG_MODE STOP``
+    as a fast hint, then confirm via the monotonic sweep counter
+    (``sweeps_per_acq``) that a new edge was actually captured this shot. STOP
+    alone is ambiguous (the scope reads STOP both before any trigger and after a
+    previous one); ``arm_single`` clears the counter at arm time, so a counter
+    >= 1 here unambiguously means fresh data exists.
+
+    ``channel`` is the reference channel cleared at arm time; if None, the first
+    displayed channel is used. Returns True when fresh data exists, False on
+    timeout. (Default timeout matches the old 500 * 0.05 s budget.)
+    """
+    try:
+        if channel is None:
+            channels = scope.displayed_channels()
+            channel = channels[0] if channels else None
+        if channel is None:
+            print('Scope has no displayed channel to poll for completion')
+            return False
+        if scope.wait_for_stop_then_complete(channel, timeout=timeout):
+            return True
+    except KeyboardInterrupt:
+        print('Keyboard interrupted in stop_triggering')
+        raise
+
+    print('Scope did not complete a fresh acquisition')
     return False
 
 
@@ -95,41 +109,51 @@ def init_acquire_from_scope(scope, scope_name):
     return is_sequence, time_array
 
 
-def acquire_from_scope(scope, scope_name):
-    """Acquire data from a single scope with optimized speed (int16/raw)."""
+def acquire_from_scope(scope, scope_name, ref_channel=None):
+    """Acquire data from a single scope with optimized speed (int16/raw).
+
+    Per-scope steps of one shot:
+      4. check the scope is STOPped and a fresh sweep landed (stop_triggering:
+         TRIG_MODE STOP hint -> sweep-counter confirm on ``ref_channel`` cleared
+         at arm time);
+      5. if so, data exists -> read every displayed trace (one completed sweep
+         means all channels of that sweep are ready, so no per-trace polling);
+      otherwise raise so the shot is recorded as having no valid data.
+    """
     data = {}
     headers = {}
     active_traces = []
 
+    # Step 4: check STOP + fresh-sweep. Step 5: data exists only if it returns True.
+    if stop_triggering(scope, ref_channel) is not True:
+        raise Exception('Scope did not complete a fresh acquisition')
+
     traces = scope.displayed_traces()
 
     for tr in traces:
-        if stop_triggering(scope) is True:
-            data[tr], headers[tr] = scope.acquire(tr, raw=True)
-            active_traces.append(tr)
-        else:
-            raise Exception('Scope did not enter STOP state')
+        data[tr], headers[tr] = scope.acquire(tr, raw=True)
+        active_traces.append(tr)
 
     return active_traces, data, headers
 
 
-def acquire_from_scope_sequence(scope, scope_name):
+def acquire_from_scope_sequence(scope, scope_name, ref_channel=None):
     """Acquire sequence mode data from a single scope (int16/raw)."""
     data = {}
     headers = {}
     active_traces = []
 
+    if stop_triggering(scope, ref_channel) is not True:
+        raise Exception('Scope did not complete a fresh acquisition')
+
     traces = scope.displayed_traces()
 
     for tr in traces:
-        if stop_triggering(scope) is True:
-            segment_data, header = scope.acquire_sequence_data(tr)
-            segment_data = [np.asarray(seg, dtype=np.int16) for seg in segment_data]
-            data[tr] = np.stack(segment_data)
-            headers[tr] = header
-            active_traces.append(tr)
-        else:
-            raise Exception('Scope did not enter STOP state')
+        segment_data, header = scope.acquire_sequence_data(tr)
+        segment_data = [np.asarray(seg, dtype=np.int16) for seg in segment_data]
+        data[tr] = np.stack(segment_data)
+        headers[tr] = header
+        active_traces.append(tr)
 
     return active_traces, data, headers
 
@@ -156,6 +180,10 @@ class MultiScopeAcquisition:
         self.scopes = {}
         self.figures = {}
         self.time_arrays = {}
+        # Per-scope reference channel chosen at arm time (arm_single), polled by
+        # the completion check so a fresh-sweep transition is read on the same
+        # channel that was cleared. {scope_name: "C1"}.
+        self._arm_channels = {}
         self.config = config
         self.raw_config_text = raw_config_text
         self.description_path = description_path
@@ -176,6 +204,18 @@ class MultiScopeAcquisition:
             'acquisition', 'parallel_scope_read', fallback=True)
         self.parallel_spool_write = config.getboolean(
             'acquisition', 'parallel_spool_write', fallback=True)
+
+        # Seconds to wait for a slave scope to report (via its INR register) that
+        # its trigger is armed and ready before the master is armed. The master's
+        # trigger-out drives the slaves, so a slave that is not yet ready would
+        # miss the master's edge and desync the run; we abort the shot instead.
+        self.slave_ready_timeout = config.getfloat(
+            'acquisition', 'slave_ready_timeout', fallback=5.0)
+
+        # One-time cross-scope trigger-timestamp sanity warning (advisory only;
+        # see _warn_if_trigger_timestamps_desynced). Flipped True after it fires
+        # so it prints at most once per run.
+        self._sync_warned = False
 
         if 'scope_ips' in config:
             self.scope_ips = dict(config.items('scope_ips'))
@@ -316,10 +356,11 @@ class MultiScopeAcquisition:
         worker thread (one scope == one independent TCP/VICP transport).
         """
         scope = self.scopes[name]
+        ref_channel = self._arm_channels.get(name)
         if mode == 0:
-            return acquire_from_scope(scope, name)
+            return acquire_from_scope(scope, name, ref_channel)
         elif mode == 1:
-            return acquire_from_scope_sequence(scope, name)
+            return acquire_from_scope_sequence(scope, name, ref_channel)
         else:
             raise ValueError(f"Invalid active_scopes value for {name}: {mode}")
 
@@ -398,37 +439,153 @@ class MultiScopeAcquisition:
     def acquire_shot_dispatch(self, active_scopes, shot_num, verbose=True):
         """Read all scopes for one shot, parallel or sequential per config."""
         if self.parallel_scope_read:
-            return self.acquire_shot_parallel(active_scopes, shot_num, verbose=verbose)
-        return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+            all_data = self.acquire_shot_parallel(active_scopes, shot_num, verbose=verbose)
+        else:
+            all_data = self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+        self._warn_if_trigger_timestamps_desynced(all_data, active_scopes)
+        return all_data
+
+    def _warn_if_trigger_timestamps_desynced(self, all_data, active_scopes):
+        """Advisory-only: warn ONCE if scopes' trigger timestamps disagree.
+
+        Reads the trigger time from each scope's WAVEDESC (first trace this shot)
+        and, if the master and any slave differ by more than ~one inter-edge
+        interval, prints a single warning. This is a sanity hint that the
+        master/slave arming may be capturing different edges -- it is NOT
+        authoritative because each scope's real-time clock may not be
+        synchronized, so it never raises and never writes to the log file.
+        Fires at most once per run and is fully swallowed on any error.
+        """
+        if self._sync_warned or len(all_data) < 2:
+            return
+        try:
+            from lab_scopes.lecroy import wavedesc_trigger_timestamp
+
+            master = self._master_scope(active_scopes)
+            stamps = {}
+            for name, (traces, _data, headers) in all_data.items():
+                if not traces:
+                    continue
+                hdr = self.scopes[name].translate_header_bytes(headers[traces[0]])
+                ts = wavedesc_trigger_timestamp(hdr)
+                if ts is not None:
+                    stamps[name] = ts
+            if master not in stamps or len(stamps) < 2:
+                # Not enough parseable timestamps to compare yet; try again next
+                # shot rather than permanently disabling the check.
+                return
+
+            # We have a real comparison -- this is the one-and-only attempt.
+            self._sync_warned = True
+
+            # Tolerance: a generous fraction of a second. We cannot know the
+            # timer's rep rate here, so use a fixed small window -- a same-edge
+            # capture differs by ~ the trigger-out propagation (sub-ms); a
+            # one-shot desync differs by a full inter-edge interval.
+            tol = 0.5
+            master_ts = stamps[master]
+            desynced = {n: (ts - master_ts) for n, ts in stamps.items()
+                        if n != master and abs(ts - master_ts) > tol}
+            if desynced:
+                deltas = ", ".join(f"{n} {d:+.3f}s" for n, d in desynced.items())
+                print(f"\n[sync warning] scope trigger timestamps disagree with "
+                      f"master '{master}': {deltas}. This MAY indicate the scopes "
+                      f"captured different edges, but can also be a clock-sync "
+                      f"artifact (scope RTCs are not synchronized). Advisory only.")
+        except Exception:
+            pass
+
+    def _master_scope(self, active_scopes):
+        """Return the master scope name: the last scope listed in [scope_ips]
+        that is currently active. By convention the master's hardware
+        trigger-out is wired to the other scopes' EXT trigger input, so the
+        master must be armed *last* (see arm_scopes_for_trigger)."""
+        for name in reversed(list(self.scope_ips)):
+            if name in active_scopes:
+                return name
+        # Fallback: no scope_ips ordering available, use last active scope.
+        return list(active_scopes)[-1] if active_scopes else None
+
+    def _arm_slave(self, name):
+        """Arm a slave scope and confirm via INR that it is trigger-ready.
+
+        Uses arm_single_and_confirm (CLEAR_SWEEPS + TRIG_MODE SINGLE + poll the
+        scope's INR trigger-ready bit). The master's trigger-out drives the
+        slaves, so a slave that is not yet listening on EXT would miss the
+        master's edge and desync the run; if the slave does not report ready
+        within slave_ready_timeout we RAISE so the shot aborts rather than
+        silently desyncing. The reference channel is cached after the first shot
+        and passed back in, so later shots skip channel discovery (a per-shot
+        scan of C1..C4 :TRACE? queries).
+        """
+        cached = self._arm_channels.get(name)
+        channel, ready = self.scopes[name].arm_single_and_confirm(
+            channel=cached, ready_timeout=self.slave_ready_timeout)
+        self._arm_channels[name] = channel
+        if not ready:
+            raise RuntimeError(
+                f"Slave scope {name} did not report trigger-ready within "
+                f"{self.slave_ready_timeout}s; aborting shot to avoid desync")
+
+    def _arm_master(self, name):
+        """Arm the master scope last, requiring a real SIN (not an instant STOP).
+
+        arm_master_single does not accept an immediate STOP as armed, so the
+        master never silently fires (driving the slaves) before this returns.
+        Reference channel is cached/reused like the slave path.
+        """
+        cached = self._arm_channels.get(name)
+        self._arm_channels[name] = self.scopes[name].arm_master_single(channel=cached)
 
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
-        """Arm all scopes for trigger without waiting for completion.
+        """Arm all scopes for trigger, master armed LAST.
 
-        Arming a single LeCroy scope is several blocking round-trips (a
-        TRIG_MODE write plus a verification poll loop), so arming scopes one
-        after another lets the first-armed scope go live well before the last
-        one is ready. At high rep rates a trigger edge landing in that gap is
-        captured by some scopes and missed by others, desyncing the run by a
-        shot. Arming concurrently shrinks that skew to roughly one scope's arm
-        latency. Each scope owns its own transport with no shared state, so the
+        With a free-running external timer the software cannot gate trigger
+        edges, so scopes that re-arm at slightly different moments can latch
+        different edges -- scope A captures edge N while scope B captures N+1,
+        silently desyncing the shot. To guarantee every scope captures the SAME
+        edge, one scope is the *master*: its hardware trigger-out is wired to
+        the other scopes' EXT trigger input (set up in hardware; trigger sources
+        configured manually on each scope). Slaves therefore cannot fire until
+        the master fires.
+
+        The fix for the observed desync: each slave is confirmed trigger-READY
+        (via its INR status register, _arm_slave) before the master is armed, and
+        the master is armed with a strict SIN check (_arm_master) so it cannot
+        fire before that confirmation. Slaves may still be armed concurrently
+        (parallel_scope_arm) to minimise skew; we join all slave arms -- which
+        also surfaces a not-ready slave as a raised error -- before arming the
+        master. Each scope owns its own transport with no shared state, so the
         threaded arm is safe; arm errors propagate (we do NOT swallow them) so a
-        scope that fails to arm aborts the shot rather than silently desyncing.
+        scope that fails to arm or confirm ready aborts the shot.
         """
         if verbose:
             print("Arming scopes for trigger... ", end='')
-        if self.parallel_scope_arm and len(active_scopes) > 1:
-            with ThreadPoolExecutor(max_workers=len(active_scopes)) as executor:
-                futures = {
-                    executor.submit(self.scopes[name].set_trigger_mode, 'SINGLE'): name
-                    for name in active_scopes
-                }
-                for future in futures:
-                    future.result()  # surface (re-raise) any per-scope arm failure
-        else:
-            for name in active_scopes:
-                self.scopes[name].set_trigger_mode('SINGLE')
+
+        master = self._master_scope(active_scopes)
+        slaves = [name for name in active_scopes if name != master]
+
+        # Arm all slaves first and confirm each is trigger-ready before the
+        # master goes. A slave that fails to confirm raises here and aborts.
+        if slaves:
+            if self.parallel_scope_arm and len(slaves) > 1:
+                with ThreadPoolExecutor(max_workers=len(slaves)) as executor:
+                    futures = {
+                        executor.submit(self._arm_slave, name): name for name in slaves
+                    }
+                    for future in futures:
+                        future.result()  # surface (re-raise) any per-scope arm failure
+            else:
+                for name in slaves:
+                    self._arm_slave(name)
+
+        # Master last: its trigger-out drives the slaves, so no slave can fire
+        # until every slave is already armed+ready and the master goes live.
+        if master is not None:
+            self._arm_master(master)
+
         if verbose:
-            print("armed")
+            print(f"armed (master={master})")
 
 
 def _lecroy_scope_class():
@@ -442,7 +599,21 @@ def _lecroy_scope_class():
 # =============================================================================
 def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True,
                             overwrite=False):
+    """Run one shot end to end.
+
+    Per-shot sequence:
+      1. New shot: the caller's loop is sequential, so the previous shot's reads
+         are already complete before we get here (no extra guard needed); the
+         arm-time CLEAR_SWEEPS resets each scope's counter so this shot is
+         distinguishable.
+      2-3. Arm scopes (arm_scopes_for_trigger): slaves first, master last.
+      4-6. For each scope (in parallel): check STOP + fresh sweep, flag that data
+         exists, then acquire its traces (acquire_shot_dispatch ->
+         acquire_from_scope). 7. Write, then return so the loop advances.
+    """
+    # Steps 2-3: arm slaves then master.
     msa.arm_scopes_for_trigger(active_scopes, verbose=verbose)
+    # Steps 4-6: per scope -- check STOP+fresh, flag data exists, acquire (parallel).
     all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=verbose)
 
     if all_data:

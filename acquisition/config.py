@@ -232,6 +232,19 @@ def get_backpressure_limits(config):
     return max_pending, min_free_gb
 
 
+def get_auto_plot_enabled(config):
+    """Return whether to auto-plot the line profile after a run finishes.
+
+    Reads the optional ``[analysis] auto_plot`` boolean key; defaults to ``True``
+    (enabled) when the section or key is absent, so a line run plots itself
+    without extra config. The plotter no-ops on non-line runs, so leaving this on
+    is harmless for plane / single-point runs.
+    """
+    if 'analysis' not in config:
+        return True
+    return config.getboolean('analysis', 'auto_plot', fallback=True)
+
+
 def resolve_hdf5_path(config, base_path, date=None):
     """Return the full HDF5 file path for a run.
 
