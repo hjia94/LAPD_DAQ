@@ -9,6 +9,11 @@ one time step** -- and renders the result as a 1D line plot (value vs probe
 position). It is the line-scan counterpart to :mod:`read_and_analyze.plot_xy_map`
 (which only handles 2D planes and skips lines).
 
+The moving axis (x or y) is chosen automatically from the position setup array:
+whichever of ``xpos``/``ypos`` has more than one position becomes the moving
+axis. So both **x-line** and **y-line** scans are handled by the same path; the
+generated plot and saved filename reflect the detected axis.
+
 Reconstruction follows the same proven LAPD analysis pattern as plot_xy_map:
 traces are read **in acquisition order**, the per-position shots form a stack, a
 reducer turns that stack into one scalar per position, and the per-position
@@ -20,6 +25,8 @@ plot_xy_map for those).
 There is NO command line; all knobs live in :mod:`read_and_analyze.analysis_config`.
 Run with:
     python -m read_and_analyze.plot_x_line
+    (``plot_line`` is the axis-neutral entry point; ``plot_x_line`` is a
+    backward-compatible alias for it.)
 
 Setup (once):  python -m pip install scipy
 
@@ -219,17 +226,19 @@ def _render_step_overlay(plt, curves, axis_pos, axis_name, fixed_val, t_los,
 # Driver
 # ======================================================================================
 
-def plot_x_line(path, scope=None, channels=None, mode=None,
-                t_start=None, t_end=None, t_step=None, shot_index=None,
-                med_size=None, gauss_sigma=None,
-                cmap=None, show=None, save=None):
-    """Render a line-only profile per (scope, channel).
+def plot_line(path, scope=None, channels=None, mode=None,
+              t_start=None, t_end=None, t_step=None, shot_index=None,
+              med_size=None, gauss_sigma=None,
+              cmap=None, show=None, save=None):
+    """Render a line-only profile per (scope, channel), x-line or y-line.
 
     For each scope/channel: pick one shot per position by ``shot_index``, reduce it
     in time (``range`` -> mean over [t_start, t_end] ms; ``step`` -> overlay one
-    curve per ``t_step`` time), and plot value vs probe position. Genuine 2D planes
-    are skipped (use plot_xy_map). Honors SHOW_PLOT/SAVE_PLOT (override with
-    show/save); saves one PNG per (scope, channel). Returns the saved paths.
+    curve per ``t_step`` time), and plot value vs probe position. The moving axis
+    (x or y) is detected automatically from the position setup array. Genuine 2D
+    planes are skipped (use plot_xy_map). Honors SHOW_PLOT/SAVE_PLOT (override with
+    show/save); saves one PNG per (scope, channel), named ``_xline`` or ``_yline``
+    after the detected axis. Returns the saved paths.
     """
     import matplotlib.pyplot as plt
 
@@ -302,7 +311,9 @@ def plot_x_line(path, scope=None, channels=None, mode=None,
                                  shot_index, path)
 
                 if save:
-                    out_png = os.path.join(plots_dir, f"{base}_{sc}_{ch}_xline.png")
+                    # name the PNG after the detected moving axis: _xline / _yline
+                    suffix = "yline" if axn == "y" else "xline"
+                    out_png = os.path.join(plots_dir, f"{base}_{sc}_{ch}_{suffix}.png")
                     plt.gcf().savefig(out_png, dpi=150)
                     saved.append(out_png)
                     print(f"Saved plot: {out_png}")
@@ -314,5 +325,10 @@ def plot_x_line(path, scope=None, channels=None, mode=None,
     return saved
 
 
+# Backward-compatible alias: the axis is auto-detected, so x-line and y-line
+# runs both go through ``plot_line``.
+plot_x_line = plot_line
+
+
 if __name__ == "__main__":
-    plot_x_line(DEFAULT_FILE)
+    plot_line(DEFAULT_FILE)

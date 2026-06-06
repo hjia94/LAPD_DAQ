@@ -39,6 +39,10 @@ SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels (shared by
 SHOW_PLOT   = True  # display figures interactively (shared by every module)
 SAVE_PLOT   = False  # write PNGs to a "plots/" subdir next to the data file (shared by every module)
 
+AUTO_PLOT   = True  # fallback default for the post-acquisition auto-plot hook when
+                    # called without a config; the run's [analysis] auto_plot key
+                    # (experiment_config.ini) overrides this during acquisition
+
 MED_SIZE    = 5    # median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
 GAUSS_SIGMA = 20   # Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
 

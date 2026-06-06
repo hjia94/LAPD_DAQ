@@ -119,6 +119,16 @@ def main():
         if hdf5_path and os.path.isfile(hdf5_path):
             size = os.stat(hdf5_path).st_size/(1024*1024)
             print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
+            # Spooled: the HDF5 is only complete once offload finishes, so this
+            # is the right place to auto-plot the line profile (no-op on
+            # plane/single-point runs). maybe_autoplot is itself swallow-all;
+            # the try here only guards the import so a missing analysis package
+            # can't break offload teardown.
+            try:
+                from read_and_analyze.auto_plot import maybe_autoplot
+                maybe_autoplot(hdf5_path, config)
+            except Exception as e:
+                print(f"Warning: auto-plot hook failed to load: {e}")
         else:
             print(f'File "{hdf5_path}" was not created')
         # Close the log file BEFORE pausing: this process sits at the pause prompt
