@@ -43,7 +43,6 @@ def main():
     description = read_description_file(description_path)
     write_description(paths.hdf5_path, description)
     print(f'Updated description in "{paths.hdf5_path}":\n')
-    print(description)
 
 
 if __name__ == '__main__':

@@ -32,10 +32,10 @@ back-compat.
 | [`test_bmotion_loops.py`](#test_bmotion_loopspy) | 14 | any PC | no |
 | [`test_bmotion_recovery_hw.py`](#test_bmotion_recovery_hwpy) | 4 | hardware PC | **yes** (motors) |
 | [`test_daq_core.py`](#test_daq_corepy) | 9 | any PC | no |
-| [`test_daq_parallel.py`](#test_daq_parallelpy) | 11 | any PC | no |
+| [`test_daq_parallel.py`](#test_daq_parallelpy) | 16 | any PC | no |
 | [`test_daq_spool.py`](#test_daq_spoolpy) | 24 | any PC | no |
 | [`test_daq_check_helpers.py`](#test_daq_check_helperspy) | 5 | any PC | no |
-| [`test_motor_recovery.py`](#test_motor_recoverypy) | 32 | any PC | no |
+| [`test_motor_recovery.py`](#test_motor_recoverypy) | 39 | any PC | no |
 | [`test_scope_hw.py`](#test_scope_hwpy) | 2 | hardware PC | **yes** (scope) |
 | [`test_motion_hw.py`](#test_motion_hwpy) | 2 | hardware PC | **yes** (motors) |
 | [`test_camera_hw.py`](#test_camera_hwpy) | 1 | hardware PC | **yes** (camera) |
@@ -52,24 +52,25 @@ Private helper modules (imported by the tests, never collected themselves):
 
 ## Recommended run sequence
 
+Tests use the stdlib `unittest` runner (no pytest dependency).
+
 ### On a development machine (no hardware)
 
-Run the unit files — all of them run anywhere and finish in seconds:
+Discover and run everything; the `*_hw.py` files self-skip without hardware:
 
 ```cmd
-python -m pytest tests/ -k "not _hw" -q
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
-The `*_hw.py` files self-skip here; to confirm the gating is wired up you can run
-the whole suite and see them reported as skipped:
+Run a single unit module:
 
 ```cmd
-python -m pytest tests/ -q
+python -m unittest tests.test_daq_spool -v
 ```
 
 ### On the hardware PC
 
-1. Run the dev-machine unit sequence first to catch regressions before touching
+1. Run the dev-machine discovery first to catch regressions before touching
    instruments.
 2. Run the routine **spooled + parallel DAQ plane** — the primary integration
    check.
@@ -78,11 +79,10 @@ python -m pytest tests/ -q
    both must be `True` before anything moves or arms).
 
 ```cmd
-python -m pytest tests/test_scope_hw.py::ScopeHardwareCheck -v -s
+python -m unittest tests.test_scope_hw.ScopeHardwareCheck -v
 ```
 
-The `-s` flag matters for `*_hw.py` files — they print live status that pytest's
-default capture would swallow.
+These `*_hw.py` files print live status as they run.
 
 :::{warning}
 Every `*_hw.py` test has both a `RUN_*_CHECK` flag and an `ALLOW_*` (or

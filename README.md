@@ -4,39 +4,44 @@ Python data-acquisition tools for LAPD experiments using LeCroy oscilloscopes,
 Ethernet motor controllers, Phantom cameras, Raspberry Pi triggers, and
 `bapsf_motion` workflows.
 
-The current branch introduces a cleaner `lapd_daq` acquisition framework with a
-single CLI, mock-device dry runs, centralized HDF5 writing, and adapter
-boundaries that can later be replaced by EPICS PV-backed devices. The older
-`Data_Run_*.py` scripts are still present for transition workflows.
+Two acquisition front-ends coexist during the transition:
+
+- **`lapd-daq` CLI** — the newer framework (`lapd_daq/` package): typed config,
+  centralized HDF5 writing, mock-device dry runs, and adapter boundaries that can
+  later be backed by EPICS PVs. Covers stationary, grid, camera, and dropper modes.
+- **`Data_Run_*.py` scripts** — the production path for routine runs. They use the
+  spooled pipeline: the acquire process spools each shot to a fast disk and a
+  separate `Offload_Run.py` drains the spool into the HDF5 file. This is the path
+  the hardware PC runs and the main integration target.
 
 ## Current Status
 
-- Supported now: stationary scope acquisition, XY/XYZ grid acquisition, camera
-  mode, dropper trigger mode, bmotion script workflow, and mock dry runs.
-- Mock tests are the automated test target in this repo. Real hardware tests
-  should be performed separately on the dedicated hardware PC.
-- 45-degree probe acquisition is not migrated in this refactor branch.
-  `Data_Run_45deg.py` exits early with a clear unsupported message.
-- EPICS is the future control backend. For now, Python directly controls
-  devices through adapter classes.
+- bmotion runs are script-driven (`Data_Run_bmotion.py`); the CLI's bmotion
+  adapter is not yet wired and points you to that script.
+- 45-degree probe acquisition is not migrated; `Data_Run_45deg.py` exits early
+  with an unsupported message.
+- Automated tests run on mock devices; real hardware tests run separately on the
+  hardware PC. EPICS is the planned future control backend.
 
 ## Repository Layout
 
 ```text
 LAPD_DAQ/
-  lapd_daq/                  New package: CLI, config model, run engine, devices, HDF5 writer
-  acquisition/               Transitional acquisition package used by Data_Run*.py scripts
-  drivers/                   LeCroy and Phantom hardware driver wrappers
-  motion/                    Motor control and position management helpers
-  pi_gpio/                   Raspberry Pi trigger/dropper client package
-  legacy/                    Superseded scripts kept for reference
-  notebooks/                 Scratch notebooks for scope and motor testing
-  tests/                     Automated tests (mock by default, gated hardware checks) — see docs/tests.md
-  docs/                      Long-form documentation pages
-  Data_Run.py                Transitional legacy-style standard acquisition script
-  Data_Run_MultiScope_Camera.py
-  Data_Run_bmotion.py
-  Data_Run_45deg.py          Explicitly unsupported in this refactor branch
+  lapd_daq/        New framework: CLI, config model, run engine, devices, HDF5 writer
+  acquisition/     Acquisition package used by Data_Run*.py (spool, offload, scope/bmotion loops)
+  spooling/        Per-shot spool format + capacity/backpressure helpers
+  drivers/         LeCroy and Phantom hardware driver wrappers
+  motion/          Motor control and position management helpers
+  pi_gpio/         Raspberry Pi trigger/dropper client package
+  legacy/          Superseded scripts kept for reference
+  notebooks/       Scratch notebooks for scope and motor testing
+  tests/           Automated tests (mock by default, gated hardware checks) — see docs/tests.md
+  docs/            Long-form documentation pages
+  Data_Run.py      Standard spooled acquisition (stationary / grid)
+  Data_Run_bmotion.py            Spooled bmotion acquisition
+  Data_Run_MultiScope_Camera.py  Multi-scope + camera acquisition
+  Data_Run_45deg.py              Unsupported (exits early)
+  Offload_Run.py   Drains the spool into the HDF5 file (run alongside Data_Run*.py)
   example_experiment_config.ini
   pyproject.toml
 ```
@@ -169,7 +174,7 @@ touching hardware.
    ```
 
 4. Confirm the output by running the lapd_daq unit tests. See
-   [docs/tests.md](docs/tests.md#on-a-development-machine-no-hardware-connected)
+   [docs/tests.md](docs/tests.md#on-a-development-machine-no-hardware)
    for the full sequence.
 
 Expected HDF5 structure includes a root scope group such as `bdotscope`, a
@@ -362,19 +367,16 @@ The bmotion workflow remains script-driven during this transition.
    python -m pip install -e ".[bmotion]"
    ```
 
-2. Edit `Data_Run_bmotion.py` and set:
+2. Edit `Data_Run_bmotion.py` and set `base_path` (the only user setting). The
+   config, bmotion TOML, and `description.txt` are found inside it; the
+   experiment name and HDF5 filename come from `experiment_config.ini`.
 
-   - `exp_name`
-   - `base_path`
-   - `config_path`
-   - `toml_path`
+3. Prepare, inside `base_path`:
+   - `experiment_config.ini` — scopes, shots, and a `[storage] spool_dir`.
+   - `bmotion_config.toml` — motion groups, drives, transforms, builders, and
+     exclusion zones.
 
-3. Prepare `experiment_config.ini` for scopes and shots.
-
-4. Prepare the separate bmotion TOML file for motion groups, drives, transforms,
-   motion builders, and exclusion zones.
-
-5. Run:
+4. Run (it auto-launches `Offload_Run.py` in a new console to drain the spool):
 
    Command Prompt:
 
@@ -388,7 +390,7 @@ The bmotion workflow remains script-driven during this transition.
    python Data_Run_bmotion.py
    ```
 
-6. Follow the interactive prompts to select motion groups and motion direction.
+5. Follow the interactive prompts to select motion groups and motion direction.
 
 The output stores scope data in the standard root-level scope groups and bmotion
 configuration/position data under `/Configuration` and `/Control/Positions`.
@@ -401,18 +403,22 @@ Python config objects.
 
 Important sections:
 
+- `[storage]`: `spool_dir` (fast disk for per-shot spool) and `hdf5_dir` —
+  required by the spooled `Data_Run*.py` path.
+- `[acquisition]`: per-shot/backpressure tuning for the spooled path.
 - `[nshots]`: `num_duplicate_shots`, `num_run_repeats`
 - `[experiment]`: experiment `name` (used to build the HDF5 filename). The
-  human-readable run description is no longer here -- it lives in a separate
-  `description.txt` next to the config and is written into the HDF5 `description`
-  attribute at run start, then overwritten at run end.
+  run description lives in a separate `description.txt` next to the config,
+  written into the HDF5 `description` attribute at run start and overwritten at
+  run end.
 - `[scopes]`: scope display names and descriptions
 - `[channels]`: channel descriptions using `ScopeName_C1` keys
 - `[scope_ips]`: direct scope IPs
-- `[position]`: XY/XYZ grid parameters for `--mode grid`
-- `[motor_ips]`: motor controller IPs for direct grid motion
+- `[analysis]`: `auto_plot` — post-run line-profile PNG plotting (default on).
+- `[position]` / `[motor_ips]`: XY/XYZ grid parameters and motor IPs for grid mode
 - `[camera_config]`: Phantom camera settings, used only in camera/dropper modes
 - `[raspberry_pi]`: Raspberry Pi trigger settings for dropper mode
+- `[bmotion]`: motion-group/direction/recovery settings for the bmotion script
 
 Future EPICS-related PV fields may be added to the INI config during migration,
 but EPICS-native `.db`, `.dbd`, `.template`, `.substitutions`, and `st.cmd`
@@ -456,8 +462,12 @@ run.hdf5
 ```
 
 Scope waveform datasets store raw `int16` samples and LeCroy binary headers.
-Use the existing `data-analysis/read/read_scope_data.py` helpers or
-`lab_scopes` readers to convert raw traces to voltage.
+Use the `lab_scopes` readers (e.g. `read_scope_data`) or the in-repo
+`read_and_analyze/` package to convert raw traces to voltage.
+
+Channel datasets are compressed (Blosc2, falling back to lzf), so HDFView may
+not decode them without the matching plugin; read them via the Python readers
+above.
 
 ## Tests
 
