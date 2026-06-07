@@ -43,7 +43,8 @@ class LabScopesLeCroyScopeAdapter:
         # strict SIN check (no slaves to gate, so no INR readiness wait needed).
         # It returns the reference channel polled for the fresh-sweep completion
         # check; the channel is cached so later shots skip channel discovery (a
-        # per-shot scan of C1..C4 :TRACE? queries).
+        # per-shot scan of the scope's detected input channels (C1-C4 or C1-C8)
+        # via :TRACE? queries).
         self._arm_channel = self._require_scope().arm_master_single(channel=self._arm_channel)
 
     def acquire(self, shot_num: int) -> ScopeShot:

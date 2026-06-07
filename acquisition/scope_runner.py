@@ -517,7 +517,8 @@ class MultiScopeAcquisition:
         within slave_ready_timeout we RAISE so the shot aborts rather than
         silently desyncing. The reference channel is cached after the first shot
         and passed back in, so later shots skip channel discovery (a per-shot
-        scan of C1..C4 :TRACE? queries).
+        scan of the scope's detected input channels (C1-C4 or C1-C8) via
+        :TRACE? queries).
         """
         cached = self._arm_channels.get(name)
         channel, ready = self.scopes[name].arm_single_and_confirm(
