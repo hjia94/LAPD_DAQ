@@ -69,9 +69,6 @@ class FakeScope:
         # A fresh acquisition has always completed in the fake (counter >= 1).
         return 1
 
-    def wait_for_single_complete(self, channel, timeout=100, poll=0.02):
-        return self.sweeps_per_acq(channel) >= 1
-
     def wait_for_stop_then_complete(self, channel, timeout=100, poll=0.02):
         # Fake is always STOPped with a fresh sweep available.
         return self.sweeps_per_acq(channel) >= 1
