@@ -12,7 +12,7 @@ Three orthogonal but cohesive subjects:
                                    old lab_scopes and pydaq readers
 
 End-to-end acquisition is covered on the hardware PC by the ``*_hw.py`` files
-(test_scope_hw, test_motion_hw, test_camera_hw, test_bmotion_e2e_hw) and by the
+(test_scope_hw, test_motion_hw, test_camera_hw) and by the
 routine spooled+parallel DAQ plane run after changes; this module stops at the
 config/planning/back-compat units a successful run does not exercise.
 """
@@ -122,8 +122,9 @@ class AcquisitionImportHygieneTests(unittest.TestCase):
 
         acquisition = importlib.import_module("acquisition")
 
-        self.assertTrue(callable(acquisition.run_acquisition))
-        self.assertTrue(callable(acquisition.run_acquisition_bmotion))
+        self.assertTrue(callable(acquisition.run_acquisition_spooled))
+        # The lazy wrapper must be referenceable without importing bmotion.
+        self.assertTrue(callable(acquisition.run_acquisition_bmotion_spooled))
         self.assertNotIn("acquisition.bmotion", sys.modules)
 
 

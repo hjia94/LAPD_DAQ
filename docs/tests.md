@@ -31,7 +31,6 @@ back-compat.
 | [`test_bmotion_config.py`](#test_bmotion_configpy) | 22 | any PC | no |
 | [`test_bmotion_loops.py`](#test_bmotion_loopspy) | 14 | any PC | no |
 | [`test_bmotion_recovery_hw.py`](#test_bmotion_recovery_hwpy) | 4 | hardware PC | **yes** (motors) |
-| [`test_bmotion_e2e_hw.py`](#test_bmotion_e2e_hwpy) | 2 | hardware PC | **yes** (motors) |
 | [`test_daq_core.py`](#test_daq_corepy) | 9 | any PC | no |
 | [`test_daq_parallel.py`](#test_daq_parallelpy) | 11 | any PC | no |
 | [`test_daq_spool.py`](#test_daq_spoolpy) | 24 | any PC | no |
@@ -112,8 +111,7 @@ Covers `configure_bmotion_hdf5_group` validation (non-grid / 3-D / bad axis
 labels), `move_to_index` out-of-range skip, `_take_shots_at_position`
 skip-on-error, the spool sink, and terminal-motor-failure skip-and-continue.
 The happy-path iteration order / active-group-only HDF5 rows are intentionally
-**not** unit-tested here — they're covered by `test_bmotion_e2e_hw.py` and the
-routine DAQ plane.
+**not** unit-tested here — they're covered by the routine spooled DAQ plane run.
 
 ### `test_bmotion_recovery_hw.py`
 
@@ -123,14 +121,6 @@ MOTION (a slow move must finish, not time out), ENCODER (EP vs IP agreement
 around a move, incl. negative/zero-crossing), FAILURE (an unreachable index
 raises `MotorError`, then a good move still succeeds), and SET-ZERO (destructive,
 off by default — zero the group and confirm the encoder reads back ~0).
-
-### `test_bmotion_e2e_hw.py`
-
-**Subject:** the full `run_acquisition_bmotion(...)` pipeline against real motors.
-**Needs hardware:** **yes** (motors). Two checks: interleaved (every selected
-group populated every shot) and sequential (each group's rows form a disjoint
-contiguous block; combined coverage equals `total_shots`). Slow; run only when
-validating the whole acquisition path.
 
 ### `test_daq_core.py`
 

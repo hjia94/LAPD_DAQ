@@ -23,7 +23,7 @@ TODO: this script is not optimized for speed. Need to:
 
 import datetime
 import os
-from acquisition import run_acquisition, run_acquisition_spooled
+from acquisition import run_acquisition_spooled
 from acquisition.config import (
     get_storage_paths,
     load_experiment_config,
@@ -56,12 +56,19 @@ def main():
     config, _ = load_experiment_config(config_path)
     hdf5_path = resolve_hdf5_path(config, base_path)
 
-    # Parallel mode is enabled when [storage] provides a fast spool_dir.
+    # Acquisition is spooled-only: [storage] must provide a fast spool_dir.
+    # The legacy single-process (non-spooled) path was removed; without a
+    # spool_dir there is nothing to run, so fail loudly instead of silently
+    # falling back. (Recover it from git history if ever needed.)
     spool_dir, _hdf5_dir = get_storage_paths(config)
-    spooled = bool(spool_dir)
+    if not spool_dir:
+        print('ERROR: no [storage] spool_dir configured. Non-spooled mode was '
+              'removed; set a spool_dir in experiment_config.ini and run '
+              'Offload_Run.py to fill the HDF5.')
+        sys.exit(1)
 
-    # The acquire process creates the destination HDF5 (and writes its skeleton)
-    # in BOTH modes, so guard/overwrite it up front regardless of spooling.
+    # The acquire process creates the destination HDF5 (and writes its
+    # skeleton), so guard/overwrite it up front.
     if os.path.exists(hdf5_path):
         while True:
             response = input(f'File "{hdf5_path}" already exists. Overwrite? (y/n): ').lower()
@@ -76,20 +83,16 @@ def main():
             print('Overwriting existing file')
             os.remove(hdf5_path)  # Delete the existing file
 
-    if spooled:
-        if not os.path.exists(spool_dir):
-            os.makedirs(spool_dir)
-        print(f'PARALLEL mode: spooling shots to {spool_dir}')
-        print(f'  Run Offload_Run.py to fill the HDF5 file ({hdf5_path}).')
+    if not os.path.exists(spool_dir):
+        os.makedirs(spool_dir)
+    print(f'PARALLEL mode: spooling shots to {spool_dir}')
+    print(f'  Run Offload_Run.py to fill the HDF5 file ({hdf5_path}).')
 
     print('Data run started at', datetime.datetime.now())
     t_start = time.time()
 
     try:
-        if spooled:
-            run_acquisition_spooled(spool_dir, hdf5_path, config_path)
-        else:
-            run_acquisition(hdf5_path, config_path)
+        run_acquisition_spooled(spool_dir, hdf5_path, config_path)
 
     except KeyboardInterrupt:
         print('\n______Halted due to Ctrl-C______', '  at', time.ctime())

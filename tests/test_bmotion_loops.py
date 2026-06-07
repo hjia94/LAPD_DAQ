@@ -162,11 +162,11 @@ class BmotionLoopTests(unittest.TestCase):
 
     # NOTE: the _run_interleaved / _run_sequential iteration-order and
     # active-group-only-rows invariants are intentionally NOT unit-tested here.
-    # They are covered end-to-end on the hardware PC by test_bmotion_e2e_hw.py
-    # (interleaved + sequential against real motors) and by the routine
-    # spooled+parallel DAQ plane, which is a strictly higher-fidelity check than
-    # the stub-based spies these tests used. Kept below are only the edge/error
-    # paths a successful run never exercises.
+    # They are covered end-to-end on the hardware PC by the routine
+    # spooled+parallel DAQ plane run (interleaved + sequential against real
+    # motors), a strictly higher-fidelity check than the stub-based spies these
+    # tests used. Kept below are only the edge/error paths a successful run
+    # never exercises.
 
     # ----- _take_shots_at_position error handling ------------------------- #
     def test_take_shots_skips_on_value_error(self):

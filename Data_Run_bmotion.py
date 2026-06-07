@@ -10,11 +10,12 @@ The user should edit this file to:
 Created on July 24.2025
 @author: Jia Han
 
-Parallel mode: if experiment_config.ini has a [storage] section with a fast
-spool_dir, this process creates the HDF5 file + its skeleton (metadata, time
-arrays, positions) on the slow/large disk and then spools each shot's raw data
-to the fast disk; a separate `Offload_Run.py` process fills those shots into the
-same HDF5 file. Otherwise the legacy single-process path writes the HDF5 directly.
+Spooled (parallel) mode is the only mode: experiment_config.ini must have a
+[storage] section with a fast spool_dir. This process creates the HDF5 file +
+its skeleton (metadata, time arrays, positions) on the slow/large disk and then
+spools each shot's raw data to the fast disk; a separate `Offload_Run.py`
+process fills those shots into the same HDF5 file. (The legacy single-process,
+non-spooled path was removed; recover it from git history if ever needed.)
 """
 
 import datetime
@@ -24,7 +25,7 @@ import sys
 import logging
 import subprocess
 
-from acquisition import run_acquisition_bmotion, run_acquisition_bmotion_spooled
+from acquisition import run_acquisition_bmotion_spooled
 from acquisition.config import (
     get_storage_paths,
     load_experiment_config,
@@ -105,7 +106,14 @@ def main():
     config, _ = load_experiment_config(config_path)
     nshots = config.getint('nshots', 'num_duplicate_shots', fallback=1)
     spool_root, _ = get_storage_paths(config)
-    spooled = bool(spool_root)
+    # Acquisition is spooled-only: [storage] must provide a fast spool_dir.
+    # The legacy single-process (non-spooled) path was removed; without a
+    # spool_dir there is nothing to run, so fail loudly instead of silently
+    # falling back. (Recover it from git history if ever needed.)
+    if not spool_root:
+        print('ERROR: no [storage] spool_dir configured. Non-spooled mode was '
+              'removed; set a spool_dir in experiment_config.ini.')
+        sys.exit(1)
     paths = resolve_run_paths(config, base_path, spool_root=spool_root)
     hdf5_path = paths.hdf5_path
 
@@ -123,25 +131,19 @@ def main():
         spool_dir, start_shot = plan.spool_dir, plan.start_shot
         print(f'{action.capitalize()}: starting at shot {start_shot}.')
 
-    if spooled:
-        # Acquisition writes the HDF5 skeleton + spools per-shot data; a separate
-        # Offload_Run.py process fills the shots into the same HDF5.
-        os.makedirs(spool_dir, exist_ok=True)
-        print(f'PARALLEL mode: spooling shots to {spool_dir}')
-        launch_offload(spool_dir, config_path)
+    # Acquisition writes the HDF5 skeleton + spools per-shot data; a separate
+    # Offload_Run.py process fills the shots into the same HDF5.
+    os.makedirs(spool_dir, exist_ok=True)
+    print(f'PARALLEL mode: spooling shots to {spool_dir}')
+    launch_offload(spool_dir, config_path)
 
     print('Data run started at', datetime.datetime.now())
     t_start = time.time()
 
     try:
-        if spooled:
-            run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
-                                            start_shot=start_shot,
-                                            description_path=description_path)
-        else:
-            run_acquisition_bmotion(hdf5_path, toml_path, config_path,
-                                    start_shot=start_shot,
-                                    description_path=description_path)
+        run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
+                                        start_shot=start_shot,
+                                        description_path=description_path)
 
     except KeyboardInterrupt:
         print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
@@ -154,23 +156,8 @@ def main():
         print('Data run finished at', datetime.datetime.now())
         print('Time taken: %.2f hours' % ((time.time()-t_start)/3600))
 
-        if spooled:
-            print(f'Shots spooled to "{spool_dir}". The auto-launched '
-                  f'Offload_Run.py console keeps draining into the HDF5 file.')
-        elif os.path.isfile(hdf5_path):
-            size = os.stat(hdf5_path).st_size/(1024*1024)
-            print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
-            # Non-spooled: the HDF5 is complete here, so auto-plot the line
-            # profile (no-op on plane/single-point runs). maybe_autoplot is
-            # itself swallow-all; the try here only guards the import so a
-            # missing analysis package can't break run teardown.
-            try:
-                from read_and_analyze.auto_plot import maybe_autoplot
-                maybe_autoplot(hdf5_path, config)
-            except Exception as e:
-                print(f"Warning: auto-plot hook failed to load: {e}")
-        else:
-            print(f'File "{hdf5_path}" was not created')
+        print(f'Shots spooled to "{spool_dir}". The auto-launched '
+              f'Offload_Run.py console keeps draining into the HDF5 file.')
 
         # Release motor.log so a later restart isn't blocked by an open handle.
         close_log_file_handlers(logging.getLogger())

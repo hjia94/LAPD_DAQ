@@ -10,12 +10,13 @@ Layered like this:
         - owns the live scope handles and the active config
         - hides the file-write details behind hdf5_writer
 
-    single_shot_acquisition / single_shot_acquisition_45 / handle_movement
-        - one acquisition step (with or without motion)
+    single_shot_acquisition / handle_movement
+        - one acquisition step (with or without motion); shared by the spooled
+          loops and the hardware diagnostics.
 
-    run_acquisition
-        - top-level loop driven by experiment_config.ini; the function
-          Data_Run.py and Data_Run_45deg.py call into.
+    run_acquisition_spooled
+        - top-level grid/stationary loop driven by experiment_config.ini that
+          Data_Run.py calls into (spools each shot for Offload_Run.py to fill).
 """
 
 import time
@@ -595,7 +596,7 @@ def _lecroy_scope_class():
 
 
 # =============================================================================
-# Per-shot orchestration (used by run_acquisition and external callers)
+# Per-shot orchestration (used by the spooled loops and external callers)
 # =============================================================================
 def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True,
                             overwrite=False):
@@ -620,62 +621,6 @@ def single_shot_acquisition(msa, active_scopes, shot_num, verbose=True,
         if verbose:
             print('Updating scope data to HDF5...')
         msa.update_scope_hdf5(all_data, shot_num, overwrite=overwrite)
-    else:
-        tqdm.write(f"Warning: No valid data acquired at shot {shot_num}")
-
-
-def single_shot_acquisition_45(pos, motors, msa, pos_manager, save_path, scope_ips, active_scopes):
-    """Acquire a single shot for 45-degree probe setup.
-
-    Args:
-        pos: Dictionary {probe_name: numpy record} where each record has
-            (shot_num, x) accessible by index.
-        motors: Dictionary of motor controllers for each probe (None entries skipped).
-        msa: MultiScopeAcquisition instance
-        pos_manager: PositionManager instance
-        save_path: Path to save HDF5 file
-        scope_ips: Dictionary of scope IPs
-        active_scopes: Dictionary of active scopes
-    """
-    # Shot number is read from the first probe's record (index 0 = shot_num).
-    shot_num = int(pos['P16'][0])
-    positions = {}
-
-    print(f'Shot = {shot_num}')
-
-    active_motors = []
-    target_positions = []
-    probe_order = []  # parallel to active_motors / target_positions
-
-    for probe, motor in motors.items():
-        if motor is not None:
-            x_position = float(pos[probe][1])  # index 1 = x
-            print(f', {probe}: {x_position}', end='')
-            active_motors.append(motor)
-            target_positions.append(x_position)
-            probe_order.append(probe)
-            positions[probe] = None
-        else:
-            positions[probe] = None
-
-    if active_motors:
-        try:
-            achieved_positions = move_45deg_probes(active_motors, target_positions)
-
-            for i, probe in enumerate(probe_order):
-                positions[probe] = achieved_positions[i]
-
-        except Exception as e:
-            print(f'\nError moving probes: {str(e)}')
-            hdf5_writer.mark_shot_skipped_for_probes(save_path, probe_order, shot_num, e)
-            return
-
-    msa.arm_scopes_for_trigger(active_scopes)
-    all_data = msa.acquire_shot(active_scopes, shot_num)
-
-    if all_data:
-        msa.update_scope_hdf5(all_data, shot_num)
-        pos_manager.update_position_hdf5(shot_num, positions)
     else:
         tqdm.write(f"Warning: No valid data acquired at shot {shot_num}")
 
@@ -719,118 +664,15 @@ def handle_movement(pos_manager, mc, shot_num, pos, save_path, scope_ips):
 # =============================================================================
 # Main acquisition loop
 # =============================================================================
-def run_acquisition(save_path, config_path):
-    print('Starting acquisition loop at', time.ctime())
-    config, raw_config_text = load_experiment_config(config_path)
-    num_duplicate_shots = int(config.get('nshots', 'num_duplicate_shots', fallback=1))
-    num_run_repeats = int(config.get('nshots', 'num_run_repeats', fallback=1))
-    shot_num = 0
-
-    has_position_config = 'position' in config and config.items('position')
-
-    if has_position_config:
-        pos_manager = PositionManager(
-            save_path,
-            config_path,
-            num_duplicate_shots=num_duplicate_shots,
-            num_run_repeats=num_run_repeats,
-        )
-    else:
-        pos_manager = None
-
-    # description.txt lives next to the config (both in base_path).
-    description_path = config_module.resolve_description_path_from_config(config_path)
-
-    with MultiScopeAcquisition(save_path, config, raw_config_text,
-                               description_path=description_path) as msa:
-        try:
-            print("Initializing HDF5 file...", end='')
-            msa.initialize_hdf5_base()
-            print("done")
-
-            if pos_manager is not None:
-                positions = pos_manager.initialize_position_hdf5()
-
-                if pos_manager.is_45deg:
-                    motors = pos_manager.initialize_motor_45deg()
-                    print("45-degree acquisition not implemented yet")
-                    return
-                else:
-                    mc = pos_manager.initialize_motor()
-                    if mc is None:
-                        print("\n[!] Warning: Failed to initialize motor controller")
-                        print("  - Check [motor_ips] section in your config file")
-                        print("  - Continuing with stationary acquisition (motors disabled)")
-                    else:
-                        print("\n[OK] Motor controller initialized and ready for movement")
-                total_shots = len(positions)
-                print(f"Number of positions: {len(positions)}")
-                print(f"Number of shots per position: {num_duplicate_shots}")
-                print(f"Total shots: {total_shots}")
-
-            else:
-                positions = None
-                mc = None
-                print("\nStationary acquisition - No position configuration found")
-                total_shots = num_duplicate_shots * num_run_repeats
-                print(f"Number of shots: {total_shots}")
-
-            print("\nStarting initial acquisition...")
-            active_scopes = msa.initialize_scopes()
-            if not active_scopes:
-                raise RuntimeError("No valid data found from any scope. Aborting acquisition.")
-
-            with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
-                for n in range(total_shots):
-                    shot_num = n + 1
-
-                    if pos_manager is not None:
-                        movement_success = handle_movement(
-                            pos_manager, mc, shot_num, positions[n], save_path, msa.scope_ips
-                        )
-                        if not movement_success:
-                            tqdm.write(f"Skipping shot {shot_num} due to movement failure.")
-                            pbar.update(1)
-                            continue
-
-                    single_shot_acquisition(msa, active_scopes, shot_num, verbose=False)
-
-                    if pos_manager is not None and mc is not None:
-                        if pos_manager.nz is None:
-                            xpos, ypos = mc.probe_positions
-                            current_positions = {'x': xpos, 'y': ypos, 'z': None}
-                        else:
-                            xpos, ypos, zpos = mc.probe_positions
-                            current_positions = {'x': xpos, 'y': ypos, 'z': zpos}
-
-                        pos_manager.update_position_hdf5(shot_num, current_positions)
-
-                    pbar.update(1)
-
-        except KeyboardInterrupt:
-            print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
-            raise
-
-        finally:
-            hdf5_writer.record_shot_count(save_path, msa.scope_ips, shot_num)
-            # Overwrite the description from description.txt now that the run is
-            # over, so edits made before/during the run are captured. Guarded so
-            # a description read can never abort an otherwise-good run.
-            try:
-                hdf5_writer.write_description(
-                    save_path, msa.get_experiment_description())
-            except Exception as e:
-                print(f"Warning: could not write final description: {e}")
-
-
 def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
     """Parallel-mode grid acquisition: build the HDF5 skeleton, spool each shot.
 
-    Mirrors :func:`run_acquisition` (the legacy direct-grid / stationary path)
-    but, like the bmotion spooled path, the acquire process creates ``hdf5_path``
-    and writes its full skeleton (experiment/scope metadata, time arrays, and the
-    ``/Control/Positions`` group) up front, then spools each shot's raw traces to
-    the fast-disk ``spool_dir`` for a separate offload process to fill in.
+    The grid/stationary direct-to-HDF5 (non-spooled) path was removed; this is
+    now the only grid acquisition entry point. Like the bmotion spooled path,
+    the acquire process creates ``hdf5_path`` and writes its full skeleton
+    (experiment/scope metadata, time arrays, and the ``/Control/Positions``
+    group) up front, then spools each shot's raw traces to the fast-disk
+    ``spool_dir`` for a separate offload process to fill in.
     """
     from spooling import spool_format
     from . import grid_spool_adapter

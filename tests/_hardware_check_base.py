@@ -2,7 +2,7 @@
 
 Provides the tempdir lifecycle and the run-flag/gate skip mechanism reused by
 the per-instrument hardware tests (test_scope_hw/test_motion_hw/test_camera_hw)
-and the bmotion hardware checks (test_bmotion_recovery_hw, test_bmotion_e2e_hw).
+and the bmotion hardware checks (test_bmotion_recovery_hw).
 Lives in a leading-underscore module so unittest discovery never collects the
 base class itself.
 

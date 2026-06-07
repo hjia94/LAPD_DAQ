@@ -9,17 +9,9 @@ from .bmotion_config import BmotionSelection, resolve_bmotion_selection
 from .config import load_experiment_config
 from .scope_runner import (
     MultiScopeAcquisition,
-    run_acquisition,
     run_acquisition_spooled,
     single_shot_acquisition,
-    single_shot_acquisition_45,
 )
-
-
-def run_acquisition_bmotion(*args, **kwargs):
-    from .bmotion import run_acquisition_bmotion as _run_acquisition_bmotion
-
-    return _run_acquisition_bmotion(*args, **kwargs)
 
 
 def run_acquisition_bmotion_spooled(*args, **kwargs):
@@ -35,10 +27,7 @@ __all__ = [
     "MultiScopeAcquisition",
     "load_experiment_config",
     "resolve_bmotion_selection",
-    "run_acquisition",
-    "run_acquisition_bmotion",
     "run_acquisition_bmotion_spooled",
     "run_acquisition_spooled",
     "single_shot_acquisition",
-    "single_shot_acquisition_45",
 ]

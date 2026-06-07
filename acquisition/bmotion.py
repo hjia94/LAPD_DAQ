@@ -766,76 +766,6 @@ def _prepare_bmotion_run(toml_path, config_path):
     }
 
 
-def run_acquisition_bmotion(hdf5_path, toml_path, config_path, start_shot=1,
-                            description_path=None):
-    print('Starting acquisition at', time.ctime())
-
-    ctx = _prepare_bmotion_run(toml_path, config_path)
-    config = ctx["config"]
-    raw_config_text = ctx["raw_config_text"]
-    nshots = ctx["nshots"]
-    run_manager = ctx["run_manager"]
-    ml_order = ctx["ml_order"]
-    execution_order = ctx["execution_order"]
-    total_shots = ctx["total_shots"]
-
-    if description_path is None:
-        description_path = config_module.resolve_description_path_from_config(config_path)
-
-    resuming = start_shot > 1
-
-    with MultiScopeAcquisition(hdf5_path, config, raw_config_text,
-                               description_path=description_path) as msa:
-        try:
-            if not resuming:
-                print("Initializing HDF5 file...", end='')
-                msa.initialize_hdf5_base()
-                print("done")
-            else:
-                print(f"Resuming from shot {start_shot} (skipping HDF5 skeleton init)")
-
-            print("\nStarting initial acquisition...")
-            active_scopes = msa.initialize_scopes()
-            if msa.scope_ips and not active_scopes:
-                raise RuntimeError(
-                    "No valid data found from any scope. Aborting acquisition."
-                )
-
-            if not resuming:
-                configure_bmotion_hdf5_group(
-                    hdf5_path, total_shots, len(ml_order), toml_path, run_manager,
-                    list(ml_order.keys()), ml_order=ml_order,
-                    execution_order=execution_order,
-                )
-
-            # Explicit sink carries the resume boundary so a re-taken position
-            # overwrites its stale shots (resume_from_shot=1 on a fresh run).
-            sink = _Hdf5ShotSink(msa, active_scopes, hdf5_path, run_manager,
-                                 resume_from_shot=start_shot)
-            if execution_order == "sequential":
-                _run_sequential(msa, active_scopes, hdf5_path, run_manager,
-                                ml_order, nshots, total_shots, sink=sink,
-                                start_shot=start_shot)
-            else:
-                _run_interleaved(msa, active_scopes, hdf5_path, run_manager,
-                                 ml_order, nshots, total_shots, sink=sink,
-                                 start_shot=start_shot)
-
-        except KeyboardInterrupt as err:
-            print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
-            raise RuntimeError() from err
-        finally:
-            run_manager.terminate()
-            # Overwrite the description from description.txt now that all shots
-            # are written, so edits made before/during the run are captured.
-            # Guarded so a description read can never abort an otherwise-good run.
-            try:
-                hdf5_writer.write_description(
-                    hdf5_path, msa.get_experiment_description())
-            except Exception as e:
-                print(f"Warning: could not write final description: {e}")
-
-
 def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
                                     start_shot=1, description_path=None):
     """Parallel-mode acquisition: build the HDF5 skeleton, spool each shot.
@@ -843,7 +773,7 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
     The acquire process owns the *initial* HDF5 file: it creates ``hdf5_path``
     and writes everything known up front (experiment metadata, source code, raw
     config, scope metadata, time arrays, and the empty ``Control/Positions``
-    skeleton) using the same writers as :func:`run_acquisition_bmotion`, then
+    skeleton) using the shared bmotion HDF5 writers, then
     closes the file and never reopens it. Only per-shot scope traces (+ their
     headers/positions) go to the fast-disk ``spool_dir``; a separate offload
     process fills those into the already-created HDF5.
