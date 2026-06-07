@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Multi-scope data acquisition program with probe movement support.
-See multi_scope_acquisition.py for more details.
+Multi-scope data acquisition program (grid / stationary modes).
+
+Acquisition is spooled-only: experiment_config.ini must have a [storage]
+section with a fast spool_dir. This process creates the HDF5 file + skeleton and
+spools each shot's raw data; a separate Offload_Run.py process fills the shots
+into the HDF5 file. (The legacy single-process, non-spooled path was removed;
+recover it from git history if ever needed.)
 
 Configuration and metadata:
 - Edit experiment_config.ini to set scope/channel descriptions and probe movement/position parameters.
 - Put the free-text run description in description.txt next to the config (written into HDF5 at run start, overwritten at run end).
-- Use this script to set file paths, scope and motor IP addresses, and other run-specific parameters.
+- Use this script to set the base path; scope/motor IPs and run parameters live in experiment_config.ini.
 
 Created on Feb.14.2024
 @author: Jia Han
 
 Update July.2025
-- Change experiment description to read from experiment_config.ini
 - Change probe position and movement to read from experiment_config.ini
-
-
-TODO: this script is not optimized for speed. Need to:
-- Data_Run_2D.py and Acquire_Scope_Data_2D.py includes saving raw data to disk; this needs to be added here.
-- Parallelize the data acquisition
+- Move the run description to description.txt next to the config
 """
 
 import datetime

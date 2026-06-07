@@ -2,10 +2,10 @@
 """
 Multi-scope data acquisition program with probe movement using bapsf_motion library.
 Run this program to acquire data from multiple scopes and save it in an HDF5 file.
-Result is plotted in real time.
+When the run finishes, the offload process auto-plots the 1D line profile (saved
+as PNGs next to the data file) for line runs; disable via [analysis] auto_plot.
 
-The user should edit this file to:
-
+The user edits the base_path below; everything else lives in experiment_config.ini.
 
 Created on July 24.2025
 @author: Jia Han
