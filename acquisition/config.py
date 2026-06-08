@@ -136,8 +136,8 @@ def get_storage_paths(config):
 
     ``hdf5_path`` is accepted as a backward-compatible alias for ``hdf5_dir``
     and is likewise treated as a directory. Returns ``(spool_dir, hdf5_dir)``
-    with either possibly ``None`` when not configured, so callers can fall back
-    to the legacy single-process path.
+    with either possibly ``None`` when not configured; acquisition requires a
+    ``spool_dir`` and errors out when it is missing.
     """
     if 'storage' not in config:
         return None, None

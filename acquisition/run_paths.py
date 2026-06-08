@@ -46,8 +46,9 @@ class RunPaths:
 def resolve_run_paths(config, base_path, spool_root=None) -> RunPaths:
     """Resolve the HDF5 file + spool subfolder this run owns.
 
-    ``spool_root`` is the parent spool directory (``[storage] spool_dir``); pass
-    ``None`` for non-spooled runs, in which case ``spool_dir`` is ``None``.
+    ``spool_root`` is the parent spool directory (``[storage] spool_dir``). Pass
+    ``None`` when only the HDF5 path is needed (e.g. resolve_hdf5_path,
+    update_description); ``spool_dir`` is then ``None``.
     """
     name = get_experiment_name(config)
     _spool_cfg, hdf5_dir = get_storage_paths(config)

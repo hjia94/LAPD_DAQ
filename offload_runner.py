@@ -8,8 +8,8 @@ process drops a ``RUN_COMPLETE`` sentinel, the offload drains any remaining
 shots, finalizes the file (shot_count), and exits.
 
 The loop itself is storage-agnostic: it dispatches to a per-path adapter chosen
-by the ``"writer"`` tag in the spooled run metadata. Today the only adapter is
-the ``acquisition`` (bmotion) one; a ``lapd_daq`` adapter can be added without
+by the ``"writer"`` tag in the spooled run metadata (``acquisition`` for bmotion,
+``grid`` for PositionManager grids). A new path's adapter can be added without
 touching this loop.
 """
 

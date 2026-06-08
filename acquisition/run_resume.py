@@ -94,7 +94,7 @@ def inspect_run(run_paths) -> RunState:
             abort_reason="process killed before RUN_COMPLETE was written",
         )
 
-    # An HDF5 exists but no usable spool artifacts (non-spooled or wiped spool):
+    # An HDF5 exists but no usable spool artifacts (e.g. the spool was wiped):
     # treat as partial without a known shot count.
     return RunState(status=PARTIAL, abort_reason="previous run was interrupted")
 

@@ -1,6 +1,6 @@
-"""Glue between the legacy grid (PositionManager) acquisition path and the spool.
+"""Glue between the grid (PositionManager) acquisition path and the spool.
 
-Mirrors :mod:`acquisition.spool_adapter` but for the direct-grid path driven by
+Mirrors :mod:`acquisition.spool_adapter` but for the grid path driven by
 :class:`motion.position_manager.PositionManager`. As in the bmotion path, the
 acquire process builds the full HDF5 skeleton up front (experiment/scope
 metadata, time arrays, and the single ``/Control/Positions`` group), so this

@@ -11,8 +11,9 @@ Layered like this:
         - hides the file-write details behind hdf5_writer
 
     single_shot_acquisition / handle_movement
-        - one acquisition step (with or without motion); shared by the spooled
-          loops and the hardware diagnostics.
+        - one acquisition step, with/without motion. single_shot_acquisition is
+          shared by the spooled bmotion loop and the hardware diagnostics;
+          handle_movement is now only used by the motion hardware diagnostic.
 
     run_acquisition_spooled
         - top-level grid/stationary loop driven by experiment_config.ini that
@@ -290,8 +291,8 @@ class MultiScopeAcquisition:
     def update_scope_hdf5(self, all_data, shot_num, overwrite=False):
         """Append a shot of scope data to the HDF5 file (raw int16).
 
-        ``overwrite`` replaces an existing shot group; set on a non-spooled resume
-        that re-takes the probe's last position over its stale shots.
+        ``overwrite`` replaces an existing shot group; set on a resume that
+        re-takes the probe's last position over its stale shots.
         """
         descriptions = {
             (scope_name, tr): self.get_channel_description(f"{scope_name}_{tr}")

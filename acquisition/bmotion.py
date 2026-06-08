@@ -273,22 +273,6 @@ def move_to_index(
     # disable all motors
     for mg in rm.mgs.values():
         mg.drive.send_command('disable')
-    
-    # all_motors_set = False
-    # wait_until = datetime.now() + timedelta(seconds=5)
-    # while not all_motors_set:
-    #     sleep(0.05)
-
-    #     for mg in rm.mgs.values():
-    #         sleep(0.05)
-    #         motor_enabled_state = [
-    #             ax.motor.status["enabled"] is state for ax in mg.drive.axes
-    #         ]
-    #         all_motors_set = all(motor_enabled_state)
-
-    #     if wait_until > datetime.now():
-    #         # timeout
-    #         all_motors_set = True
 
 
 def read_bmotion_positions(rm, mg_keys):
@@ -348,8 +332,11 @@ def record_bmotion_positions(
 
 
 class _Hdf5ShotSink:
-    """Per-shot sink that writes straight into the final HDF5 file (legacy,
-    in-process behaviour). Used when no parallel spool is configured."""
+    """Per-shot sink that writes straight into the final HDF5 file.
+
+    Production always spools (``_SpoolShotSink``); this direct-write sink is the
+    default fallback for the loop helpers and is what the unit tests drive.
+    """
 
     def __init__(self, msa, active_scopes, hdf5_path, run_manager,
                  resume_from_shot=1):

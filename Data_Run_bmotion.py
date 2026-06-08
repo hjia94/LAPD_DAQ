@@ -106,10 +106,7 @@ def main():
     config, _ = load_experiment_config(config_path)
     nshots = config.getint('nshots', 'num_duplicate_shots', fallback=1)
     spool_root, _ = get_storage_paths(config)
-    # Acquisition is spooled-only: [storage] must provide a fast spool_dir.
-    # The legacy single-process (non-spooled) path was removed; without a
-    # spool_dir there is nothing to run, so fail loudly instead of silently
-    # falling back. (Recover it from git history if ever needed.)
+    # Spooled-only: without a spool_dir there is nothing to run, so fail loudly.
     if not spool_root:
         print('ERROR: no [storage] spool_dir configured. Non-spooled mode was '
               'removed; set a spool_dir in experiment_config.ini.')

@@ -56,10 +56,7 @@ def main():
     config, _ = load_experiment_config(config_path)
     hdf5_path = resolve_hdf5_path(config, base_path)
 
-    # Acquisition is spooled-only: [storage] must provide a fast spool_dir.
-    # The legacy single-process (non-spooled) path was removed; without a
-    # spool_dir there is nothing to run, so fail loudly instead of silently
-    # falling back. (Recover it from git history if ever needed.)
+    # Spooled-only: without a spool_dir there is nothing to run, so fail loudly.
     spool_dir, _hdf5_dir = get_storage_paths(config)
     if not spool_dir:
         print('ERROR: no [storage] spool_dir configured. Non-spooled mode was '
