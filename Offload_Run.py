@@ -93,6 +93,18 @@ def _parse_args():
     return p.parse_args()
 
 
+def _hdf5_target(spool_dir):
+    """The HDF5 path this spool fills, or None if no readable metadata.
+
+    Centralizes the exists-then-read idiom used at pre-echo, in --list, and at
+    teardown so the same best-effort read isn't spelled three different ways.
+    Returns None on absence or a typed SpoolMetadataError (caller decides).
+    """
+    if not spool_format.run_metadata_exists(spool_dir):
+        return None
+    return spool_format.read_run_metadata(spool_dir).get("hdf5_path")
+
+
 def _spool_subdirs(path):
     """Spool folders to inspect: ``path`` itself if it holds run metadata,
     else its immediate subdirectories that do (so a spool *root* lists each run).
@@ -105,7 +117,8 @@ def _spool_subdirs(path):
         return [(path, True)]
     out = []
     try:
-        entries = sorted(os.scandir(path), key=lambda e: e.name)
+        with os.scandir(path) as it:
+            entries = sorted(it, key=lambda e: e.name)
     except OSError:
         return out
     for entry in entries:
@@ -134,17 +147,20 @@ def _list_spools(path):
             print("    (no run metadata — not a drainable spool; skip)\n")
             continue
         # One corrupt/unreadable spool must not abort the whole survey: report it
-        # and move on, so --list still shows every other run. The readers raise a
-        # typed SpoolMetadataError for a present-but-broken file.
+        # and move on, so --list still shows every other run. read_run_metadata
+        # raises a typed SpoolMetadataError for a present-but-broken meta_run.pkl.
         try:
             meta = spool_format.read_run_metadata(spool_dir)
-            hdf5_path = meta.get("hdf5_path")
-            exists = bool(hdf5_path) and os.path.isfile(hdf5_path)
-            pending = spool_format.pending_shot_count(spool_dir)
-            complete = spool_format.read_run_complete(spool_dir)
         except spool_format.SpoolMetadataError as e:
             print(f"    (metadata unreadable: {e}; skip)\n")
             continue
+        hdf5_path = meta.get("hdf5_path")
+        exists = bool(hdf5_path) and os.path.isfile(hdf5_path)
+        pending = spool_format.pending_shot_count(spool_dir)
+        # read_run_complete returns None for BOTH an absent and a corrupt
+        # sentinel (it never raises), so a broken RUN_COMPLETE simply reads as
+        # "no" below — the survey still lists the run rather than aborting.
+        complete = spool_format.read_run_complete(spool_dir)
         print(f"    -> HDF5:   {hdf5_path}  [{'EXISTS' if exists else 'MISSING'}]")
         print(f"       writer: {meta.get('writer')}   pending shots in spool: {pending}")
         if complete is None:
@@ -156,6 +172,31 @@ def _list_spools(path):
                   f"{complete.get('final_shot_num')}{early}")
         # The actionable line: this is the exact command to fill that HDF5.
         print(f"       drain with: python Offload_Run.py --spool-dir \"{spool_dir}\"\n")
+
+
+def _report_result(hdf5_path, t_start, config):
+    """Print the finish summary and, on success, run the auto-plot hook.
+
+    ``hdf5_path`` is the file the acquire side recorded (or None if metadata was
+    never readable). Splitting this out of ``main``'s teardown keeps that
+    ``finally`` block short and makes the reporting independently testable.
+    """
+    print('Offload finished at', datetime.datetime.now())
+    print('Time taken: %.2f hours' % ((time.time() - t_start) / 3600))
+    if hdf5_path and os.path.isfile(hdf5_path):
+        size = os.stat(hdf5_path).st_size / (1024 * 1024)
+        print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
+        # Spooled: the HDF5 is only complete once offload finishes, so this is
+        # the right place to auto-plot the line profile (no-op on plane/single-
+        # point runs). maybe_autoplot is itself swallow-all; the try here only
+        # guards the import so a missing analysis package can't break teardown.
+        try:
+            from read_and_analyze.auto_plot import maybe_autoplot
+            maybe_autoplot(hdf5_path, config)
+        except Exception as e:
+            print(f"Warning: auto-plot hook failed to load: {e}")
+    else:
+        print(f'File "{hdf5_path}" was not created')
 
 
 #===============================================================================================================================================
@@ -210,10 +251,9 @@ def main():
     # waits for it (bounded by MetadataTimeout). We therefore do NOT fail fast on
     # absence -- only the timeout (a spool ROOT or never-started run) is fatal,
     # handled below with the --list hint.
-    if spool_format.run_metadata_exists(spool_dir):
-        meta = spool_format.read_run_metadata(spool_dir)
-        target = meta.get("hdf5_path")
-        state = 'exists' if (target and os.path.isfile(target)) else 'MISSING - will be filled if skeleton present'
+    target = _hdf5_target(spool_dir)
+    if target is not None:
+        state = 'exists' if os.path.isfile(target) else 'MISSING - will be filled if skeleton present'
         print(f'  target HDF5 = {target}  [{state}]')
     else:
         print('  No run metadata yet; waiting for the acquire process to write it '
@@ -221,7 +261,9 @@ def main():
 
     t_start = time.time()
 
-    hdf5_path = None
+    # Seed the reported path from the pre-echo read so a successful drain still
+    # names its file even if the teardown re-read below races a prune/removal.
+    hdf5_path = target
     try:
         run_offload(spool_dir, config=config)
     except MetadataTimeout as e:
@@ -239,32 +281,16 @@ def main():
         print(f'\n______Halted due to error: {str(e)}______', '  at', time.ctime())
         traceback.print_exc()
     finally:
-        # Report the file the acquire side recorded (if metadata was written).
-        # Guarded against a TOCTOU race: the metadata can be pruned/removed
-        # between the existence check and the read, and a teardown read must
-        # never mask the real outcome with its own exception.
+        # Re-read the recorded file (it may only have appeared mid-drain), but
+        # never let a teardown read mask the real outcome: a failed/raced read
+        # keeps the pre-echo value rather than blanking it.
         try:
-            if spool_format.run_metadata_exists(spool_dir):
-                hdf5_path = spool_format.read_run_metadata(spool_dir).get("hdf5_path")
+            fresh = _hdf5_target(spool_dir)
         except Exception:  # noqa: BLE001 - teardown reporting is best-effort
-            hdf5_path = None
-        print('Offload finished at', datetime.datetime.now())
-        print('Time taken: %.2f hours' % ((time.time()-t_start)/3600))
-        if hdf5_path and os.path.isfile(hdf5_path):
-            size = os.stat(hdf5_path).st_size/(1024*1024)
-            print(f'Wrote file "{hdf5_path}", {size:.1f} MB')
-            # Spooled: the HDF5 is only complete once offload finishes, so this
-            # is the right place to auto-plot the line profile (no-op on
-            # plane/single-point runs). maybe_autoplot is itself swallow-all;
-            # the try here only guards the import so a missing analysis package
-            # can't break offload teardown.
-            try:
-                from read_and_analyze.auto_plot import maybe_autoplot
-                maybe_autoplot(hdf5_path, config)
-            except Exception as e:
-                print(f"Warning: auto-plot hook failed to load: {e}")
-        else:
-            print(f'File "{hdf5_path}" was not created')
+            fresh = None
+        if fresh is not None:
+            hdf5_path = fresh
+        _report_result(hdf5_path, t_start, config)
         # Close the log file BEFORE pausing: this process sits at the pause prompt
         # until the user closes the window, so an open offload.log handle would
         # otherwise block a later "restart" from rotating/removing the spool
