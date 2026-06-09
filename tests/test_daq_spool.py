@@ -22,9 +22,11 @@ Runs on this PC's .venv (real bapsf_motion / h5py / numpy). No motor required.
 
 import os
 import sys
+import errno
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import h5py
 import numpy as np
@@ -432,31 +434,69 @@ class OffloadResilienceTests(unittest.TestCase):
             self.assertNotIn("C1_data", grp)
 
 
-class BackpressureTests(unittest.TestCase):
+class DiskFullRetryTests(unittest.TestCase):
+    """The only backpressure now: pause+retry on a real disk-full write error."""
+
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_bp_")
+        self.spool = tempfile.mkdtemp(prefix="spool_df_")
 
-    def test_over_capacity_on_pending_count(self):
-        for shot in (1, 2, 3):
-            spool_format.write_shot(
-                self.spool, spool_adapter.all_data_to_payload(_make_all_data(), shot, None))
-        # 3 pending, limit 2 -> over capacity; limit disabled (0) -> not.
-        self.assertIsNotNone(
-            spool_format.spool_over_capacity(self.spool, max_pending_shots=2, min_free_gb=0))
-        self.assertIsNone(
-            spool_format.spool_over_capacity(self.spool, max_pending_shots=0, min_free_gb=0))
-
-    def test_wait_returns_immediately_when_under_limit(self):
-        # No pending shots, generous limits -> must not block.
-        spool_format.wait_for_capacity(self.spool, max_pending_shots=10,
-                                       min_free_gb=0, poll_seconds=0.01)
-
-    def test_pending_count_and_free_space(self):
+    def test_pending_count(self):
         self.assertEqual(spool_format.pending_shot_count(self.spool), 0)
         spool_format.write_shot(
             self.spool, spool_adapter.all_data_to_payload(_make_all_data(), 1, None))
         self.assertEqual(spool_format.pending_shot_count(self.spool), 1)
-        self.assertGreater(spool_format.free_space_bytes(self.spool), 0)
+
+    def test_is_disk_full_error(self):
+        self.assertTrue(spool_format.is_disk_full_error(OSError(errno.ENOSPC, "full")))
+        win = OSError("full")
+        win.winerror = 112
+        self.assertTrue(spool_format.is_disk_full_error(win))
+        self.assertFalse(spool_format.is_disk_full_error(OSError(errno.EACCES, "denied")))
+        self.assertFalse(spool_format.is_disk_full_error(ValueError("nope")))
+
+    def test_retries_then_succeeds(self):
+        payload = spool_adapter.all_data_to_payload(_make_all_data(), 1, None)
+        calls = []
+
+        def fake_write_shot(spool_dir, p, parallel=False):
+            calls.append(1)
+            if len(calls) < 3:  # fail twice, succeed on the third attempt
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch.object(spool_format, "write_shot", side_effect=fake_write_shot), \
+                mock.patch.object(spool_format.time, "sleep") as sleep:
+            spool_format.write_shot_with_disk_full_retry(
+                self.spool, payload, pause_seconds=0.0, max_retries=3)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)  # one sleep per failed attempt
+
+    def test_aborts_after_max_retries(self):
+        payload = spool_adapter.all_data_to_payload(_make_all_data(), 1, None)
+
+        def always_full(spool_dir, p, parallel=False):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with mock.patch.object(spool_format, "write_shot", side_effect=always_full), \
+                mock.patch.object(spool_format.time, "sleep"):
+            with self.assertRaises(OSError):
+                spool_format.write_shot_with_disk_full_retry(
+                    self.spool, payload, pause_seconds=0.0, max_retries=2)
+
+    def test_non_disk_full_error_propagates_immediately(self):
+        payload = spool_adapter.all_data_to_payload(_make_all_data(), 1, None)
+        calls = []
+
+        def other_error(spool_dir, p, parallel=False):
+            calls.append(1)
+            raise OSError(errno.EACCES, "Permission denied")
+
+        with mock.patch.object(spool_format, "write_shot", side_effect=other_error), \
+                mock.patch.object(spool_format.time, "sleep") as sleep:
+            with self.assertRaises(OSError):
+                spool_format.write_shot_with_disk_full_retry(
+                    self.spool, payload, pause_seconds=0.0, max_retries=3)
+        self.assertEqual(len(calls), 1)  # no retry for a non-disk-full error
+        sleep.assert_not_called()
 
 
 class SetupFailureTests(unittest.TestCase):

@@ -739,18 +739,13 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
             })
             print(f"Wrote run metadata to spool: {spool_dir}")
 
-            from .config import get_backpressure_limits
-            max_pending, min_free_gb = get_backpressure_limits(config)
+            from .config import get_disk_full_pause_opts
+            pause_seconds, max_retries = get_disk_full_pause_opts(config)
 
             with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
                 for n in range(total_shots):
                     shot_num = n + 1
                     coords = None
-
-                    # Backpressure: pause if the offload isn't draining the
-                    # spool fast enough (so we never overrun the spool disk).
-                    spool_format.wait_for_capacity(
-                        spool_dir, max_pending, min_free_gb, warn=tqdm.write)
 
                     if pos_manager is not None and mc is not None:
                         positions = pos_manager.positions[n]
@@ -789,7 +784,10 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                             coords = {'x': xpos, 'y': ypos, 'z': zpos}
 
                     payload = grid_spool_adapter.all_data_to_payload(all_data, shot_num, coords)
-                    spool_format.write_shot(spool_dir, payload, parallel=msa.parallel_spool_write)
+                    spool_format.write_shot_with_disk_full_retry(
+                        spool_dir, payload, parallel=msa.parallel_spool_write,
+                        pause_seconds=pause_seconds, max_retries=max_retries,
+                        warn=tqdm.write)
                     pbar.update(1)
 
         except KeyboardInterrupt as err:

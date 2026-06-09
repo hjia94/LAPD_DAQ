@@ -9,7 +9,7 @@ behind per-path adapters (e.g. ``acquisition/spool_adapter.py``).
 from .spool_format import (
     ShotPayload,
     TracePayload,
-    free_space_bytes,
+    is_disk_full_error,
     iter_ready_shots,
     pending_shot_count,
     quarantine_shot,
@@ -20,12 +20,13 @@ from .spool_format import (
     write_run_complete,
     write_run_metadata,
     write_shot,
+    write_shot_with_disk_full_retry,
 )
 
 __all__ = [
     "ShotPayload",
     "TracePayload",
-    "free_space_bytes",
+    "is_disk_full_error",
     "iter_ready_shots",
     "pending_shot_count",
     "quarantine_shot",
@@ -36,4 +37,5 @@ __all__ = [
     "write_run_complete",
     "write_run_metadata",
     "write_shot",
+    "write_shot_with_disk_full_retry",
 ]

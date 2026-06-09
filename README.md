@@ -29,7 +29,7 @@ Two acquisition front-ends coexist during the transition:
 LAPD_DAQ/
   lapd_daq/        New framework: CLI, config model, run engine, devices, HDF5 writer
   acquisition/     Acquisition package used by Data_Run*.py (spool, offload, scope/bmotion loops)
-  spooling/        Per-shot spool format + capacity/backpressure helpers
+  spooling/        Per-shot spool format + disk-full pause/retry helper
   drivers/         LeCroy and Phantom hardware driver wrappers
   motion/          Motor control and position management helpers
   pi_gpio/         Raspberry Pi trigger/dropper client package
@@ -404,8 +404,9 @@ Python config objects.
 Important sections:
 
 - `[storage]`: `spool_dir` (fast disk for per-shot spool) and `hdf5_dir` —
-  required by the spooled `Data_Run*.py` path.
-- `[acquisition]`: per-shot/backpressure tuning for the spooled path.
+  required by the spooled `Data_Run*.py` path. Optional `disk_full_pause_seconds`
+  / `disk_full_max_retries` tune the pause+retry when the spool disk fills.
+- `[acquisition]`: per-shot tuning for the spooled path.
 - `[nshots]`: `num_duplicate_shots`, `num_run_repeats`
 - `[experiment]`: experiment `name` (used to build the HDF5 filename). The
   run description lives in a separate `description.txt` next to the config,

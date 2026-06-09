@@ -24,6 +24,7 @@ created. The offload side ignores any shot directory that lacks a ``.done``
 marker, so a half-written or interrupted shot is never consumed.
 """
 
+import errno
 import glob
 import os
 import pickle
@@ -209,6 +210,60 @@ def write_shot(spool_dir: str, payload: ShotPayload, parallel: bool = False) -> 
         pass
 
 
+# Default pause/retry behaviour when the spool disk fills up mid-run. Both are
+# overridable per call (acquisition reads them from [storage]); the constants are
+# the fallbacks so a run with no config still behaves sanely.
+DISK_FULL_PAUSE_SECONDS = 30.0
+DISK_FULL_MAX_RETRIES = 3
+
+
+def is_disk_full_error(exc: BaseException) -> bool:
+    """True if ``exc`` is an out-of-space failure (POSIX ENOSPC / Windows 112).
+
+    The OS surfaces a full disk as ``OSError``; the errno is portable on POSIX
+    and ``winerror`` 112 ("There is not enough space on the disk") on Windows.
+    """
+    if not isinstance(exc, OSError):
+        return False
+    if exc.errno == errno.ENOSPC:
+        return True
+    return getattr(exc, "winerror", None) == 112
+
+
+def write_shot_with_disk_full_retry(
+    spool_dir: str, payload: "ShotPayload", parallel: bool = False,
+    pause_seconds: float = DISK_FULL_PAUSE_SECONDS,
+    max_retries: int = DISK_FULL_MAX_RETRIES, warn=None,
+) -> None:
+    """Write a shot, pausing and retrying if the spool disk is full.
+
+    This is the only backpressure mechanism: instead of predicting when the
+    offload is falling behind, we just write, and only react to a real
+    out-of-space failure. On disk-full we sleep ``pause_seconds`` (giving the
+    offload time to drain already-written shots into the HDF5 and free their
+    bins) and retry, up to ``max_retries`` extra attempts. If it still fails the
+    error propagates so the run aborts rather than spinning forever.
+
+    Any error that is not disk-full propagates immediately on the first attempt.
+    """
+    emit = warn or print
+    attempt = 0
+    while True:
+        try:
+            write_shot(spool_dir, payload, parallel=parallel)
+            return
+        except OSError as exc:
+            if not is_disk_full_error(exc) or attempt >= max_retries:
+                raise
+            attempt += 1
+            emit(
+                f"Spool disk full writing shot {payload.shot_num}; pausing "
+                f"{pause_seconds:.0f}s for offload to drain "
+                f"(retry {attempt}/{max_retries})."
+            )
+            time.sleep(pause_seconds)
+
+
 # --------------------------------------------------------------------------- #
 # Per-shot read (offload side)
 # --------------------------------------------------------------------------- #
@@ -302,64 +357,11 @@ def quarantine_shot(spool_dir: str, shot_num: int) -> str:
 def pending_shot_count(spool_dir: str) -> int:
     """Number of shots written but not yet offloaded (``.done`` markers present).
 
-    Acquisition uses this as a backpressure signal: a growing count means the
-    offload process can't keep up (or isn't running), so the spool disk is
-    filling.
+    Used only for reporting (e.g. ``Offload_Run.py --list``); it is no longer a
+    backpressure signal. Acquisition reacts to an actual disk-full write failure
+    instead (see :func:`write_shot_with_disk_full_retry`).
     """
     return len(iter_ready_shots(spool_dir))
-
-
-def free_space_bytes(spool_dir: str) -> int:
-    """Bytes free on the filesystem holding ``spool_dir`` (0 if unavailable)."""
-    try:
-        return shutil.disk_usage(spool_dir).free
-    except OSError:
-        return 0
-
-
-def spool_over_capacity(spool_dir, max_pending_shots, min_free_gb):
-    """Return a reason string if the spool is over a backpressure limit, else None.
-
-    Over capacity means the offload isn't keeping up (or isn't running): either
-    too many undrained shots have piled up, or the spool disk is nearly full.
-    A limit of ``<= 0`` disables that particular check.
-    """
-    if max_pending_shots and max_pending_shots > 0:
-        pending = pending_shot_count(spool_dir)
-        if pending > max_pending_shots:
-            return f"{pending} shots pending offload (> {max_pending_shots})"
-    if min_free_gb and min_free_gb > 0:
-        free_gb = free_space_bytes(spool_dir) / (1024 ** 3)
-        if free_gb < min_free_gb:
-            return f"{free_gb:.1f} GB free on spool disk (< {min_free_gb} GB)"
-    return None
-
-
-def wait_for_capacity(spool_dir, max_pending_shots, min_free_gb,
-                      poll_seconds=2.0, warn=None, check_abort=None):
-    """Block until the spool is back under its backpressure limits.
-
-    Returns immediately when there is capacity. Otherwise warns once (via the
-    ``warn`` callback, defaulting to ``print``) and polls until the offload
-    process drains enough shots / frees enough space. ``check_abort`` (if given)
-    is polled each iteration; if it returns truthy the wait raises
-    KeyboardInterrupt so the acquire loop's existing Ctrl-C handling runs.
-
-    This is the safety valve for "offload to backup without filling up the PC
-    disk": acquisition pauses rather than overrunning the spool disk.
-    """
-    reason = spool_over_capacity(spool_dir, max_pending_shots, min_free_gb)
-    if reason is None:
-        return
-    (warn or print)(
-        f"Spool backpressure: {reason}. Pausing acquisition until the offload "
-        f"process catches up (is Offload_Run.py running and its target disk OK?)."
-    )
-    while spool_over_capacity(spool_dir, max_pending_shots, min_free_gb) is not None:
-        if check_abort is not None and check_abort():
-            raise KeyboardInterrupt("aborted while waiting for spool capacity")
-        time.sleep(poll_seconds)
-    (warn or print)("Spool backpressure cleared; resuming acquisition.")
 
 
 # --------------------------------------------------------------------------- #

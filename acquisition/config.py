@@ -215,21 +215,24 @@ def get_motion_recovery_opts(config):
     }
 
 
-def get_backpressure_limits(config):
-    """Return ``(max_pending_shots, min_free_gb)`` for spool backpressure.
+def get_disk_full_pause_opts(config):
+    """Return ``(pause_seconds, max_retries)`` for the disk-full spool pause.
 
-    Acquisition pauses before a shot when the spool has more than
-    ``max_pending_shots`` undrained shots OR less than ``min_free_gb`` free on
-    the spool disk, so a slow/stalled offload can't silently fill the disk.
-    Both come from the optional ``[storage]`` keys ``max_pending_shots`` /
-    ``min_free_gb``; either ``<= 0`` disables that check. Defaults are generous
-    (1000 shots, 5 GB) so a healthy run never notices them.
+    Acquisition no longer predicts when the offload is falling behind; it simply
+    writes each shot and, only if the spool disk is actually full, pauses
+    ``pause_seconds`` to let the offload drain and retries up to ``max_retries``
+    times before aborting. Both come from optional ``[storage]`` keys
+    (``disk_full_pause_seconds`` / ``disk_full_max_retries``); the 30 s / 3-retry
+    defaults mean the user never has to set them.
     """
-    if 'storage' not in config:
-        return 1000, 5.0
-    max_pending = config.getint('storage', 'max_pending_shots', fallback=1000)
-    min_free_gb = config.getfloat('storage', 'min_free_gb', fallback=5.0)
-    return max_pending, min_free_gb
+    from spooling import spool_format
+
+    pause = spool_format.DISK_FULL_PAUSE_SECONDS
+    retries = spool_format.DISK_FULL_MAX_RETRIES
+    if 'storage' in config:
+        pause = config.getfloat('storage', 'disk_full_pause_seconds', fallback=pause)
+        retries = config.getint('storage', 'disk_full_max_retries', fallback=retries)
+    return pause, retries
 
 
 def get_auto_plot_enabled(config):

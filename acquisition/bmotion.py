@@ -382,34 +382,32 @@ class _SpoolShotSink:
     """
 
     def __init__(self, msa, active_scopes, spool_dir, run_manager,
-                 max_pending_shots=0, min_free_gb=0.0):
+                 pause_seconds=None, max_retries=None):
+        from spooling import spool_format
+
         self.msa = msa
         self.active_scopes = active_scopes
         self.spool_dir = spool_dir
         self.run_manager = run_manager
-        self.max_pending_shots = max_pending_shots
-        self.min_free_gb = min_free_gb
-
-    def _await_capacity(self):
-        """Pause before acquiring if the spool is filling faster than offload."""
-        from spooling import spool_format
-        spool_format.wait_for_capacity(
-            self.spool_dir, self.max_pending_shots, self.min_free_gb,
-            warn=tqdm.write,
-        )
+        self.pause_seconds = (spool_format.DISK_FULL_PAUSE_SECONDS
+                              if pause_seconds is None else pause_seconds)
+        self.max_retries = (spool_format.DISK_FULL_MAX_RETRIES
+                            if max_retries is None else max_retries)
 
     def take_shot(self, shot_num, record_keys):
         from spooling import spool_format
         from . import spool_adapter
 
-        self._await_capacity()
         self.msa.arm_scopes_for_trigger(self.active_scopes, verbose=False)
         all_data = self.msa.acquire_shot_dispatch(self.active_scopes, shot_num, verbose=False)
         if not all_data:
             raise RuntimeError(f"No valid data acquired at shot {shot_num}")
         coords = read_bmotion_positions(self.run_manager, record_keys)
         payload = spool_adapter.all_data_to_payload(all_data, shot_num, coords)
-        spool_format.write_shot(self.spool_dir, payload, parallel=self.msa.parallel_spool_write)
+        spool_format.write_shot_with_disk_full_retry(
+            self.spool_dir, payload, parallel=self.msa.parallel_spool_write,
+            pause_seconds=self.pause_seconds, max_retries=self.max_retries,
+            warn=tqdm.write)
 
     def mark_skipped(self, shot_num, reason, record_keys):
         from spooling import spool_format
@@ -847,11 +845,11 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                     abort_reason="resume in progress (provisional)")
                 print(f"Resuming: overwrite boundary set to shot {start_shot}")
 
-            from .config import get_backpressure_limits, get_motion_recovery_opts
-            max_pending, min_free_gb = get_backpressure_limits(config)
+            from .config import get_disk_full_pause_opts, get_motion_recovery_opts
+            pause_seconds, max_retries = get_disk_full_pause_opts(config)
             sink = _SpoolShotSink(msa, active_scopes, spool_dir, run_manager,
-                                  max_pending_shots=max_pending,
-                                  min_free_gb=min_free_gb)
+                                  pause_seconds=pause_seconds,
+                                  max_retries=max_retries)
             move_opts = get_motion_recovery_opts(config)
 
             if execution_order == "sequential":
