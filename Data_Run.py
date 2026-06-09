@@ -23,6 +23,7 @@ Update July.2025
 
 import datetime
 import os
+import subprocess
 from acquisition import run_acquisition_spooled
 from acquisition.config import (
     get_storage_paths,
@@ -41,6 +42,39 @@ after the config is read.
 '''
 base_path = r"E:\Shadow data\Pat"
 config_path = os.path.join(base_path, 'experiment_config.ini')
+
+#===============================================================================================================================================
+# Offload launch helper
+#===============================================================================================================================================
+
+def launch_offload(spool_dir, config_path):
+    """Auto-launch Offload_Run.py in its own console, unless one already runs.
+
+    The offload politely waits for run metadata (offload_runner._wait_for), so
+    launching before metadata exists is safe; we detach (no wait) so it keeps
+    draining after this acquire process exits. A live ``offload.lock`` in the
+    spool means a previous run's offload is still attached to this subfolder, so
+    we don't start a second one that would race it. The offload dispatches on the
+    ``"grid"`` writer tag recorded in the spool metadata, so the same launcher
+    serves both the grid and bmotion paths unchanged.
+    """
+    from spooling import spool_format
+
+    if spool_format.offload_lock_is_live(spool_dir):
+        print('  An offload process is already attached to this spool; '
+              'not launching a second one.')
+        return
+
+    offload_script = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'Offload_Run.py')
+    subprocess.Popen(
+        [sys.executable, offload_script,
+         '--spool-dir', spool_dir, '--config', config_path],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+    print('  Launched Offload_Run.py in a new console window.')
+
 
 #===============================================================================================================================================
 # Main function
@@ -83,7 +117,8 @@ def main():
     if not os.path.exists(spool_dir):
         os.makedirs(spool_dir)
     print(f'PARALLEL mode: spooling shots to {spool_dir}')
-    print(f'  Run Offload_Run.py to fill the HDF5 file ({hdf5_path}).')
+    launch_offload(spool_dir, config_path)
+    print(f'  Offload_Run.py will fill the HDF5 file ({hdf5_path}).')
 
     print('Data run started at', datetime.datetime.now())
     t_start = time.time()
