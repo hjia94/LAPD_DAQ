@@ -49,7 +49,7 @@ from acquisition.config import (
     load_experiment_config,
 )
 from acquisition.logging_utils import close_log_file_handlers
-from offload_engine import run_offload
+from offload_engine import MetadataTimeout, run_offload
 from spooling import spool_format
 
 ############################################################################################################################
@@ -197,27 +197,34 @@ def main():
 
     # Echo the resolved HDF5 target (from THIS spool's own metadata) before
     # draining, so a mismatched/missing file is caught now rather than after a
-    # long fill. If the metadata is absent, this folder isn't a drainable run
-    # leaf (it may be a spool ROOT) -- run_offload would otherwise wait forever
-    # for metadata, so fail fast and point the user at --list.
+    # long fill. The metadata being ABSENT here is normal and expected for the
+    # auto-launched case: the offload is launched before acquire writes
+    # meta_run.pkl (acquire writes it only after scope init), so run_offload
+    # waits for it (bounded by MetadataTimeout). We therefore do NOT fail fast on
+    # absence -- only the timeout (a spool ROOT or never-started run) is fatal,
+    # handled below with the --list hint.
     if spool_format.run_metadata_exists(spool_dir):
         meta = spool_format.read_run_metadata(spool_dir)
         target = meta.get("hdf5_path")
         state = 'exists' if (target and os.path.isfile(target)) else 'MISSING - will be filled if skeleton present'
         print(f'  target HDF5 = {target}  [{state}]')
     else:
-        print(f'  ERROR: no run metadata (meta_run.pkl) in {spool_dir}.')
-        print('  This is not a drainable spool folder. If you pointed at a spool '
-              'ROOT, list the runs under it and pick one:')
-        print(f'    python Offload_Run.py --list --spool-dir "{spool_dir}"')
-        _pause_before_exit()
-        sys.exit(1)
+        print('  No run metadata yet; waiting for the acquire process to write it '
+              '(normal when auto-launched).')
 
     t_start = time.time()
 
     hdf5_path = None
     try:
         run_offload(spool_dir, config=config)
+    except MetadataTimeout as e:
+        print(f'\n  ERROR: {e}')
+        print('  This is not a drainable spool folder (no acquire process wrote '
+              'metadata). If you pointed at a spool ROOT, list the runs under it '
+              'and pick one:')
+        print(f'    python Offload_Run.py --list --spool-dir "{spool_dir}"')
+        _pause_before_exit()
+        sys.exit(1)
     except KeyboardInterrupt:
         print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
     except Exception as e:

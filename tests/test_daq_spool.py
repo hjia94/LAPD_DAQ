@@ -24,6 +24,7 @@ import os
 import sys
 import errno
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -497,6 +498,44 @@ class DiskFullRetryTests(unittest.TestCase):
                     self.spool, payload, pause_seconds=0.0, max_retries=3)
         self.assertEqual(len(calls), 1)  # no retry for a non-disk-full error
         sleep.assert_not_called()
+
+
+class MetadataWaitTests(unittest.TestCase):
+    """The offload is auto-launched before acquire writes meta_run.pkl, so it
+    must WAIT for the metadata (not exit), and only time out on a folder that
+    will never become a run (e.g. a spool ROOT)."""
+
+    def setUp(self):
+        self.spool = tempfile.mkdtemp(prefix="spool_meta_")
+
+    def test_waits_for_late_metadata(self):
+        # No metadata yet: a short bounded wait should still pick it up once it
+        # appears, then drain to completion.
+        off_h5 = tempfile.mktemp(suffix=".hdf5")
+        _build_bmotion_skeleton(off_h5, total_shots=1)
+
+        def writer():
+            spool_format.write_run_metadata(self.spool, _make_meta(hdf5_path=off_h5))
+            payload = spool_adapter.all_data_to_payload(
+                _make_all_data(False), 1, {"MG_A": (1.0, 2.0)})
+            spool_format.write_shot(self.spool, payload)
+            spool_format.write_run_complete(self.spool, 1)
+
+        t = threading.Timer(0.05, writer)
+        t.start()
+        try:
+            offload_engine.run_offload(self.spool, poll_seconds=0.01,
+                                       metadata_timeout=5.0)
+        finally:
+            t.join()
+        with h5py.File(off_h5, "r") as f:
+            self.assertIn("shot_1", f["lpscope"])
+
+    def test_times_out_when_metadata_never_arrives(self):
+        # Empty folder, metadata never written -> MetadataTimeout (not a hang).
+        with self.assertRaises(offload_engine.MetadataTimeout):
+            offload_engine.run_offload(self.spool, poll_seconds=0.01,
+                                       metadata_timeout=0.05)
 
 
 class SetupFailureTests(unittest.TestCase):

@@ -35,6 +35,14 @@ _log = logging.getLogger("offload")
 # Poll interval while waiting for new shots / the run-complete sentinel.
 _POLL_SECONDS = 0.5
 
+# How long to wait for the acquire process to write run metadata (meta_run.pkl)
+# before giving up. The offload is auto-launched *before* acquire writes the
+# metadata (acquire writes it only after scope init), so a wait is expected and
+# normal. The bound exists only so a misdirected manual drain -- e.g. pointed at
+# a spool ROOT that will never get metadata -- doesn't hang forever; it must be
+# generous enough to cover acquire's scope-init time.
+_METADATA_TIMEOUT_SECONDS = 120.0
+
 # How many times to retry a shot that fails to write/verify before quarantining
 # it (moving it aside so it can't hang the drain). A transient slow-disk hiccup
 # clears on the next pass; a genuinely corrupt shot is set aside after this.
@@ -55,8 +63,21 @@ def _get_adapter(writer_tag):
     )
 
 
+class MetadataTimeout(Exception):
+    """Run metadata never appeared in the spool within the wait window.
+
+    Raised when the spool folder has no ``meta_run.pkl`` after the grace period.
+    For an auto-launched offload this should never happen (acquire writes the
+    metadata seconds into the run); it signals the offload was pointed at a
+    folder that will never become a drainable run -- typically a spool ROOT
+    rather than a per-run subfolder. ``Offload_Run.py`` catches this to print the
+    ``--list`` hint.
+    """
+
+
 def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
-                max_retries=_MAX_RETRIES):
+                max_retries=_MAX_RETRIES,
+                metadata_timeout=_METADATA_TIMEOUT_SECONDS):
     """Drain ``spool_dir`` into the destination HDF5 until RUN_COMPLETE, then exit.
 
     The acquire process has already created the HDF5 file and written its full
@@ -74,6 +95,11 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
         max_retries: per-shot write/verify attempts before the shot is moved to
             ``shot_N.failed`` and skipped, so one corrupt shot cannot hang the
             drain (and the spool can still empty at RUN_COMPLETE).
+        metadata_timeout: seconds to wait for ``meta_run.pkl`` before raising
+            :class:`MetadataTimeout`. The offload is normally auto-launched
+            before acquire writes the metadata, so some wait is expected; the
+            bound only stops a misdirected drain from hanging forever. ``<= 0``
+            waits indefinitely.
     """
     # Single-instance guard: refuse to start if another offload already holds
     # this spool (e.g. a resume relaunched one while the prior is still draining).
@@ -82,14 +108,21 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
         print(f"Offload: another offload already owns {spool_dir}; exiting.")
         return
     try:
-        _run_offload_locked(spool_dir, config, poll_seconds, max_retries)
+        _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
+                            metadata_timeout)
     finally:
         spool_format.release_offload_lock(spool_dir)
 
 
-def _run_offload_locked(spool_dir, config, poll_seconds, max_retries):
+def _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
+                        metadata_timeout):
     print(f"Offload: waiting for run metadata in {spool_dir} ...")
-    _wait_for(lambda: spool_format.run_metadata_exists(spool_dir), poll_seconds)
+    if not _wait_for(lambda: spool_format.run_metadata_exists(spool_dir),
+                     poll_seconds, timeout=metadata_timeout):
+        raise MetadataTimeout(
+            f"No run metadata (meta_run.pkl) appeared in {spool_dir} after "
+            f"{metadata_timeout:.0f}s."
+        )
 
     meta = spool_format.read_run_metadata(spool_dir)
     hdf5_path = meta["hdf5_path"]
@@ -261,6 +294,16 @@ def _verify_shot_in_hdf5(hdf5_path, payload):
                     )
 
 
-def _wait_for(predicate, poll_seconds):
+def _wait_for(predicate, poll_seconds, timeout=0):
+    """Block until ``predicate()`` is truthy. Return True if it became true.
+
+    With ``timeout <= 0`` this waits indefinitely (always returns True). With a
+    positive timeout it returns False once that many seconds have elapsed without
+    the predicate becoming true, so the caller can act on the timeout.
+    """
+    deadline = (time.monotonic() + timeout) if timeout and timeout > 0 else None
     while not predicate():
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
         time.sleep(poll_seconds)
+    return True
