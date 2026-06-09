@@ -13,9 +13,11 @@ by the ``"writer"`` tag in the spooled run metadata (``acquisition`` for bmotion
 touching this loop.
 """
 
+import importlib
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import h5py
@@ -67,7 +69,7 @@ def _get_adapter(writer_tag: str):
             f"Supported: {sorted(_ADAPTERS)}."
         )
     module_name, attr_name = _ADAPTERS[writer_tag]
-    module = __import__(module_name, fromlist=[attr_name])
+    module = importlib.import_module(module_name)
     return getattr(module, attr_name)
 
 
@@ -155,6 +157,20 @@ def _run_offload(spool_dir: str, poll_seconds: float, max_retries: int,
                          quarantined, complete, final_shot_num)
 
 
+@dataclass
+class _DrainState:
+    """Mutable accumulators threaded through the drain loop.
+
+    Bundles the three sets the per-shot processing updates in place so the
+    helper takes one ``state`` instead of three separate accumulators, keeping
+    the read-only run context (paths, meta, adapter) clearly distinct from the
+    state being mutated.
+    """
+    processed: set = field(default_factory=set)       # shot_nums handled
+    failures: dict = field(default_factory=dict)       # shot_num -> retry count
+    quarantined: list = field(default_factory=list)    # exhausted-retries shots
+
+
 def _drain_loop(spool_dir: str, hdf5_path: str, meta: dict, adapter,
                 poll_seconds: float, max_retries: int):
     """Poll the spool, writing each ready shot, until RUN_COMPLETE drains it.
@@ -165,56 +181,75 @@ def _drain_loop(spool_dir: str, hdf5_path: str, meta: dict, adapter,
     """
     total = meta.get("total_shots")  # None for older runs -> indeterminate bar
 
-    processed = set()
-    failures = {}      # shot_num -> consecutive failure count
-    quarantined = []   # shot_nums moved aside after exhausting retries
+    state = _DrainState()
     complete = None
     final_shot_num = None
 
     with tqdm(total=total, desc="Offload", unit="shot", dynamic_ncols=True) as pbar:
         while True:
-            ready = [s for s in spool_format.iter_ready_shots(spool_dir) if s not in processed]
-            for shot_num in ready:
-                try:
-                    _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num)
-                    processed.add(shot_num)
-                    failures.pop(shot_num, None)
-                    pbar.update(1)
-                except Exception as e:
-                    failures[shot_num] = failures.get(shot_num, 0) + 1
-                    if failures[shot_num] >= max_retries:
-                        _quarantine_failed_shot(spool_dir, hdf5_path, meta, adapter,
-                                                shot_num, failures[shot_num], e)
-                        processed.add(shot_num)
-                        quarantined.append(shot_num)
-                        pbar.update(1)
-                    else:
-                        tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
-                                   f"(attempt {failures[shot_num]}/{max_retries}, bin kept for retry)")
-                        _log.warning("shot %s retry %d/%d: %s (bin kept)",
-                                     shot_num, failures[shot_num], max_retries, e)
+            ready = [s for s in spool_format.iter_ready_shots(spool_dir)
+                     if s not in state.processed]
+            _process_ready_shots(ready, spool_dir, hdf5_path, meta, adapter,
+                                 max_retries, state, pbar)
 
-            complete = spool_format.read_run_complete(spool_dir)
-            if complete is not None:
-                final_shot_num = complete.get("final_shot_num")
-                # One more drain pass to make sure no late .done slipped in. Shots
-                # that exhausted their retries are quarantined (not in iter_ready),
-                # so a persistently failing shot can no longer hang the run.
-                # TODO(drain-race): small window -- a .done published between this
-                # iter_ready_shots() snapshot and the break can be missed, leaving
-                # a shot in the spool after exit (needs a manual re-drain). Acquire
-                # writes RUN_COMPLETE only after its last write_shot returns, so in
-                # practice this is unobserved; tighten with a re-check loop if a
-                # writer is ever allowed to publish a shot after RUN_COMPLETE.
-                remaining = [s for s in spool_format.iter_ready_shots(spool_dir)
-                             if s not in processed]
-                if not remaining:
-                    break
+            # While shots are still arriving the sentinel can't be there yet, so
+            # only pay the read_run_complete + second iter_ready scan once a pass
+            # finds nothing ready (the run has caught up or finished). This keeps
+            # the busy path to a single directory scan per iteration.
+            if not ready:
+                complete = spool_format.read_run_complete(spool_dir)
+                if complete is not None:
+                    final_shot_num = complete.get("final_shot_num")
+                    # One more drain pass to make sure no late .done slipped in.
+                    # Shots that exhausted their retries are quarantined (not in
+                    # iter_ready), so a persistently failing shot can't hang the run.
+                    # TODO(drain-race): small window -- a .done published between
+                    # this iter_ready_shots() snapshot and the break can be missed,
+                    # leaving a shot in the spool after exit (needs a manual
+                    # re-drain). Acquire writes RUN_COMPLETE only after its last
+                    # write_shot returns, so in practice this is unobserved; tighten
+                    # with a re-check loop if a writer is ever allowed to publish a
+                    # shot after RUN_COMPLETE.
+                    remaining = [s for s in spool_format.iter_ready_shots(spool_dir)
+                                 if s not in state.processed]
+                    if not remaining:
+                        break
+                else:
+                    time.sleep(poll_seconds)
 
-            if not ready and complete is None:
-                time.sleep(poll_seconds)
+    return state.processed, state.quarantined, complete, final_shot_num
 
-    return processed, quarantined, complete, final_shot_num
+
+def _process_ready_shots(ready, spool_dir: str, hdf5_path: str, meta: dict,
+                         adapter, max_retries: int, state: "_DrainState",
+                         pbar) -> None:
+    """Write each ready shot, updating ``state`` in place.
+
+    A transient write/verify error keeps the bin and bumps the shot's failure
+    count for a later retry; a shot that exhausts ``max_retries`` is quarantined
+    (set aside) so one poison shot can't hang the drain. ``Exception`` is caught
+    deliberately broadly: any adapter/IO failure must degrade to retry-then-
+    quarantine rather than abort the whole run mid-drain.
+    """
+    for shot_num in ready:
+        try:
+            _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num)
+            state.processed.add(shot_num)
+            state.failures.pop(shot_num, None)
+            pbar.update(1)
+        except Exception as e:
+            attempts = state.failures[shot_num] = state.failures.get(shot_num, 0) + 1
+            if attempts >= max_retries:
+                _quarantine_failed_shot(spool_dir, hdf5_path, meta, adapter,
+                                        shot_num, attempts, e)
+                state.processed.add(shot_num)
+                state.quarantined.append(shot_num)
+                pbar.update(1)
+            else:
+                tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
+                           f"(attempt {attempts}/{max_retries}, bin kept for retry)")
+                _log.warning("shot %s retry %d/%d: %s (bin kept)",
+                             shot_num, attempts, max_retries, e)
 
 
 def _quarantine_failed_shot(spool_dir: str, hdf5_path: str, meta: dict, adapter,
@@ -312,8 +347,11 @@ def _shot_in_hdf5(hdf5_path: str, payload) -> bool:
     shot_name = f"shot_{payload.shot_num}"
     with h5py.File(hdf5_path, "r") as f:
         if payload.skipped:
-            return any(shot_name in f.get(sc, {}) for sc in f
-                       if isinstance(f.get(sc), h5py.Group))
+            for sc in f:
+                grp = f.get(sc)
+                if isinstance(grp, h5py.Group) and shot_name in grp:
+                    return True
+            return False
         if not payload.traces:
             return False
         for scope_name in payload.traces:
