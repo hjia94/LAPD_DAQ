@@ -73,16 +73,23 @@ def inspect_run(run_paths) -> RunState:
 
     spool_dir = run_paths.spool_dir
     if spool_dir and spool_format.run_complete_exists(spool_dir):
-        complete = spool_format.read_run_complete(spool_dir)
-        if not complete.get("terminated_early"):
-            # Clean RUN_COMPLETE: the run finished normally.
-            return RunState(status=COMPLETE,
-                            completed_shots=int(complete.get("final_shot_num", 0)))
-        return RunState(
-            status=PARTIAL,
-            completed_shots=int(complete.get("final_shot_num", 0)),
-            abort_reason=complete.get("abort_reason"),
-        )
+        try:
+            complete = spool_format.read_run_complete(spool_dir)
+        except spool_format.SpoolMetadataError:
+            # A corrupt RUN_COMPLETE can't tell us the final shot count; rather
+            # than crash the resume prompt, treat it like an interrupted run and
+            # let the operator decide (resume from the highest .done / restart).
+            complete = None
+        if complete is not None:
+            if not complete.get("terminated_early"):
+                # Clean RUN_COMPLETE: the run finished normally.
+                return RunState(status=COMPLETE,
+                                completed_shots=int(complete.get("final_shot_num", 0)))
+            return RunState(
+                status=PARTIAL,
+                completed_shots=int(complete.get("final_shot_num", 0)),
+                abort_reason=complete.get("abort_reason"),
+            )
 
     if spool_dir and spool_format.run_metadata_exists(spool_dir):
         # Metadata but no RUN_COMPLETE: the acquire process was killed before it
@@ -164,14 +171,11 @@ def apply_action(action: str, run_paths, state: RunState, *,
         return StartPlan(spool_dir=spool_dir, start_shot=max(start_shot, 1))
 
     if action == RESTART:
-        # An offload that is still actively draining holds the HDF5 (mid-write)
-        # open; on Windows that blocks the delete/rotate below. A finished offload
-        # closes its handles (HDF5 per-shot, log on exit) even while paused, so
-        # only a live one is a problem -- warn so the operator closes it first.
-        if spool_dir and spool_format.offload_lock_is_live(spool_dir):
-            print("WARNING: an offload process is still draining this spool "
-                  f"({spool_dir}). Close its console window before restarting, "
-                  "or the old HDF5/spool will be locked.")
+        # An offload still actively draining holds the HDF5 (mid-write) open; on
+        # Windows that blocks the delete/rotate below. The offload single-instance
+        # lock was removed on this branch, so we no longer pre-warn here; the
+        # os.remove failure path below still tells the operator to close any
+        # offload window still writing to the file.
         if os.path.exists(run_paths.hdf5_path):
             try:
                 os.remove(run_paths.hdf5_path)

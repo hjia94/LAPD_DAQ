@@ -133,11 +133,18 @@ def _list_spools(path):
         if not has_meta:
             print("    (no run metadata — not a drainable spool; skip)\n")
             continue
-        meta = spool_format.read_run_metadata(spool_dir)
-        hdf5_path = meta.get("hdf5_path")
-        exists = bool(hdf5_path) and os.path.isfile(hdf5_path)
-        pending = spool_format.pending_shot_count(spool_dir)
-        complete = spool_format.read_run_complete(spool_dir)
+        # One corrupt/unreadable spool must not abort the whole survey: report it
+        # and move on, so --list still shows every other run. The readers raise a
+        # typed SpoolMetadataError for a present-but-broken file.
+        try:
+            meta = spool_format.read_run_metadata(spool_dir)
+            hdf5_path = meta.get("hdf5_path")
+            exists = bool(hdf5_path) and os.path.isfile(hdf5_path)
+            pending = spool_format.pending_shot_count(spool_dir)
+            complete = spool_format.read_run_complete(spool_dir)
+        except spool_format.SpoolMetadataError as e:
+            print(f"    (metadata unreadable: {e}; skip)\n")
+            continue
         print(f"    -> HDF5:   {hdf5_path}  [{'EXISTS' if exists else 'MISSING'}]")
         print(f"       writer: {meta.get('writer')}   pending shots in spool: {pending}")
         if complete is None:
@@ -233,8 +240,14 @@ def main():
         traceback.print_exc()
     finally:
         # Report the file the acquire side recorded (if metadata was written).
-        if spool_format.run_metadata_exists(spool_dir):
-            hdf5_path = spool_format.read_run_metadata(spool_dir).get("hdf5_path")
+        # Guarded against a TOCTOU race: the metadata can be pruned/removed
+        # between the existence check and the read, and a teardown read must
+        # never mask the real outcome with its own exception.
+        try:
+            if spool_format.run_metadata_exists(spool_dir):
+                hdf5_path = spool_format.read_run_metadata(spool_dir).get("hdf5_path")
+        except Exception:  # noqa: BLE001 - teardown reporting is best-effort
+            hdf5_path = None
         print('Offload finished at', datetime.datetime.now())
         print('Time taken: %.2f hours' % ((time.time()-t_start)/3600))
         if hdf5_path and os.path.isfile(hdf5_path):

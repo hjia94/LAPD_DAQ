@@ -40,6 +40,18 @@ _META_RUN = "meta_run.pkl"
 _RUN_COMPLETE = "RUN_COMPLETE"
 _SHOT_META = "meta.pkl"
 
+
+class SpoolMetadataError(Exception):
+    """A run-metadata / RUN_COMPLETE file exists but could not be read.
+
+    Raised by :func:`read_run_metadata` and :func:`read_run_complete` when the
+    file is present but unreadable (truncated/corrupt pickle, or an OS read
+    error), with the offending path. Wrapping the low-level ``UnpicklingError``/
+    ``OSError`` in one typed exception lets every caller recognize "this spool's
+    metadata is broken" instead of leaking a raw pickle traceback. File
+    *absence* is a separate, expected case (see each function's contract).
+    """
+
 # Separates scope name from channel name in per-trace file names. Double
 # underscore avoids colliding with single underscores common in channel ids.
 _NAME_SEP = "__"
@@ -100,8 +112,21 @@ def write_run_metadata(spool_dir: str, meta: dict) -> None:
 
 
 def read_run_metadata(spool_dir: str) -> dict:
-    with open(os.path.join(spool_dir, _META_RUN), "rb") as f:
-        return pickle.load(f)
+    """Load the run-level metadata bundle. Raises if it is absent or corrupt.
+
+    Absence raises ``FileNotFoundError`` (callers normally pre-check via
+    :func:`run_metadata_exists`); a present-but-unreadable file raises
+    :class:`SpoolMetadataError` so callers see a clear, typed failure instead of
+    a raw pickle traceback.
+    """
+    path = os.path.join(spool_dir, _META_RUN)
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        raise
+    except (OSError, pickle.UnpicklingError, EOFError, ValueError) as e:
+        raise SpoolMetadataError(f"Cannot read run metadata at {path}: {e}") from e
 
 
 def run_metadata_exists(spool_dir: str) -> bool:
@@ -393,11 +418,21 @@ def run_complete_exists(spool_dir: str) -> bool:
 
 
 def read_run_complete(spool_dir: str) -> Optional[dict]:
+    """Load the RUN_COMPLETE sentinel, or ``None`` if it isn't present.
+
+    A present-but-unreadable sentinel raises :class:`SpoolMetadataError` rather
+    than returning ``None`` -- treating a corrupt completion record as "no run
+    finished" would let a finished run be offered for restart, so the caller is
+    told the record is broken instead.
+    """
     path = os.path.join(spool_dir, _RUN_COMPLETE)
     if not os.path.exists(path):
         return None
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except (OSError, pickle.UnpicklingError, EOFError, ValueError) as e:
+        raise SpoolMetadataError(f"Cannot read RUN_COMPLETE at {path}: {e}") from e
 
 
 def clear_run_complete(spool_dir: str) -> None:
@@ -412,102 +447,14 @@ def clear_run_complete(spool_dir: str) -> None:
         os.remove(path)
 
 
-_OFFLOAD_LOCK = "offload.lock"
-
-# A lock whose heartbeat hasn't been touched within this many seconds is treated
-# as stale (the offload died without cleaning up), so a new offload may take over.
-_LOCK_STALE_SECONDS = 30.0
-
-
-def offload_lock_is_live(spool_dir: str) -> bool:
-    """True if a live offload process currently holds this spool's lock.
-
-    "Live" means the lock file exists, its recorded PID is still running, and its
-    heartbeat (file mtime, refreshed by :func:`offload_lock_heartbeat`) is recent.
-    A stale lock (process gone or heartbeat old) reports False so a resume/next
-    run can take over the spool instead of refusing forever.
-    """
-    path = os.path.join(spool_dir, _OFFLOAD_LOCK)
-    try:
-        age = time.time() - os.path.getmtime(path)
-    except OSError:
-        return False
-    if age > _LOCK_STALE_SECONDS:
-        return False
-    try:
-        with open(path, "r") as f:
-            pid = int(f.read().strip() or "-1")
-    except (OSError, ValueError):
-        return False
-    return _pid_alive(pid)
-
-
-def acquire_offload_lock(spool_dir: str) -> bool:
-    """Take the offload lock for this process. Returns False if one is live.
-
-    Writes our PID; the caller refreshes the heartbeat via
-    :func:`offload_lock_heartbeat` and removes it with
-    :func:`release_offload_lock` on exit.
-    """
-    if offload_lock_is_live(spool_dir):
-        return False
-    os.makedirs(spool_dir, exist_ok=True)
-    _atomic_pickle_bytes(os.path.join(spool_dir, _OFFLOAD_LOCK),
-                         str(os.getpid()).encode())
-    return True
-
-
-def offload_lock_heartbeat(spool_dir: str) -> None:
-    """Refresh the lock's mtime so it doesn't look stale during a long drain."""
-    path = os.path.join(spool_dir, _OFFLOAD_LOCK)
-    try:
-        os.utime(path, None)
-    except OSError:
-        pass
-
-
-def release_offload_lock(spool_dir: str) -> None:
-    """Remove the offload lock (best-effort) when the offload exits."""
-    path = os.path.join(spool_dir, _OFFLOAD_LOCK)
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)            # POSIX: signal 0 just checks existence
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True                # exists but owned by another user
-    except OSError:
-        # Windows has no os.kill(0) semantics; fall back to a tasklist check.
-        return _pid_alive_windows(pid)
-    return True
-
-
-def _pid_alive_windows(pid: int) -> bool:
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return True               # can't tell -> assume alive (don't double-launch)
-    return str(pid) in out.stdout
-
-
-def _atomic_pickle_bytes(path: str, data: bytes) -> None:
-    """Atomically write raw bytes (used for the small PID lock file)."""
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+# NOTE: a single-instance offload lock (PID + mtime heartbeat) used to live here
+# to stop two offloads draining one spool. It was removed: the only path that
+# spawned a second offload on the same spool was resume, which is not functional
+# on this branch (a separate branch owns the resume fix). Manual `Offload_Run.py`
+# runs target an explicit --spool-dir, so they don't collide with the
+# auto-launched offload in practice. If concurrent drains become possible again
+# (e.g. when resume lands), reintroduce a lock here -- and heartbeat it during
+# the metadata wait, not only the drain loop, so it can't go stale mid-wait.
 
 
 def rotate_spool(spool_dir: str) -> Optional[str]:

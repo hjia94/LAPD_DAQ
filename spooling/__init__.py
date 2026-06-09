@@ -8,6 +8,7 @@ behind per-path adapters (e.g. ``acquisition/spool_adapter.py``).
 
 from .spool_format import (
     ShotPayload,
+    SpoolMetadataError,
     TracePayload,
     is_disk_full_error,
     iter_ready_shots,
@@ -25,6 +26,7 @@ from .spool_format import (
 
 __all__ = [
     "ShotPayload",
+    "SpoolMetadataError",
     "TracePayload",
     "is_disk_full_error",
     "iter_ready_shots",

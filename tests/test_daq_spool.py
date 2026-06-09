@@ -538,6 +538,81 @@ class MetadataWaitTests(unittest.TestCase):
                                        metadata_timeout=0.05)
 
 
+class OffloadErrorPathTests(unittest.TestCase):
+    """Error paths give actionable messages instead of bare tracebacks."""
+
+    def setUp(self):
+        self.spool = tempfile.mkdtemp(prefix="spool_err_")
+        self._h5_files = []
+
+    def tearDown(self):
+        for p in self._h5_files:
+            if os.path.exists(p):
+                os.remove(p)
+
+    def test_metadata_without_hdf5_path_raises_clear_error(self):
+        # An older/truncated bundle lacking hdf5_path must raise a clear
+        # ValueError pointing at --list, not a bare KeyError.
+        meta = _make_meta(hdf5_path=None)
+        meta.pop("hdf5_path", None)
+        spool_format.write_run_metadata(self.spool, meta)
+        with self.assertRaises(ValueError) as ctx:
+            offload_engine.run_offload(self.spool, poll_seconds=0.01,
+                                       metadata_timeout=1.0)
+        self.assertIn("hdf5_path", str(ctx.exception))
+        self.assertNotIsInstance(ctx.exception, KeyError)
+
+    def test_unknown_writer_tag_lists_supported(self):
+        with self.assertRaises(ValueError) as ctx:
+            offload_engine._get_adapter("nope")
+        msg = str(ctx.exception)
+        self.assertIn("acquisition", msg)
+        self.assertIn("grid", msg)
+
+    def test_list_survives_corrupt_folder(self):
+        # A spool ROOT with one good run + one corrupt meta_run.pkl: --list must
+        # report both, not abort on the corrupt one.
+        root = tempfile.mkdtemp(prefix="spool_root_")
+        good = os.path.join(root, "good_run")
+        os.makedirs(good)
+        off_h5 = tempfile.mktemp(suffix=".hdf5")
+        self._h5_files.append(off_h5)
+        spool_format.write_run_metadata(good, _make_meta(hdf5_path=off_h5))
+
+        bad = os.path.join(root, "bad_run")
+        os.makedirs(bad)
+        # A meta_run.pkl that exists but is not a valid pickle.
+        with open(os.path.join(bad, spool_format._META_RUN), "wb") as f:
+            f.write(b"not a pickle")
+
+        import Offload_Run
+        # Must not raise despite the corrupt folder.
+        Offload_Run._list_spools(root)
+
+    def test_corrupt_metadata_raises_typed_error(self):
+        # A present-but-unreadable file raises the shared typed error (so every
+        # caller can recognize it), not a raw UnpicklingError.
+        with open(os.path.join(self.spool, spool_format._META_RUN), "wb") as f:
+            f.write(b"not a pickle")
+        with self.assertRaises(spool_format.SpoolMetadataError):
+            spool_format.read_run_metadata(self.spool)
+
+    def test_corrupt_run_complete_raises_typed_error(self):
+        # Corrupt RUN_COMPLETE must not masquerade as "no completion" (None) --
+        # it raises so a finished run isn't silently offered for restart.
+        with open(os.path.join(self.spool, spool_format._RUN_COMPLETE), "wb") as f:
+            f.write(b"not a pickle")
+        with self.assertRaises(spool_format.SpoolMetadataError):
+            spool_format.read_run_complete(self.spool)
+
+    def test_absent_files_keep_their_contract(self):
+        # Absence is a separate, expected case: metadata -> FileNotFoundError,
+        # RUN_COMPLETE -> None (unchanged by the corrupt-file hardening).
+        with self.assertRaises(FileNotFoundError):
+            spool_format.read_run_metadata(self.spool)
+        self.assertIsNone(spool_format.read_run_complete(self.spool))
+
+
 class SetupFailureTests(unittest.TestCase):
     """A spooled run that aborts during setup (before any shot) must surface the
     real error and NOT leave a misleading RUN_COMPLETE for the offload."""

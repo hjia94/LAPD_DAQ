@@ -16,6 +16,7 @@ touching this loop.
 import logging
 import os
 import time
+from typing import Callable, Optional
 
 import h5py
 import numpy as np
@@ -49,18 +50,25 @@ _METADATA_TIMEOUT_SECONDS = 120.0
 _MAX_RETRIES = 3
 
 
-def _get_adapter(writer_tag):
+# writer tag -> (module, attribute) of its offload adapter. Imported lazily in
+# _get_adapter (only the one a run needs is loaded); adding a path means adding
+# one entry here.
+_ADAPTERS = {
+    "acquisition": ("acquisition", "spool_adapter"),
+    "grid": ("acquisition", "grid_spool_adapter"),
+}
+
+
+def _get_adapter(writer_tag: str):
     """Return the offload adapter module for a run's ``writer`` tag."""
-    if writer_tag == "acquisition":
-        from acquisition import spool_adapter
-        return spool_adapter
-    if writer_tag == "grid":
-        from acquisition import grid_spool_adapter
-        return grid_spool_adapter
-    raise ValueError(
-        f"No offload adapter for writer tag {writer_tag!r}. "
-        "Supported: 'acquisition' (bmotion), 'grid'."
-    )
+    if writer_tag not in _ADAPTERS:
+        raise ValueError(
+            f"No offload adapter for writer tag {writer_tag!r}. "
+            f"Supported: {sorted(_ADAPTERS)}."
+        )
+    module_name, attr_name = _ADAPTERS[writer_tag]
+    module = __import__(module_name, fromlist=[attr_name])
+    return getattr(module, attr_name)
 
 
 class MetadataTimeout(Exception):
@@ -75,9 +83,9 @@ class MetadataTimeout(Exception):
     """
 
 
-def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
-                max_retries=_MAX_RETRIES,
-                metadata_timeout=_METADATA_TIMEOUT_SECONDS):
+def run_offload(spool_dir: str, config=None, poll_seconds: float = _POLL_SECONDS,
+                max_retries: int = _MAX_RETRIES,
+                metadata_timeout: float = _METADATA_TIMEOUT_SECONDS) -> None:
     """Drain ``spool_dir`` into the destination HDF5 until RUN_COMPLETE, then exit.
 
     The acquire process has already created the HDF5 file and written its full
@@ -101,21 +109,16 @@ def run_offload(spool_dir, config=None, poll_seconds=_POLL_SECONDS,
             bound only stops a misdirected drain from hanging forever. ``<= 0``
             waits indefinitely.
     """
-    # Single-instance guard: refuse to start if another offload already holds
-    # this spool (e.g. a resume relaunched one while the prior is still draining).
-    # Two offloads on one spool race on delete_shot/quarantine_shot.
-    if not spool_format.acquire_offload_lock(spool_dir):
-        print(f"Offload: another offload already owns {spool_dir}; exiting.")
-        return
-    try:
-        _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
-                            metadata_timeout)
-    finally:
-        spool_format.release_offload_lock(spool_dir)
+    # config is accepted by the public entry point for call-site compatibility
+    # but the drain reads everything it needs from the spool metadata.
+    # NOTE: no single-instance lock -- concurrent drains of one spool aren't
+    # reachable on this branch (resume, the only path that relaunches an offload
+    # on an in-use spool, is not functional here). See spool_format for context.
+    _run_offload(spool_dir, poll_seconds, max_retries, metadata_timeout)
 
 
-def _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
-                        metadata_timeout):
+def _run_offload(spool_dir: str, poll_seconds: float, max_retries: int,
+                 metadata_timeout: float) -> None:
     print(f"Offload: waiting for run metadata in {spool_dir} ...")
     if not _wait_for(lambda: spool_format.run_metadata_exists(spool_dir),
                      poll_seconds, timeout=metadata_timeout):
@@ -125,7 +128,16 @@ def _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
         )
 
     meta = spool_format.read_run_metadata(spool_dir)
-    hdf5_path = meta["hdf5_path"]
+    hdf5_path = meta.get("hdf5_path")
+    if not hdf5_path:
+        # Metadata exists but is missing/empty its destination path (e.g. an
+        # older-format or truncated bundle). Fail with an actionable message
+        # rather than a bare KeyError buried in a traceback.
+        raise ValueError(
+            f"Run metadata in {spool_dir} has no 'hdf5_path'. This spool may be "
+            f"from an incompatible/older run. Inspect it with: "
+            f"python Offload_Run.py --list --spool-dir \"{spool_dir}\""
+        )
 
     if not os.path.exists(hdf5_path):
         raise FileNotFoundError(
@@ -136,68 +148,105 @@ def _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
     adapter = _get_adapter(meta.get("writer"))
     print(f"Offload: writer={meta.get('writer')}, filling -> {hdf5_path}")
 
+    processed, quarantined, complete, final_shot_num = _drain_loop(
+        spool_dir, hdf5_path, meta, adapter, poll_seconds, max_retries)
+
+    _finalize_and_report(spool_dir, hdf5_path, meta, adapter, processed,
+                         quarantined, complete, final_shot_num)
+
+
+def _drain_loop(spool_dir: str, hdf5_path: str, meta: dict, adapter,
+                poll_seconds: float, max_retries: int):
+    """Poll the spool, writing each ready shot, until RUN_COMPLETE drains it.
+
+    Returns ``(processed, quarantined, complete, final_shot_num)``: the set of
+    shot numbers handled, the list that exhausted retries (quarantined), the
+    RUN_COMPLETE payload (or None), and the run's final shot number (or None).
+    """
     total = meta.get("total_shots")  # None for older runs -> indeterminate bar
-    pbar = tqdm(total=total, desc="Offload", unit="shot", dynamic_ncols=True)
 
     processed = set()
     failures = {}      # shot_num -> consecutive failure count
     quarantined = []   # shot_nums moved aside after exhausting retries
+    complete = None
     final_shot_num = None
 
-    while True:
-        spool_format.offload_lock_heartbeat(spool_dir)  # keep our lock from going stale
-        ready = [s for s in spool_format.iter_ready_shots(spool_dir) if s not in processed]
-        for shot_num in ready:
-            try:
-                _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num)
-                processed.add(shot_num)
-                failures.pop(shot_num, None)
-                pbar.update(1)
-            except Exception as e:
-                failures[shot_num] = failures.get(shot_num, 0) + 1
-                if failures[shot_num] >= max_retries:
-                    # Poison shot: stop retrying so the run can drain. Mark the
-                    # HDF5 group as failed (so unverified data isn't silently
-                    # kept as if good), preserve the bin under shot_N.failed for
-                    # inspection, and stop counting it as pending.
-                    try:
-                        adapter.mark_shot_failed(
-                            hdf5_path, meta, shot_num,
-                            f"offload verification failed after {failures[shot_num]} attempts")
-                    except Exception as mark_err:
-                        tqdm.write(f"Offload WARNING: could not mark shot {shot_num} "
-                                   f"failed in HDF5: {mark_err}")
-                        _log.warning("shot %s: could not mark failed in HDF5: %s",
-                                     shot_num, mark_err)
-                    dest = spool_format.quarantine_shot(spool_dir, shot_num)
+    with tqdm(total=total, desc="Offload", unit="shot", dynamic_ncols=True) as pbar:
+        while True:
+            ready = [s for s in spool_format.iter_ready_shots(spool_dir) if s not in processed]
+            for shot_num in ready:
+                try:
+                    _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num)
                     processed.add(shot_num)
-                    quarantined.append(shot_num)
+                    failures.pop(shot_num, None)
                     pbar.update(1)
-                    tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
-                               f"-- quarantined after {failures[shot_num]} attempts -> {dest}")
-                    _log.warning("shot %s QUARANTINED after %d attempts: %s (moved -> %s)",
-                                 shot_num, failures[shot_num], e, dest)
-                else:
-                    tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
-                               f"(attempt {failures[shot_num]}/{max_retries}, bin kept for retry)")
-                    _log.warning("shot %s retry %d/%d: %s (bin kept)",
-                                 shot_num, failures[shot_num], max_retries, e)
+                except Exception as e:
+                    failures[shot_num] = failures.get(shot_num, 0) + 1
+                    if failures[shot_num] >= max_retries:
+                        _quarantine_failed_shot(spool_dir, hdf5_path, meta, adapter,
+                                                shot_num, failures[shot_num], e)
+                        processed.add(shot_num)
+                        quarantined.append(shot_num)
+                        pbar.update(1)
+                    else:
+                        tqdm.write(f"Offload ERROR on shot {shot_num}: {e} "
+                                   f"(attempt {failures[shot_num]}/{max_retries}, bin kept for retry)")
+                        _log.warning("shot %s retry %d/%d: %s (bin kept)",
+                                     shot_num, failures[shot_num], max_retries, e)
 
-        complete = spool_format.read_run_complete(spool_dir)
-        if complete is not None:
-            final_shot_num = complete.get("final_shot_num")
-            # One more drain pass to make sure no late .done slipped in. Shots
-            # that exhausted their retries are quarantined (not in iter_ready),
-            # so a persistently failing shot can no longer hang the run.
-            remaining = [s for s in spool_format.iter_ready_shots(spool_dir)
-                         if s not in processed]
-            if not remaining:
-                break
+            complete = spool_format.read_run_complete(spool_dir)
+            if complete is not None:
+                final_shot_num = complete.get("final_shot_num")
+                # One more drain pass to make sure no late .done slipped in. Shots
+                # that exhausted their retries are quarantined (not in iter_ready),
+                # so a persistently failing shot can no longer hang the run.
+                # TODO(drain-race): small window -- a .done published between this
+                # iter_ready_shots() snapshot and the break can be missed, leaving
+                # a shot in the spool after exit (needs a manual re-drain). Acquire
+                # writes RUN_COMPLETE only after its last write_shot returns, so in
+                # practice this is unobserved; tighten with a re-check loop if a
+                # writer is ever allowed to publish a shot after RUN_COMPLETE.
+                remaining = [s for s in spool_format.iter_ready_shots(spool_dir)
+                             if s not in processed]
+                if not remaining:
+                    break
 
-        if not ready and complete is None:
-            time.sleep(poll_seconds)
+            if not ready and complete is None:
+                time.sleep(poll_seconds)
 
-    pbar.close()
+    return processed, quarantined, complete, final_shot_num
+
+
+def _quarantine_failed_shot(spool_dir: str, hdf5_path: str, meta: dict, adapter,
+                            shot_num: int, attempts: int,
+                            error: Exception) -> None:
+    """Set aside a poison shot so the run can drain, marking it failed in HDF5.
+
+    Stops retrying after ``max_retries``: marks the HDF5 group as failed (so
+    unverified data isn't silently kept as if good), preserves the bin under
+    ``shot_N.failed`` for inspection, and stops counting it as pending.
+    """
+    try:
+        adapter.mark_shot_failed(
+            hdf5_path, meta, shot_num,
+            f"offload verification failed after {attempts} attempts")
+    except Exception as mark_err:
+        tqdm.write(f"Offload WARNING: could not mark shot {shot_num} "
+                   f"failed in HDF5: {mark_err}")
+        _log.warning("shot %s: could not mark failed in HDF5: %s",
+                     shot_num, mark_err)
+    dest = spool_format.quarantine_shot(spool_dir, shot_num)
+    tqdm.write(f"Offload ERROR on shot {shot_num}: {error} "
+               f"-- quarantined after {attempts} attempts -> {dest}")
+    _log.warning("shot %s QUARANTINED after %d attempts: %s (moved -> %s)",
+                 shot_num, attempts, error, dest)
+
+
+def _finalize_and_report(spool_dir: str, hdf5_path: str, meta: dict, adapter,
+                         processed: set, quarantined: list,
+                         complete: Optional[dict],
+                         final_shot_num: Optional[int]) -> None:
+    """Finalize the HDF5 (shot_count), report the outcome, and prune old spools."""
     if final_shot_num is not None:
         adapter.finalize(hdf5_path, meta, final_shot_num)
         tqdm.write(f"Offload: finalized run (final_shot_num={final_shot_num}).")
@@ -222,7 +271,8 @@ def _run_offload_locked(spool_dir, config, poll_seconds, max_retries,
         _log.warning("pruned %d superseded spool folder(s)", len(pruned))
 
 
-def _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num):
+def _offload_one_shot(spool_dir: str, hdf5_path: str, meta: dict, adapter,
+                      shot_num: int) -> None:
     """Write one shot, verify it read-back, then delete its spool copy.
 
     Idempotent for retries: if ``shot_N`` already exists in the HDF5 from a prior
@@ -234,18 +284,26 @@ def _offload_one_shot(spool_dir, hdf5_path, meta, adapter, shot_num):
     bypassed and the adapter rewrites it (the adapter passes ``overwrite=True``).
     """
     payload = spool_format.read_shot(spool_dir, shot_num)
-    resumed = shot_num >= meta.get("resume_from_shot", 1) > 1
+    # A resume is active only when resume_from_shot > 1; this shot is re-taken
+    # (and must overwrite its stale group) when it falls in that resume range.
+    resume_from = meta.get("resume_from_shot", 1)
+    resumed = resume_from > 1 and shot_num >= resume_from
 
     if resumed or not _shot_in_hdf5(hdf5_path, payload):
         adapter.write_shot(hdf5_path, payload, meta)
 
+    # TODO(verify-coverage): the read-back below checks trace data + headers only.
+    # adapter.write_shot also writes position rows (Control/Positions/...), which
+    # are deleted from the spool here without being verified; skipped shots bypass
+    # verification entirely. Consider an adapter.verify_positions() (layout differs
+    # per writer: bmotion per-motion-group vs. grid single array) before delete.
     if not payload.skipped:
         _verify_shot_in_hdf5(hdf5_path, payload)
 
     spool_format.delete_shot(spool_dir, shot_num)
 
 
-def _shot_in_hdf5(hdf5_path, payload):
+def _shot_in_hdf5(hdf5_path: str, payload) -> bool:
     """True if every scope already has this shot's group written.
 
     Used to make the offload idempotent across interruptions/retries. A skipped
@@ -264,7 +322,7 @@ def _shot_in_hdf5(hdf5_path, payload):
     return True
 
 
-def _verify_shot_in_hdf5(hdf5_path, payload):
+def _verify_shot_in_hdf5(hdf5_path: str, payload) -> None:
     """Read each trace back from the HDF5 and compare to the spooled data.
 
     Raises on any mismatch so the caller leaves the bin in place. Compares
@@ -294,14 +352,15 @@ def _verify_shot_in_hdf5(hdf5_path, payload):
                     )
 
 
-def _wait_for(predicate, poll_seconds, timeout=0):
+def _wait_for(predicate: Callable[[], bool], poll_seconds: float,
+              timeout: float = 0) -> bool:
     """Block until ``predicate()`` is truthy. Return True if it became true.
 
     With ``timeout <= 0`` this waits indefinitely (always returns True). With a
     positive timeout it returns False once that many seconds have elapsed without
     the predicate becoming true, so the caller can act on the timeout.
     """
-    deadline = (time.monotonic() + timeout) if timeout and timeout > 0 else None
+    deadline = (time.monotonic() + timeout) if timeout > 0 else None
     while not predicate():
         if deadline is not None and time.monotonic() >= deadline:
             return False

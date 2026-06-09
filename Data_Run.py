@@ -55,23 +55,14 @@ config_path = os.path.join(base_path, 'experiment_config.ini')
 #===============================================================================================================================================
 
 def launch_offload(spool_dir, config_path):
-    """Auto-launch Offload_Run.py in its own console, unless one already runs.
+    """Auto-launch Offload_Run.py in its own console.
 
     The offload politely waits for run metadata (offload_engine._wait_for), so
     launching before metadata exists is safe; we detach (no wait) so it keeps
-    draining after this acquire process exits. A live ``offload.lock`` in the
-    spool means a previous run's offload is still attached to this subfolder, so
-    we don't start a second one that would race it. The offload dispatches on the
+    draining after this acquire process exits. The offload dispatches on the
     ``"grid"`` writer tag recorded in the spool metadata, so the same launcher
     serves both the grid and bmotion paths unchanged.
     """
-    from spooling import spool_format
-
-    if spool_format.offload_lock_is_live(spool_dir):
-        print('  An offload process is already attached to this spool; '
-              'not launching a second one.')
-        return
-
     offload_script = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), 'Offload_Run.py')
     subprocess.Popen(
