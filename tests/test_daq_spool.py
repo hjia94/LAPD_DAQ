@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from spooling import ShotPayload, TracePayload, spool_format
 from acquisition import bmotion, hdf5_writer, spool_adapter
-import offload_runner
+import offload_engine
 from _hdf5_assertions import assert_dataset_filters, assert_hdf5_scope_equivalent
 
 REFERENCE_HDF5 = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"
@@ -231,7 +231,7 @@ class ParallelSpoolWriteTests(unittest.TestCase):
             payload = spool_adapter.all_data_to_payload(all_data, 1, None)
             spool_format.write_shot(self.par, payload, parallel=True)
             spool_format.write_run_complete(self.par, 1)
-            offload_runner.run_offload(self.par, poll_seconds=0.01)
+            offload_engine.run_offload(self.par, poll_seconds=0.01)
 
             with h5py.File(off_h5, "r") as f:
                 for scope_name, (traces, data, _h) in all_data.items():
@@ -286,7 +286,7 @@ class OffloadEquivalenceTests(unittest.TestCase):
                 all_data, shot_num, {"MG_A": (float(shot_num), 2.0)})
             spool_format.write_shot(self.spool, payload)
         spool_format.write_run_complete(self.spool, 2)
-        offload_runner.run_offload(self.spool, poll_seconds=0.01)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
 
         assert_hdf5_scope_equivalent(self, self.direct_h5, self.off_h5)
 
@@ -297,7 +297,7 @@ class OffloadEquivalenceTests(unittest.TestCase):
             _make_all_data(False), 1, {"MG_A": (1.0, 2.0)})
         spool_format.write_shot(self.spool, payload)
         spool_format.write_run_complete(self.spool, 1)
-        offload_runner.run_offload(self.spool, poll_seconds=0.01)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
 
         with h5py.File(self.off_h5, "r") as f:
             ds = f["lpscope/shot_1/C1_data"]
@@ -322,7 +322,7 @@ class VerifyAndDeleteTests(unittest.TestCase):
                                                     {"MG_A": (0.0, 0.0)})
         spool_format.write_shot(self.spool, payload)
         spool_format.write_run_complete(self.spool, 1)
-        offload_runner.run_offload(self.spool, poll_seconds=0.01)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
         # Spool copy removed once verified.
         self.assertEqual(spool_format.iter_ready_shots(self.spool), [])
         self.assertFalse(os.path.isdir(os.path.join(self.spool, "shot_000001")))
@@ -339,9 +339,9 @@ class VerifyAndDeleteTests(unittest.TestCase):
         with open(bad, "wb") as f:
             f.write(b"\x00\x01\x02\x03")
 
-        adapter = offload_runner._get_adapter("acquisition")
+        adapter = offload_engine._get_adapter("acquisition")
         with self.assertRaises(Exception):
-            offload_runner._offload_one_shot(self.spool, self.off_h5, meta,
+            offload_engine._offload_one_shot(self.spool, self.off_h5, meta,
                                              adapter, 1)
         # Bin is NOT deleted on verification failure.
         self.assertTrue(os.path.isdir(os.path.join(self.spool, "shot_000001")))
@@ -372,7 +372,7 @@ class OffloadResilienceTests(unittest.TestCase):
         spool_format.write_shot(self.spool, payload)
         spool_format.write_run_complete(self.spool, 1)
 
-        offload_runner.run_offload(self.spool, poll_seconds=0.01)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
         # Drained cleanly; bin removed.
         self.assertEqual(spool_format.iter_ready_shots(self.spool), [])
 
@@ -391,7 +391,7 @@ class OffloadResilienceTests(unittest.TestCase):
             f.write(b"\x00\x01")  # wrong length -> reshape/verify fails
         spool_format.write_run_complete(self.spool, 2)
 
-        offload_runner.run_offload(self.spool, poll_seconds=0.01, max_retries=2)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01, max_retries=2)
 
         # Run drained (no infinite loop); good shot landed, bad shot quarantined.
         self.assertEqual(spool_format.iter_ready_shots(self.spool), [])
@@ -411,7 +411,7 @@ class OffloadResilienceTests(unittest.TestCase):
                                                     {"MG_A": (1.0, 2.0)})
         spool_format.write_shot(self.spool, payload)
 
-        adapter = offload_runner._get_adapter("acquisition")
+        adapter = offload_engine._get_adapter("acquisition")
         # Pre-write the shot, then corrupt the stored values so the offload's
         # verify (which compares to the spooled bin) fails on every attempt.
         full = spool_format.read_shot(self.spool, 1)
@@ -421,7 +421,7 @@ class OffloadResilienceTests(unittest.TestCase):
 
         spool_format.write_run_metadata(self.spool, meta)
         spool_format.write_run_complete(self.spool, 1)
-        offload_runner.run_offload(self.spool, poll_seconds=0.01, max_retries=2)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01, max_retries=2)
 
         self.assertTrue(os.path.isdir(os.path.join(self.spool, "shot_000001.failed")))
         with h5py.File(self.off_h5, "r") as f:
@@ -502,7 +502,7 @@ class OffloadMissingTargetTests(unittest.TestCase):
         spool_format.write_run_metadata(self.spool, _make_meta(hdf5_path=missing))
         spool_format.write_run_complete(self.spool, 0)
         with self.assertRaises(FileNotFoundError):
-            offload_runner.run_offload(self.spool, poll_seconds=0.01)
+            offload_engine.run_offload(self.spool, poll_seconds=0.01)
 
 
 def _build_grid_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
@@ -572,7 +572,7 @@ class GridOffloadTests(unittest.TestCase):
                 _make_all_data(False), shot, coords_for(shot))
             spool_format.write_shot(self.spool, payload)
         spool_format.write_run_complete(self.spool, 2)
-        offload_runner.run_offload(self.spool, poll_seconds=0.01)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
 
     def test_grid_2d(self):
         self._run(nz=None, coords_for=lambda s: {"x": float(s), "y": 2.0, "z": None})
@@ -637,7 +637,7 @@ class SchemaMatchesReferenceTests(unittest.TestCase):
         for shot_num in (1, 2):
             spool_format.write_shot(cls.spool, _ref_shaped_payload(shot_num))
         spool_format.write_run_complete(cls.spool, 2)
-        offload_runner.run_offload(cls.spool, poll_seconds=0.01)
+        offload_engine.run_offload(cls.spool, poll_seconds=0.01)
 
     @classmethod
     def tearDownClass(cls):

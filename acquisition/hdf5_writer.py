@@ -44,7 +44,7 @@ _SOURCE_FILES = (
     'acquisition/spool_adapter.py',
     'acquisition/grid_spool_adapter.py',
     'spooling/spool_format.py',
-    'offload_runner.py',
+    'offload_engine.py',
 )
 
 

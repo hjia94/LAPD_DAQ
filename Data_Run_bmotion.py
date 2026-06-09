@@ -67,7 +67,7 @@ description_path = os.path.join(base_path, 'description.txt')
 def launch_offload(spool_dir, config_path):
     """Auto-launch Offload_Run.py in its own console, unless one already runs.
 
-    The offload politely waits for run metadata (offload_runner._wait_for), so
+    The offload politely waits for run metadata (offload_engine._wait_for), so
     launching before metadata exists is safe; we detach (no wait) so it keeps
     draining after this acquire process exits. A live ``offload.lock`` in the
     spool means a previous run's offload is still attached to this subfolder (a
