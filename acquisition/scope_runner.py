@@ -291,8 +291,8 @@ class MultiScopeAcquisition:
     def update_scope_hdf5(self, all_data, shot_num, overwrite=False):
         """Append a shot of scope data to the HDF5 file (raw int16).
 
-        ``overwrite`` replaces an existing shot group; set on a resume that
-        re-takes the probe's last position over its stale shots.
+        ``overwrite`` replaces an existing shot group instead of raising; left
+        in as a general capability (no caller sets it on this branch).
         """
         descriptions = {
             (scope_name, tr): self.get_channel_description(f"{scope_name}_{tr}")

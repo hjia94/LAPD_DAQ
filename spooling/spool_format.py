@@ -138,18 +138,6 @@ def run_metadata_exists(spool_dir: str) -> bool:
     return os.path.exists(os.path.join(spool_dir, _META_RUN))
 
 
-def update_run_metadata(spool_dir: str, updates: dict) -> dict:
-    """Merge ``updates`` into the existing run metadata and rewrite it atomically.
-
-    Used on resume to record a new ``resume_from_shot`` without rebuilding the
-    whole bundle (the offload reads it to decide which shots to overwrite).
-    """
-    meta = read_run_metadata(spool_dir)
-    meta.update(updates)
-    _atomic_pickle(os.path.join(spool_dir, _META_RUN), meta)
-    return meta
-
-
 # --------------------------------------------------------------------------- #
 # Per-shot write
 # --------------------------------------------------------------------------- #
@@ -445,18 +433,6 @@ def read_run_complete(spool_dir: str) -> Optional[dict]:
             return pickle.load(f)
     except _PICKLE_READ_ERRORS as e:
         raise SpoolMetadataError(f"Cannot read RUN_COMPLETE at {path}: {e}") from e
-
-
-def clear_run_complete(spool_dir: str) -> None:
-    """Remove the RUN_COMPLETE sentinel so the spool can accept a resumed run.
-
-    Called when the user chooses to resume from a previous partial run: the
-    existing HDF5 and already-spooled shots are kept, but the old sentinel is
-    removed so the acquire process can write a new one when the resumed run ends.
-    """
-    path = os.path.join(spool_dir, _RUN_COMPLETE)
-    if os.path.exists(path):
-        os.remove(path)
 
 
 # NOTE: a single-instance offload lock (PID + mtime heartbeat) used to live here

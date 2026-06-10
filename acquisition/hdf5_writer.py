@@ -190,10 +190,9 @@ def write_shot_data(save_path, all_data, shot_num, channel_descriptions,
         all_data: {scope_name: (traces, data, headers)} as produced by acquire_shot
         shot_num: 1-based shot number
         channel_descriptions: {(scope_name, trace): description_string}
-        overwrite: when True, replace an existing shot_N group instead of raising.
-            Used on resume, where the probe's last position is re-taken and its
-            shots must be overwritten with fresh data (numbering stays
-            contiguous). When False, an existing shot is a programming error.
+        overwrite: when True, replace an existing shot_N group instead of
+            raising. A general capability; no caller sets it on this branch.
+            When False, an existing shot is treated as a programming error.
     """
     with h5py.File(save_path, 'a', **SHOT_WRITE_OPEN_KWARGS) as f:
         _write_shot_data_into(f, all_data, shot_num, channel_descriptions,

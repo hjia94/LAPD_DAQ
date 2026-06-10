@@ -338,21 +338,16 @@ class _Hdf5ShotSink:
     default fallback for the loop helpers and is what the unit tests drive.
     """
 
-    def __init__(self, msa, active_scopes, hdf5_path, run_manager,
-                 resume_from_shot=1):
+    def __init__(self, msa, active_scopes, hdf5_path, run_manager):
         self.msa = msa
         self.active_scopes = active_scopes
         self.hdf5_path = hdf5_path
         self.run_manager = run_manager
-        # Shots >= resume_from_shot (when resuming) overwrite the stale groups
-        # left by the partial run; 1 means a fresh run (never overwrite).
-        self.resume_from_shot = resume_from_shot
 
     def take_shot(self, shot_num, record_keys):
         # arm + acquire + write scope data to HDF5 (as single_shot_acquisition).
-        overwrite = self.resume_from_shot > 1 and shot_num >= self.resume_from_shot
         single_shot_acquisition(self.msa, self.active_scopes, shot_num,
-                                verbose=False, overwrite=overwrite)
+                                verbose=False)
         record_bmotion_positions(
             hdf5_path=self.hdf5_path, shotnum=shot_num,
             rm=self.run_manager, mg_keys=record_keys,
@@ -595,8 +590,7 @@ def _record_skipped_shots(msa, active_scopes, hdf5_path, run_manager, record_key
 
 
 def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots,
-                     total_shots, sink=None, move_opts=None, run_state=None,
-                     start_shot=1):
+                     total_shots, sink=None, move_opts=None, run_state=None):
     max_ml_size = get_max_motion_list_size(run_manager, list(ml_order))
     shot_num = 1
     record_keys = list(ml_order.keys())
@@ -607,8 +601,7 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
     total_lines = int(np.ceil(max_ml_size / per_line))
     estimator = _LineTimeEstimator(total_lines)
 
-    with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True,
-              initial=start_shot - 1) as pbar:
+    with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True) as pbar:
         line_idx = 0
         for motion_index in range(max_ml_size):
             # A new line begins whenever we cross a positions-per-line boundary.
@@ -616,13 +609,6 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
                 estimator.finish_line()   # close the previous line (no-op on first)
                 estimator.start_line()
                 line_idx += 1
-
-            # Skip positions already covered by a previous partial run.
-            position_last_shot = shot_num + nshots - 1
-            if position_last_shot < start_shot:
-                shot_num += nshots
-                pbar.update(0)  # keep bar consistent without double-counting initial
-                continue
 
             if _do_move(run_manager, ml_order, motion_index, move_opts, run_state) == "skip":
                 # Recovery exhausted for this position -> record its shots as
@@ -645,8 +631,7 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
 
 
 def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots,
-                    total_shots, sink=None, move_opts=None, run_state=None,
-                    start_shot=1):
+                    total_shots, sink=None, move_opts=None, run_state=None):
     shot_num = 1
 
     # Total lines summed across all groups (each group is a self-contained
@@ -657,8 +642,7 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
         total_lines += int(np.ceil(size / _positions_per_line(run_manager, mg_key)))
     estimator = _LineTimeEstimator(total_lines)
 
-    with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True,
-              initial=start_shot - 1) as pbar:
+    with tqdm(total=total_shots, desc="Shots", unit="shot", dynamic_ncols=True) as pbar:
         line_idx = 0
         for mg_key, direction in ml_order.items():
             mg = run_manager.mgs[mg_key]
@@ -673,12 +657,6 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
                     estimator.finish_line()   # close the previous line (no-op on first)
                     estimator.start_line()
                     line_idx += 1
-
-                # Skip positions already covered by a previous partial run.
-                position_last_shot = shot_num + nshots - 1
-                if position_last_shot < start_shot:
-                    shot_num += nshots
-                    continue
 
                 if _do_move(run_manager, single_group_order, motion_index,
                             move_opts, run_state) == "skip":
@@ -752,7 +730,7 @@ def _prepare_bmotion_run(toml_path, config_path):
 
 
 def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
-                                    start_shot=1, description_path=None):
+                                    description_path=None):
     """Parallel-mode acquisition: build the HDF5 skeleton, spool each shot.
 
     The acquire process owns the *initial* HDF5 file: it creates ``hdf5_path``
@@ -766,18 +744,14 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
     Per-shot order is unchanged: move + settle + disable (per position), then
     arm -> acquire -> read position -> write bin+done.
 
-    When ``start_shot > 1`` the run is a *resume*: the HDF5 skeleton and spool
-    run metadata already exist and are left untouched; acquisition picks up from
-    ``start_shot`` and the offload process (already running) continues draining.
+    Resume is not supported: every call is a fresh run from shot 1 (the entry
+    script restarts an existing run by deleting its HDF5 and rotating its spool
+    aside first).
     """
     from spooling import spool_format
     from . import spool_adapter
 
-    resuming = start_shot > 1
-    if resuming:
-        print(f'Resuming spooled acquisition from shot {start_shot} at', time.ctime())
-    else:
-        print('Starting spooled acquisition at', time.ctime())
+    print('Starting spooled acquisition at', time.ctime())
 
     ctx = _prepare_bmotion_run(toml_path, config_path)
     config = ctx["config"]
@@ -791,17 +765,14 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
     if description_path is None:
         description_path = config_module.resolve_description_path_from_config(config_path)
 
-    last_shot_num = start_shot - 1 if resuming else 0
+    last_shot_num = 0
     run_state = {"terminated_early": False, "abort_reason": None}
     with MultiScopeAcquisition(hdf5_path, config, raw_config_text,
                                description_path=description_path) as msa:
         try:
-            if not resuming:
-                print("Initializing HDF5 file...", end='')
-                msa.initialize_hdf5_base()
-                print("done")
-            else:
-                print("Resuming: skipping HDF5 skeleton init (already created)")
+            print("Initializing HDF5 file...", end='')
+            msa.initialize_hdf5_base()
+            print("done")
 
             print("\nStarting initial acquisition...")
             active_scopes = msa.initialize_scopes()
@@ -810,40 +781,25 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                     "No valid data found from any scope. Aborting acquisition."
                 )
 
-            if not resuming:
-                configure_bmotion_hdf5_group(
-                    hdf5_path, total_shots, len(ml_order), toml_path, run_manager,
-                    list(ml_order.keys()), ml_order=ml_order,
-                    execution_order=execution_order,
-                )
+            configure_bmotion_hdf5_group(
+                hdf5_path, total_shots, len(ml_order), toml_path, run_manager,
+                list(ml_order.keys()), ml_order=ml_order,
+                execution_order=execution_order,
+            )
 
-                # Slim run-info: the offload only needs which adapter to use, the
-                # exact file to fill (computed once by the caller), and the channel
-                # descriptions used to label each shot's datasets. Everything else
-                # is already written into the HDF5 above. resume_from_shot=1 means
-                # "no overwrite" for the offload.
-                spool_format.write_run_metadata(spool_dir, {
-                    "writer": spool_adapter.WRITER_TAG,
-                    "hdf5_path": hdf5_path,
-                    "config_scope_names": list(active_scopes.keys()),
-                    "channel_descriptions": spool_adapter.channel_descriptions(msa),
-                    "description_path": description_path,
-                    "total_shots": total_shots,
-                    "resume_from_shot": 1,
-                })
-                print(f"Wrote run metadata to spool: {spool_dir}")
-            else:
-                # Record where this resume re-enters so the offload overwrites the
-                # re-taken position's stale shots instead of skipping them, and
-                # drop a provisional RUN_COMPLETE: if this resumed run dies during
-                # setup, the offload still has a sentinel to exit on rather than
-                # waiting forever (it is overwritten with the real one at the end).
-                spool_format.update_run_metadata(
-                    spool_dir, {"resume_from_shot": start_shot})
-                spool_format.write_run_complete(
-                    spool_dir, start_shot - 1, terminated_early=True,
-                    abort_reason="resume in progress (provisional)")
-                print(f"Resuming: overwrite boundary set to shot {start_shot}")
+            # Slim run-info: the offload only needs which adapter to use, the
+            # exact file to fill (computed once by the caller), and the channel
+            # descriptions used to label each shot's datasets. Everything else is
+            # already written into the HDF5 above.
+            spool_format.write_run_metadata(spool_dir, {
+                "writer": spool_adapter.WRITER_TAG,
+                "hdf5_path": hdf5_path,
+                "config_scope_names": list(active_scopes.keys()),
+                "channel_descriptions": spool_adapter.channel_descriptions(msa),
+                "description_path": description_path,
+                "total_shots": total_shots,
+            })
+            print(f"Wrote run metadata to spool: {spool_dir}")
 
             from .config import get_disk_full_pause_opts, get_motion_recovery_opts
             pause_seconds, max_retries = get_disk_full_pause_opts(config)
@@ -857,14 +813,12 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                     msa, active_scopes, spool_dir, run_manager,
                     ml_order, nshots, total_shots, sink=sink,
                     move_opts=move_opts, run_state=run_state,
-                    start_shot=start_shot,
                 )
             else:
                 last_shot_num = _run_interleaved(
                     msa, active_scopes, spool_dir, run_manager,
                     ml_order, nshots, total_shots, sink=sink,
                     move_opts=move_opts, run_state=run_state,
-                    start_shot=start_shot,
                 )
 
         except KeyboardInterrupt as err:
@@ -876,9 +830,7 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
             run_manager.terminate()
             # `_run_*` return the next (unused) shot number, so the count
             # actually emitted is last_shot_num - 1. If the run aborted during
-            # setup (before any shot), last_shot_num is still start_shot - 1 ->
-            # report start_shot - 1 rather than claiming 0 (which would make the
-            # offload ignore shots already spooled in prior partial runs).
+            # setup (before any shot), last_shot_num is still 0 -> report 0.
             final = max(last_shot_num - 1, 0)
             # Only signal completion if the run actually started (metadata
             # written). If setup failed before that, there is nothing for the

@@ -113,9 +113,9 @@ def run_offload(spool_dir: str, config=None, poll_seconds: float = _POLL_SECONDS
     """
     # config is accepted by the public entry point for call-site compatibility
     # but the drain reads everything it needs from the spool metadata.
-    # NOTE: no single-instance lock -- concurrent drains of one spool aren't
-    # reachable on this branch (resume, the only path that relaunches an offload
-    # on an in-use spool, is not functional here). See spool_format for context.
+    # NOTE: no single-instance lock -- one spool is drained by exactly one
+    # offload (auto-launched per run, or a manual drain pointed at an explicit
+    # --spool-dir). See spool_format for context.
     _run_offload(spool_dir, poll_seconds, max_retries, metadata_timeout)
 
 
@@ -313,18 +313,10 @@ def _offload_one_shot(spool_dir: str, hdf5_path: str, meta: dict, adapter,
     Idempotent for retries: if ``shot_N`` already exists in the HDF5 from a prior
     interrupted attempt, the write is skipped and the existing data verified
     instead, so a retry never trips ``write_shot_data``'s "already exists" guard.
-
-    Resume is the deliberate exception: a re-taken shot (``>= resume_from_shot``)
-    must OVERWRITE the stale group from the partial run, so the present-check is
-    bypassed and the adapter rewrites it (the adapter passes ``overwrite=True``).
     """
     payload = spool_format.read_shot(spool_dir, shot_num)
-    # A resume is active only when resume_from_shot > 1; this shot is re-taken
-    # (and must overwrite its stale group) when it falls in that resume range.
-    resume_from = meta.get("resume_from_shot", 1)
-    resumed = resume_from > 1 and shot_num >= resume_from
 
-    if resumed or not _shot_in_hdf5(hdf5_path, payload):
+    if not _shot_in_hdf5(hdf5_path, payload):
         adapter.write_shot(hdf5_path, payload, meta)
 
     # TODO(verify-coverage): the read-back below checks trace data + headers only.

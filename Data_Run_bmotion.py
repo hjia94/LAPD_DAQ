@@ -35,7 +35,6 @@ from acquisition.run_paths import resolve_run_paths
 from acquisition.run_resume import (
     QUIT,
     apply_action,
-    inspect_run,
     prompt_action,
 )
 
@@ -92,10 +91,9 @@ def main():
 
     # The experiment name and HDF5 filename come from the config, not a hard-coded
     # variable. resolve_run_paths keys identity on the name (globbing <name>_*),
-    # so a run started before midnight and resumed the next day targets the same
-    # HDF5 file + spool subfolder instead of silently starting a new pair.
+    # so a run started before midnight and continued the next day still targets
+    # the same HDF5 file + spool subfolder instead of silently starting a new pair.
     config, _ = load_experiment_config(config_path)
-    nshots = config.getint('nshots', 'num_duplicate_shots', fallback=1)
     spool_root, _ = get_storage_paths(config)
     # Spooled-only: without a spool_dir there is nothing to run, so fail loudly.
     if not spool_root:
@@ -105,19 +103,17 @@ def main():
     paths = resolve_run_paths(config, base_path, spool_root=spool_root)
     hdf5_path = paths.hdf5_path
 
-    # Decide (inspect + prompt) and do (apply) are separated so this stays flat:
-    # a fresh run skips straight through; an existing one resumes or restarts.
-    start_shot = 1
+    # Prompt (ask) and apply (do) are separated so this stays flat: a fresh run
+    # skips straight through; an existing one can only be restarted (delete +
+    # redo from shot 1) or quit -- resume is not supported.
     spool_dir = paths.spool_dir
     if paths.is_existing:
-        state = inspect_run(paths)
-        action = prompt_action(paths, state, nshots=nshots)
+        action = prompt_action(paths)
         if action == QUIT:
             print('Exiting.')
             sys.exit()
-        plan = apply_action(action, paths, state, nshots=nshots)
-        spool_dir, start_shot = plan.spool_dir, plan.start_shot
-        print(f'{action.capitalize()}: starting at shot {start_shot}.')
+        spool_dir = apply_action(action, paths)
+        print('Restart: starting fresh from shot 1.')
 
     # Acquisition writes the HDF5 skeleton + spools per-shot data; a separate
     # Offload_Run.py process fills the shots into the same HDF5.
@@ -130,7 +126,6 @@ def main():
 
     try:
         run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path,
-                                        start_shot=start_shot,
                                         description_path=description_path)
 
     except KeyboardInterrupt:

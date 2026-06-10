@@ -35,7 +35,12 @@ from acquisition import run_acquisition_spooled
 from acquisition.config import (
     get_storage_paths,
     load_experiment_config,
-    resolve_hdf5_path,
+)
+from acquisition.run_paths import resolve_run_paths
+from acquisition.run_resume import (
+    QUIT,
+    apply_action,
+    prompt_action,
 )
 import time
 import sys
@@ -83,37 +88,35 @@ def main():
         os.makedirs(base_path)
 
     # Parse the config first; the experiment name and the HDF5 filename come
-    # from it (not from a hard-coded variable in this script). The output file
-    # is <hdf5_dir or base_path>/<exp_name>_<date>.hdf5.
+    # from it (not from a hard-coded variable in this script). resolve_run_paths
+    # keys identity on the name (globbing <name>_*) and gives this run its own
+    # spool subfolder <spool_root>/<name>_<date>/ -- so two runs never share a
+    # spool, and a restart rotates only this run's old spool aside.
     config, _ = load_experiment_config(config_path)
-    hdf5_path = resolve_hdf5_path(config, base_path)
-
+    spool_root, _hdf5_dir = get_storage_paths(config)
     # Spooled-only: without a spool_dir there is nothing to run, so fail loudly.
-    spool_dir, _hdf5_dir = get_storage_paths(config)
-    if not spool_dir:
+    if not spool_root:
         print('ERROR: no [storage] spool_dir configured. Non-spooled mode was '
               'removed; set a spool_dir in experiment_config.ini and run '
               'Offload_Run.py to fill the HDF5.')
         sys.exit(1)
+    paths = resolve_run_paths(config, base_path, spool_root=spool_root)
+    hdf5_path = paths.hdf5_path
 
-    # The acquire process creates the destination HDF5 (and writes its
-    # skeleton), so guard/overwrite it up front.
-    if os.path.exists(hdf5_path):
-        while True:
-            response = input(f'File "{hdf5_path}" already exists. Overwrite? (y/n): ').lower()
-            if response in ['y', 'n']:
-                break
-            print("Please enter 'y' or 'n'")
-
-        if response == 'n':
-            print('Exiting without overwriting existing file')
+    # Prompt (ask) and apply (do) are separated so this stays flat: a fresh run
+    # skips straight through; an existing one can only be restarted (delete +
+    # redo from shot 1, rotating its old spool aside) or quit -- resume is not
+    # supported.
+    spool_dir = paths.spool_dir
+    if paths.is_existing:
+        action = prompt_action(paths)
+        if action == QUIT:
+            print('Exiting.')
             sys.exit()
-        else:
-            print('Overwriting existing file')
-            os.remove(hdf5_path)  # Delete the existing file
+        spool_dir = apply_action(action, paths)
+        print('Restart: starting fresh from shot 1.')
 
-    if not os.path.exists(spool_dir):
-        os.makedirs(spool_dir)
+    os.makedirs(spool_dir, exist_ok=True)
     print(f'PARALLEL mode: spooling shots to {spool_dir}')
     launch_offload(spool_dir, config_path)
     print(f'  Offload_Run.py will fill the HDF5 file ({hdf5_path}).')
