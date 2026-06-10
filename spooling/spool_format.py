@@ -40,6 +40,11 @@ _META_RUN = "meta_run.pkl"
 _RUN_COMPLETE = "RUN_COMPLETE"
 _SHOT_META = "meta.pkl"
 
+# Errors from reading a present-but-broken pickle (run metadata, RUN_COMPLETE, or
+# a shot sidecar). Wrapped uniformly in SpoolMetadataError so callers see one
+# typed "this spool's data is corrupt" failure instead of a raw pickle traceback.
+_PICKLE_READ_ERRORS = (OSError, pickle.UnpicklingError, EOFError, ValueError)
+
 
 class SpoolMetadataError(Exception):
     """A run-metadata / RUN_COMPLETE file exists but could not be read.
@@ -125,7 +130,7 @@ def read_run_metadata(spool_dir: str) -> dict:
             return pickle.load(f)
     except FileNotFoundError:
         raise
-    except (OSError, pickle.UnpicklingError, EOFError, ValueError) as e:
+    except _PICKLE_READ_ERRORS as e:
         raise SpoolMetadataError(f"Cannot read run metadata at {path}: {e}") from e
 
 
@@ -431,7 +436,7 @@ def read_run_complete(spool_dir: str) -> Optional[dict]:
     try:
         with open(path, "rb") as f:
             return pickle.load(f)
-    except (OSError, pickle.UnpicklingError, EOFError, ValueError) as e:
+    except _PICKLE_READ_ERRORS as e:
         raise SpoolMetadataError(f"Cannot read RUN_COMPLETE at {path}: {e}") from e
 
 
@@ -502,8 +507,16 @@ def prune_superseded(spool_root: str, keep_days: float = 7.0) -> List[str]:
 # Helpers
 # --------------------------------------------------------------------------- #
 def _atomic_pickle(path: str, obj) -> None:
-    """Pickle ``obj`` to ``path`` via a temp file + ``os.replace`` (atomic)."""
+    """Pickle ``obj`` to ``path`` via a temp file + ``os.replace`` (atomic).
+
+    The temp file is fsync'd before the rename so that after a crash/power loss
+    the destination is either the old file or the fully-written new one, never a
+    truncated/partially-flushed pickle -- which is exactly the corrupt-metadata
+    state the offload's SpoolMetadataError handling otherwise has to absorb.
+    """
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
