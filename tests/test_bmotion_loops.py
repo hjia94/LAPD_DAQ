@@ -20,15 +20,12 @@ import contextlib
 import io
 import json
 import os
-import sys
 import tempfile
 import unittest
-from pathlib import Path
 
 import h5py
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bmotion_stubs import (
     StubMSA,
     StubMotionGroup,

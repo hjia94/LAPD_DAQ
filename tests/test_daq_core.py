@@ -31,7 +31,6 @@ from lapd_daq.devices.fakes import FakeScopeDevice, TRCReplayScopeDevice
 from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bmotion_stubs import guard_sys_modules
 from _lapd_daq_fixtures import CAMERA_CONFIG_TEXT, CONFIG_TEXT, DESCRIPTION_TEXT
 

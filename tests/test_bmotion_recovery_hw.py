@@ -27,12 +27,10 @@ Run with:
 
 from __future__ import annotations
 
-import sys
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _hardware_check_base import HardwareCheckBase
 
 

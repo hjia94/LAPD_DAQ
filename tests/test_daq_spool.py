@@ -21,20 +21,14 @@ Runs on this PC's .venv (real bapsf_motion / h5py / numpy). No motor required.
 """
 
 import os
-import sys
 import errno
 import tempfile
 import threading
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import h5py
 import numpy as np
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from spooling import ShotPayload, TracePayload, spool_format
 from acquisition import bmotion, hdf5_writer, spool_adapter

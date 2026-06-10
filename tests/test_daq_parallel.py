@@ -16,17 +16,12 @@ Run:
     python -m unittest tests.test_daq_parallel
 """
 
-import sys
 import time
 import unittest
 from configparser import ConfigParser
-from pathlib import Path
 from unittest import mock
 
 import numpy as np
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT))
 
 from acquisition import scope_runner
 from acquisition.scope_runner import MultiScopeAcquisition

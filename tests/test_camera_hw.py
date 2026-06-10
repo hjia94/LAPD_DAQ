@@ -9,17 +9,14 @@ the flags at the top of this file.
 
 from __future__ import annotations
 
-import sys
 import unittest
 from dataclasses import replace
-from pathlib import Path
 
 from lapd_daq.config import load_run_config
 from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.models import ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _hardware_check_base import HardwareCheckBase
 
 # --------------------------------------------------------------------------- #
