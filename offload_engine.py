@@ -52,25 +52,28 @@ _METADATA_TIMEOUT_SECONDS = 120.0
 _MAX_RETRIES = 3
 
 
-# writer tag -> (module, attribute) of its offload adapter. Imported lazily in
+# writer tag -> dotted module path of its offload adapter. Imported lazily in
 # _get_adapter (only the one a run needs is loaded); adding a path means adding
 # one entry here.
 _ADAPTERS = {
-    "acquisition": ("acquisition", "spool_adapter"),
-    "grid": ("acquisition", "grid_spool_adapter"),
+    "acquisition": "acquisition.spool_adapter",
+    "grid": "acquisition.grid_spool_adapter",
 }
 
 
 def _get_adapter(writer_tag: str):
-    """Return the offload adapter module for a run's ``writer`` tag."""
+    """Return the offload adapter module for a run's ``writer`` tag.
+
+    Imports the submodule by its full dotted path so the lookup never depends on
+    the submodule already being bound as an attribute on the ``acquisition``
+    package -- which it only is as a side effect of some earlier import.
+    """
     if writer_tag not in _ADAPTERS:
         raise ValueError(
             f"No offload adapter for writer tag {writer_tag!r}. "
             f"Supported: {sorted(_ADAPTERS)}."
         )
-    module_name, attr_name = _ADAPTERS[writer_tag]
-    module = importlib.import_module(module_name)
-    return getattr(module, attr_name)
+    return importlib.import_module(_ADAPTERS[writer_tag])
 
 
 class MetadataTimeout(Exception):

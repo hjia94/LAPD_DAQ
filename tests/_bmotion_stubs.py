@@ -168,19 +168,12 @@ def restore_modules():
     Called at the end of install_stubs (so stubs never outlive the bmotion load)
     and again from a consuming module's tearDownModule (idempotent). Leaves
     ``bmotion_module`` intact -- it is a live object reference, not a sys.modules
-    lookup. See the inline comment for the acquisition.* purge rationale.
+    lookup. For every name install_stubs() touched, put back exactly what was
+    there before (or pop it if it was absent), so the stub ``acquisition`` /
+    ``xarray`` / ``bapsf_motion`` packages don't leak into sibling test modules.
     """
     if not _SAVED_MODULES:
         return
-    # Purge every acquisition.* entry first, then reinstate the originals (the
-    # acquisition.* ones plus the other stubbed deps, bapsf_motion / xarray). A
-    # bare pop of just the stubbed names can leave a real submodule (e.g.
-    # acquisition.hdf5_writer pulled in by a lazy import) dangling without its
-    # parent, so a later `import acquisition` rebuilds a fresh package whose
-    # spool_adapter/grid_spool_adapter attrs are unset -- which broke
-    # offload_engine._get_adapter's getattr under `unittest discover`.
-    for name in _matching("acquisition"):
-        sys.modules.pop(name, None)
     for name in _STUBBED_MODULE_NAMES:
         saved = _SAVED_MODULES.get(name, _ABSENT)
         if saved is _ABSENT:
