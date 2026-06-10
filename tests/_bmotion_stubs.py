@@ -17,6 +17,7 @@ real-HDF5 temp-file factory) are defined at the bottom of this file.
 Tests use `from _bmotion_stubs import StubMotionGroup, StubRunManager, ...`.
 """
 
+import contextlib
 import importlib.util
 import pathlib
 import sys
@@ -50,26 +51,48 @@ _ABSENT = object()
 _SAVED_MODULES: dict = {}
 
 
-class _StubDataArray:
-    """Permissive xr.DataArray stand-in; StubMotionList inherits from it so
-    the `isinstance(..., xr.DataArray)` check in get_motion_list_size
-    succeeds."""
-    pass
-
-
 # The loaded acquisition.bmotion module — populated by install_stubs().
 bmotion_module = None
 
 
-def install_stubs():
-    """Install sys.modules stubs and load acquisition/bmotion.py.
+def _matching(prefix: str):
+    """sys.modules keys equal to ``prefix`` or under ``prefix.``."""
+    return [n for n in sys.modules if n == prefix or n.startswith(prefix + ".")]
 
-    Idempotent: subsequent calls before restore_modules() are no-ops, so
-    setUpModule can re-invoke without overwriting the original snapshot.
+
+@contextlib.contextmanager
+def guard_sys_modules(*prefixes: str):
+    """Snapshot the ``prefix``/``prefix.*`` sys.modules entries, restore on exit.
+
+    For a test that must pop/reimport a package (e.g. an import-hygiene check):
+    rebuilding a package fresh drops the submodule attributes other tests rely
+    on, so this puts the originals back even if the body raises. Purging before
+    the reinstate keeps a dangling submodule from leaving the package half-formed.
+    """
+    saved = {n: sys.modules[n] for p in prefixes for n in _matching(p)}
+    try:
+        yield
+    finally:
+        for prefix in prefixes:
+            for n in _matching(prefix):
+                sys.modules.pop(n, None)
+        sys.modules.update(saved)
+
+
+def install_stubs():
+    """Stub the optional deps, load acquisition/bmotion.py once, then restore.
+
+    Loads ``bmotion.py`` under temporary ``bapsf_motion``/``xarray``/stub-
+    ``acquisition.scope_runner`` entries so it imports on a machine without that
+    hardware, then immediately restores the real ``sys.modules`` (see the tail of
+    this function). ``bmotion_module`` keeps the loaded module as a live
+    reference. Loads exactly once -- a reload would create a *new* module object
+    and desync the ``bmotion_module`` name a consuming test already imported -- so
+    repeat calls (e.g. setUpModule) are no-ops.
     """
     global bmotion_module
 
-    if _SAVED_MODULES:
+    if bmotion_module is not None:
         return
 
     for name in _STUBBED_MODULE_NAMES:
@@ -83,9 +106,12 @@ def install_stubs():
     sys.modules["bapsf_motion"] = bmotion_stub
     sys.modules["bapsf_motion.actors"] = actors_stub
 
-    # xarray
+    # xarray: point DataArray straight at our StubMotionList so the
+    # isinstance(motion_list, xr.DataArray) check in get_motion_list_size holds
+    # for the doubles the tests build, without StubMotionList having to subclass
+    # a stub installed at import time.
     xr_stub = types.ModuleType("xarray")
-    xr_stub.DataArray = _StubDataArray
+    xr_stub.DataArray = StubMotionList
     sys.modules["xarray"] = xr_stub
 
     # acquisition package skeleton — load the two real submodules that
@@ -113,7 +139,9 @@ def install_stubs():
 
     sr_stub = types.ModuleType("acquisition.scope_runner")
     sr_stub.MultiScopeAcquisition = object
-    sr_stub.single_shot_acquisition = lambda msa, scopes, shot_num: None
+    # Absorb whatever args the real single_shot_acquisition takes (verbose=, etc.)
+    # so the stub stays valid as that signature evolves.
+    sr_stub.single_shot_acquisition = lambda *a, **k: None
     sys.modules["acquisition.scope_runner"] = sr_stub
 
     spec = importlib.util.spec_from_file_location(
@@ -123,9 +151,36 @@ def install_stubs():
     sys.modules["acquisition.bmotion"] = bmotion_module
     spec.loader.exec_module(bmotion_module)
 
+    # Loading is done: bmotion_module holds its own bindings (it did
+    # `from .scope_runner import single_shot_acquisition` at load, so the stub is
+    # captured in its namespace, not re-read from sys.modules). Restore the real
+    # sys.modules NOW -- before any sibling test module is imported under
+    # `unittest discover` -- so the stub `acquisition`/`xarray` packages don't
+    # leak and break their top-level `from acquisition import spool_adapter` etc.
+    # The bmotion tests' own lazy `from . import spool_adapter` / `from spooling
+    # import spool_format` then resolve against the real packages, which is fine.
+    restore_modules()
+
 
 def restore_modules():
-    """Undo install_stubs(): restore originals and forget the snapshot."""
+    """Restore the sys.modules entries install_stubs() replaced.
+
+    Called at the end of install_stubs (so stubs never outlive the bmotion load)
+    and again from a consuming module's tearDownModule (idempotent). Leaves
+    ``bmotion_module`` intact -- it is a live object reference, not a sys.modules
+    lookup. See the inline comment for the acquisition.* purge rationale.
+    """
+    if not _SAVED_MODULES:
+        return
+    # Purge every acquisition.* entry first, then reinstate the originals (the
+    # acquisition.* ones plus the other stubbed deps, bapsf_motion / xarray). A
+    # bare pop of just the stubbed names can leave a real submodule (e.g.
+    # acquisition.hdf5_writer pulled in by a lazy import) dangling without its
+    # parent, so a later `import acquisition` rebuilds a fresh package whose
+    # spool_adapter/grid_spool_adapter attrs are unset -- which broke
+    # offload_engine._get_adapter's getattr under `unittest discover`.
+    for name in _matching("acquisition"):
+        sys.modules.pop(name, None)
     for name in _STUBBED_MODULE_NAMES:
         saved = _SAVED_MODULES.get(name, _ABSENT)
         if saved is _ABSENT:
@@ -133,14 +188,6 @@ def restore_modules():
         else:
             sys.modules[name] = saved
     _SAVED_MODULES.clear()
-
-
-# Eagerly install so the StubMotionList class body below — which subclasses
-# `sys.modules["xarray"].DataArray` — can resolve at import time. The
-# setUpModule of a consuming test file should still call install_stubs()
-# (it's idempotent and a no-op when stubs are already in place); the
-# matching tearDownModule should call restore_modules().
-install_stubs()
 
 
 # --------------------------------------------------------------------------- #
@@ -152,8 +199,14 @@ class _StubCoord:
         self.values = np.asarray(values)
 
 
-class StubMotionList(sys.modules["xarray"].DataArray):
-    """Quacks like xr.DataArray for the parts of bmotion.py that touch it."""
+class StubMotionList:
+    """Quacks like xr.DataArray for the parts of bmotion.py that touch it.
+
+    install_stubs() points the stub ``xarray.DataArray`` at *this* class, so the
+    ``isinstance(motion_list, xr.DataArray)`` check in get_motion_list_size holds
+    without subclassing a stub installed at import time -- which lets the stub
+    install be deferred to setUpModule (no global sys.modules mutation on import).
+    """
     def __init__(self, values, space_labels=("x", "y")):
         self._values = np.asarray(values, dtype=float)
         self._coords = {"space": _StubCoord(list(space_labels))}
@@ -190,11 +243,20 @@ class StubPosition:
         return self.value[i]
 
 
+class _StubDrive:
+    """Absorbs drive.send_command(...) calls (e.g. the 'disable' move_to_index
+    issues after a move) so the call doesn't error. No test asserts on the
+    commands, so this is a no-op rather than a recorder."""
+    def send_command(self, command):
+        pass
+
+
 class StubMotionGroup:
     def __init__(self, name, ml_values, x=0.0, y=0.0, space_labels=("x", "y")):
         self.config = {"name": name}
         self.mb = StubMotionBuilder(StubMotionList(ml_values, space_labels=space_labels))
         self.position = StubPosition(x, y)
+        self.drive = _StubDrive()
         self.move_ml_calls = []
 
     def move_ml(self, motion_index):
@@ -251,3 +313,12 @@ def make_toml_file(text="# stub bmotion toml\n"):
     tmp.write(text)
     tmp.close()
     return tmp.name
+
+
+# Install at import (after the stub classes above exist, since install_stubs
+# points xarray.DataArray at StubMotionList) so a consuming test file's
+# `from _bmotion_stubs import bmotion_module` binds the loaded module, not None.
+# A consuming module's setUpModule re-calls install_stubs() (idempotent) and its
+# tearDownModule calls restore_modules() to put the real sys.modules back, so the
+# stub `acquisition` package doesn't leak into sibling test modules.
+install_stubs()

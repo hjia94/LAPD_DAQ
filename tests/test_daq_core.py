@@ -32,6 +32,7 @@ from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.engine import AcquisitionDevices, AcquisitionRun
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bmotion_stubs import guard_sys_modules
 from _lapd_daq_fixtures import CAMERA_CONFIG_TEXT, CONFIG_TEXT, DESCRIPTION_TEXT
 
 
@@ -117,15 +118,21 @@ class ShotPlanTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class AcquisitionImportHygieneTests(unittest.TestCase):
     def test_acquisition_import_does_not_import_bmotion_or_scope_hardware(self):
-        sys.modules.pop("acquisition", None)
-        sys.modules.pop("acquisition.bmotion", None)
+        # Popping `acquisition` for a clean re-import rebuilds the package WITHOUT
+        # the submodule attributes (spool_adapter, grid_spool_adapter, ...) that
+        # other test modules' top-level imports and offload_engine._get_adapter
+        # rely on; guard_sys_modules restores the originals so a sibling test
+        # later in the same process (e.g. under `unittest discover`) isn't broken.
+        with guard_sys_modules("acquisition"):
+            sys.modules.pop("acquisition", None)
+            sys.modules.pop("acquisition.bmotion", None)
 
-        acquisition = importlib.import_module("acquisition")
+            acquisition = importlib.import_module("acquisition")
 
-        self.assertTrue(callable(acquisition.run_acquisition_spooled))
-        # The lazy wrapper must be referenceable without importing bmotion.
-        self.assertTrue(callable(acquisition.run_acquisition_bmotion_spooled))
-        self.assertNotIn("acquisition.bmotion", sys.modules)
+            self.assertTrue(callable(acquisition.run_acquisition_spooled))
+            # The lazy wrapper must be referenceable without importing bmotion.
+            self.assertTrue(callable(acquisition.run_acquisition_bmotion_spooled))
+            self.assertNotIn("acquisition.bmotion", sys.modules)
 
 
 # --------------------------------------------------------------------------- #
