@@ -308,8 +308,15 @@ def read_shot(spool_dir: str, shot_num: int) -> ShotPayload:
     if not os.path.exists(done_path):
         raise FileNotFoundError(f"Shot {shot_num} is not marked done: {done_path}")
 
-    with open(os.path.join(shot_dir, _SHOT_META), "rb") as f:
-        sidecar = pickle.load(f)
+    # A present-but-corrupt sidecar raises the same typed error the run-metadata
+    # readers use, rather than a raw UnpicklingError, so a poison shot surfaces
+    # consistently (the drain catches it and quarantines either way).
+    meta_path = os.path.join(shot_dir, _SHOT_META)
+    try:
+        with open(meta_path, "rb") as f:
+            sidecar = pickle.load(f)
+    except _PICKLE_READ_ERRORS as e:
+        raise SpoolMetadataError(f"Cannot read shot sidecar at {meta_path}: {e}") from e
 
     payload = ShotPayload(
         shot_num=sidecar["shot_num"],
