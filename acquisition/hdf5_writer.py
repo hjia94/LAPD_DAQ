@@ -26,6 +26,13 @@ except ImportError:
     _COMPRESSION_KWARGS = {"compression": "lzf", "shuffle": True, "fletcher32": True}
     _COMPRESSION_LABEL = "lzf"
 
+# Open flags for per-shot writes: newest libver (for the chunked/compressed
+# datasets) and a disabled chunk cache (each shot is written once, never re-read
+# in this open, so caching wastes memory). Shared so the offload adapters, which
+# now open the file themselves to batch scope data + position rows in one open,
+# use the exact same policy as the in-process writer.
+SHOT_WRITE_OPEN_KWARGS = {"libver": "latest", "rdcc_nbytes": 0}
+
 
 # Files captured into the `source_code` HDF5 attribute for reproducibility.
 # Paths are resolved relative to the repository root at write time.
@@ -188,40 +195,53 @@ def write_shot_data(save_path, all_data, shot_num, channel_descriptions,
             shots must be overwritten with fresh data (numbering stays
             contiguous). When False, an existing shot is a programming error.
     """
-    with h5py.File(save_path, 'a', libver='latest', rdcc_nbytes=0) as f:
-        for scope_name, (traces, data, headers) in all_data.items():
-            scope_group = f[scope_name]
-            shot_name = f'shot_{shot_num}'
-            if shot_name in scope_group:
-                if not overwrite:
-                    raise RuntimeError(f"Shot {shot_num} already exists for scope {scope_name}.")
-                del scope_group[shot_name]
-            shot_group = scope_group.create_group(shot_name)
-            shot_group.attrs['acquisition_time'] = time.ctime()
+    with h5py.File(save_path, 'a', **SHOT_WRITE_OPEN_KWARGS) as f:
+        _write_shot_data_into(f, all_data, shot_num, channel_descriptions,
+                              overwrite=overwrite)
 
-            for tr in traces:
-                if tr not in data:
-                    continue
-                trace_data = np.asarray(data[tr], dtype=np.int16)
-                is_sequence = len(trace_data.shape) > 1
-                if is_sequence:
-                    chunk_size = (1, min(trace_data.shape[1], 8 * 1024 * 1024))
-                else:
-                    chunk_size = (min(len(trace_data), 8 * 1024 * 1024),)
 
-                data_ds = shot_group.create_dataset(
-                    f'{tr}_data',
-                    data=trace_data,
-                    dtype='int16',
-                    chunks=chunk_size,
-                    **_COMPRESSION_KWARGS,
-                )
-                header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))
-                data_ds.attrs['description'] = channel_descriptions.get(
-                    (scope_name, tr), f"Channel {tr} - No description available"
-                )
-                data_ds.attrs['dtype'] = 'int16'
-                header_ds.attrs['description'] = f'Binary header data for {tr}'
+def _write_shot_data_into(f, all_data, shot_num, channel_descriptions,
+                          overwrite=False):
+    """Write shot_N groups into an already-open HDF5 file handle.
+
+    Split out of :func:`write_shot_data` so a caller that must also write other
+    per-shot data (e.g. an offload adapter writing position rows) can do both in
+    a single file open instead of reopening the HDF5 for each. ``write_shot_data``
+    keeps its public signature and simply opens the file and delegates here.
+    """
+    for scope_name, (traces, data, headers) in all_data.items():
+        scope_group = f[scope_name]
+        shot_name = f'shot_{shot_num}'
+        if shot_name in scope_group:
+            if not overwrite:
+                raise RuntimeError(f"Shot {shot_num} already exists for scope {scope_name}.")
+            del scope_group[shot_name]
+        shot_group = scope_group.create_group(shot_name)
+        shot_group.attrs['acquisition_time'] = time.ctime()
+
+        for tr in traces:
+            if tr not in data:
+                continue
+            trace_data = np.asarray(data[tr], dtype=np.int16)
+            is_sequence = len(trace_data.shape) > 1
+            if is_sequence:
+                chunk_size = (1, min(trace_data.shape[1], 8 * 1024 * 1024))
+            else:
+                chunk_size = (min(len(trace_data), 8 * 1024 * 1024),)
+
+            data_ds = shot_group.create_dataset(
+                f'{tr}_data',
+                data=trace_data,
+                dtype='int16',
+                chunks=chunk_size,
+                **_COMPRESSION_KWARGS,
+            )
+            header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))
+            data_ds.attrs['description'] = channel_descriptions.get(
+                (scope_name, tr), f"Channel {tr} - No description available"
+            )
+            data_ds.attrs['dtype'] = 'int16'
+            header_ds.attrs['description'] = f'Binary header data for {tr}'
 
 
 def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason):

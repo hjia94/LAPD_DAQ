@@ -92,10 +92,15 @@ def channel_descriptions(msa):
 # Offload side
 # --------------------------------------------------------------------------- #
 def write_shot(hdf5_path, payload, meta):
-    """Write one ShotPayload's scope data + positions into the HDF5 file."""
+    """Write one ShotPayload's scope data + positions into the HDF5 file.
+
+    Scope data (or the skip marker) and the position row are written in a single
+    HDF5 open so each shot opens the file once on the offload hot path.
+    """
     if payload.skipped:
         _write_skip(hdf5_path, payload, meta)
-        _write_positions(hdf5_path, payload, meta)
+        with h5py.File(hdf5_path, "a") as f:
+            _write_positions(f, payload, meta)
         return
 
     all_data = _payload_to_all_data(payload)
@@ -103,9 +108,10 @@ def write_shot(hdf5_path, payload, meta):
     # On resume the probe's last position is re-taken; those shots overwrite the
     # stale groups left by the partial run (resume_from_shot marks the boundary).
     overwrite = payload.shot_num >= meta.get("resume_from_shot", 1) > 1
-    hdf5_writer.write_shot_data(hdf5_path, all_data, payload.shot_num, descriptions,
-                                overwrite=overwrite)
-    _write_positions(hdf5_path, payload, meta)
+    with h5py.File(hdf5_path, "a", **hdf5_writer.SHOT_WRITE_OPEN_KWARGS) as f:
+        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num,
+                                          descriptions, overwrite=overwrite)
+        _write_positions(f, payload, meta)
 
 
 def finalize(hdf5_path, meta, final_shot_num):
@@ -165,15 +171,18 @@ def _write_skip(hdf5_path, payload, meta):
     )
 
 
-def _write_positions(hdf5_path, payload, meta):
-    """Write per-motion-group positions, mirroring record_bmotion_positions."""
+def _write_positions(f, payload, meta):
+    """Write per-motion-group positions into open HDF5 ``f``.
+
+    Mirrors record_bmotion_positions. ``f`` is an already-open ``h5py.File`` so
+    the position row lands in the same open as the shot's scope data.
+    """
     coords = payload.coordinates
     if not coords:
         return
-    with h5py.File(hdf5_path, "a") as f:
-        for mg_name, xy in coords.items():
-            ds_path = f"Control/Positions/{mg_name}/positions_array"
-            if ds_path not in f:
-                continue
-            ds = f[ds_path]
-            ds[payload.shot_num - 1] = (payload.shot_num, xy[0], xy[1])
+    for mg_name, xy in coords.items():
+        ds_path = f"Control/Positions/{mg_name}/positions_array"
+        if ds_path not in f:
+            continue
+        ds = f[ds_path]
+        ds[payload.shot_num - 1] = (payload.shot_num, xy[0], xy[1])

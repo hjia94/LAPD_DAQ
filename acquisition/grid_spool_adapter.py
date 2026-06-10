@@ -36,16 +36,22 @@ channel_descriptions = spool_adapter.channel_descriptions
 # Offload side
 # --------------------------------------------------------------------------- #
 def write_shot(hdf5_path, payload, meta):
-    """Write one ShotPayload's scope data + grid position into the HDF5 file."""
+    """Write one ShotPayload's scope data + grid position into the HDF5 file.
+
+    Scope data (or the skip marker) and the position row share a single HDF5
+    open so each shot opens the file once on the offload hot path.
+    """
     if payload.skipped:
         spool_adapter._write_skip(hdf5_path, payload, meta)
-        _write_positions(hdf5_path, payload, meta)
+        with h5py.File(hdf5_path, "a") as f:
+            _write_positions(f, payload, meta)
         return
 
     all_data = spool_adapter._payload_to_all_data(payload)
     descriptions = spool_adapter._descriptions_for(all_data, meta)
-    hdf5_writer.write_shot_data(hdf5_path, all_data, payload.shot_num, descriptions)
-    _write_positions(hdf5_path, payload, meta)
+    with h5py.File(hdf5_path, "a", **hdf5_writer.SHOT_WRITE_OPEN_KWARGS) as f:
+        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num, descriptions)
+        _write_positions(f, payload, meta)
 
 
 def finalize(hdf5_path, meta, final_shot_num):
@@ -65,22 +71,22 @@ def mark_shot_failed(hdf5_path, meta, shot_num, reason):
     )
 
 
-def _write_positions(hdf5_path, payload, meta):
-    """Write the single grid positions_array row, mirroring update_position_hdf5.
+def _write_positions(f, payload, meta):
+    """Write the single grid positions_array row into open HDF5 ``f``.
 
+    Mirrors update_position_hdf5. ``f`` is an already-open ``h5py.File``.
     ``payload.coordinates`` is ``{'x':.., 'y':.., 'z':..|None}``; ``None`` (e.g.
     a stationary run with no motor) writes nothing.
     """
     coords = payload.coordinates
     if not coords:
         return
-    with h5py.File(hdf5_path, "a") as f:
-        ds_path = "/Control/Positions/positions_array"
-        if ds_path not in f:
-            return
-        pos_arr = f[ds_path]
-        shot_num = payload.shot_num
-        if meta.get("nz") is None:
-            pos_arr[shot_num - 1] = (shot_num, coords["x"], coords["y"])
-        else:
-            pos_arr[shot_num - 1] = (shot_num, coords["x"], coords["y"], coords["z"])
+    ds_path = "/Control/Positions/positions_array"
+    if ds_path not in f:
+        return
+    pos_arr = f[ds_path]
+    shot_num = payload.shot_num
+    if meta.get("nz") is None:
+        pos_arr[shot_num - 1] = (shot_num, coords["x"], coords["y"])
+    else:
+        pos_arr[shot_num - 1] = (shot_num, coords["x"], coords["y"], coords["z"])
