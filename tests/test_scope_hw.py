@@ -2,9 +2,13 @@
 
 Connects to one real scope through the lapd_daq adapter (and, for the
 Data_Run-style check, through the legacy acquisition path). Skipped by default
-so a normal run on a developer machine stays green; opt in by editing the flags
-at the top of this file.
+so a normal run on a developer machine stays green; opt in via environment
+variables so an enabled flag can never be committed:
 
+    $env:LAPD_RUN_SCOPE_CHECK = "1"            # adapter connect check
+    $env:LAPD_RUN_DATA_RUN_SCOPE_CHECK = "1"   # legacy Data_Run-style check
+    $env:LAPD_SCOPE_ALLOW_ACQUIRE = "1"        # arm + write a shot (destructive)
+    $env:LAPD_SCOPE_NAME = "lpscope"           # optional; default first scope
     pytest tests/test_scope_hw.py -v -s
 """
 
@@ -18,32 +22,32 @@ from lapd_daq.devices.lab_scopes import LabScopesLeCroyScopeAdapter
 from lapd_daq.models import ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from _hardware_check_base import HardwareCheckBase
+from _hardware_check_base import HardwareCheckBase, env_flag, env_str
 from _hardware_check_helpers import restrict_scope_config
 
 # --------------------------------------------------------------------------- #
-# Enable individual checks here. Each is skipped unless True.
+# Run flags — read from the environment; committed defaults are always safe.
 # --------------------------------------------------------------------------- #
-RUN_SCOPE_CHECK = False
-RUN_DATA_RUN_SCOPE_CHECK = False
+RUN_SCOPE_CHECK = env_flag("LAPD_RUN_SCOPE_CHECK")
+RUN_DATA_RUN_SCOPE_CHECK = env_flag("LAPD_RUN_DATA_RUN_SCOPE_CHECK")
 
 # Safety gate — destructive acquisition is off by default even when the check
-# above is enabled. Flip explicitly to arm and write a shot.
-SCOPE_ALLOW_ACQUIRE = False
+# above is enabled. Set explicitly to arm and write a shot.
+SCOPE_ALLOW_ACQUIRE = env_flag("LAPD_SCOPE_ALLOW_ACQUIRE")
 
 # --------------------------------------------------------------------------- #
 # Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
 # the current working directory; pass an absolute path to avoid surprises.
 # --------------------------------------------------------------------------- #
-EXPERIMENT_CONFIG_PATH = "experiment_config.txt"
+EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
 
 # Scope check
-SCOPE_NAME = None                # None = first scope in [scope_ips]
+SCOPE_NAME = env_str("LAPD_SCOPE_NAME")          # None = first scope in [scope_ips]
 SCOPE_CONNECT_TIMEOUT_S = 30.0
 SCOPE_SHOT_NUM = 1
 
 # Data_Run-style scope check
-DATA_RUN_SCOPE_NAME = None       # None = use all scopes from [scope_ips]
+DATA_RUN_SCOPE_NAME = env_str("LAPD_DATA_RUN_SCOPE_NAME")  # None = all scopes
 DATA_RUN_SCOPE_SHOTS = 1
 # --------------------------------------------------------------------------- #
 

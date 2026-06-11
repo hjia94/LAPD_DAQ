@@ -1,9 +1,11 @@
 """Hardware diagnostic test for the Phantom camera.
 
 Connects to the real Phantom camera through the lapd_daq adapter. Skipped by
-default so a normal run on a developer machine stays green; opt in by editing
-the flags at the top of this file.
+default so a normal run on a developer machine stays green; opt in via
+environment variables so an enabled flag can never be committed:
 
+    $env:LAPD_RUN_CAMERA_CHECK = "1"       # configure-only check
+    $env:LAPD_CAMERA_ALLOW_RECORD = "1"    # wait for trigger + record a .cine
     pytest tests/test_camera_hw.py -v -s
 """
 
@@ -17,21 +19,21 @@ from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.models import ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from _hardware_check_base import HardwareCheckBase
+from _hardware_check_base import HardwareCheckBase, env_flag, env_str
 
 # --------------------------------------------------------------------------- #
-# Enable the check here. Skipped unless True.
+# Run flags — read from the environment; committed defaults are always safe.
 # --------------------------------------------------------------------------- #
-RUN_CAMERA_CHECK = False
+RUN_CAMERA_CHECK = env_flag("LAPD_RUN_CAMERA_CHECK")
 
-# Safety gate — the camera does not wait for a trigger / record unless this is True.
-CAMERA_ALLOW_RECORD = False
+# Safety gate — the camera does not wait for a trigger / record unless this is set.
+CAMERA_ALLOW_RECORD = env_flag("LAPD_CAMERA_ALLOW_RECORD")
 
 # --------------------------------------------------------------------------- #
 # Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
 # the current working directory; pass an absolute path to avoid surprises.
 # --------------------------------------------------------------------------- #
-EXPERIMENT_CONFIG_PATH = "experiment_config.txt"
+EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
 
 CAMERA_EXPERIMENT_NAME = "hardware_camera_check"
 CAMERA_SHOT_NUM = 1

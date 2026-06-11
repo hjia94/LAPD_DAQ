@@ -3,8 +3,12 @@
 Connects to the real motion controller through the lapd_daq adapter (and, for
 the Data_Run-style check, through the legacy acquisition path with fake scope
 data). Skipped by default so a normal run on a developer machine stays green;
-opt in by editing the flags at the top of this file.
+opt in via environment variables so an enabled flag can never be committed:
 
+    $env:LAPD_RUN_MOTION_CHECK = "1"           # adapter connect / read check
+    $env:LAPD_RUN_DATA_RUN_MOTION_CHECK = "1"  # legacy Data_Run-style check
+    $env:LAPD_MOTION_ALLOW_MOVE = "1"          # required before any motor move
+    $env:LAPD_MOTION_TARGET = "0, 0"           # optional; omit for read-only
     pytest tests/test_motion_hw.py -v -s
 """
 
@@ -19,32 +23,35 @@ from lapd_daq.devices.legacy_motion import LegacyMotorAdapter
 from lapd_daq.models import PlannedPosition, ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from _hardware_check_base import HardwareCheckBase
+from _hardware_check_base import HardwareCheckBase, env_flag, env_str
 from _hardware_check_helpers import (
     ensure_fake_scope_config,
     fake_scope_payload,
     fake_time_array,
+    parse_move_to,
     target_coordinates,
 )
 
 # --------------------------------------------------------------------------- #
-# Enable individual checks here. Each is skipped unless True.
+# Run flags — read from the environment; committed defaults are always safe.
 # --------------------------------------------------------------------------- #
-RUN_MOTION_CHECK = False
-RUN_DATA_RUN_MOTION_CHECK = False
+RUN_MOTION_CHECK = env_flag("LAPD_RUN_MOTION_CHECK")
+RUN_DATA_RUN_MOTION_CHECK = env_flag("LAPD_RUN_DATA_RUN_MOTION_CHECK")
 
-# Safety gate — no motor move is commanded unless this is True.
-MOTION_ALLOW_MOVE = False
+# Safety gate — no motor move is commanded unless this is set.
+MOTION_ALLOW_MOVE = env_flag("LAPD_MOTION_ALLOW_MOVE")
 
 # --------------------------------------------------------------------------- #
 # Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
 # the current working directory; pass an absolute path to avoid surprises.
 # --------------------------------------------------------------------------- #
-EXPERIMENT_CONFIG_PATH = "experiment_config.txt"
+EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
 
 # Motion check
-MOTION_DIMENSION = "auto"        # "auto" | "xy" | "xyz"
-MOTION_TARGET = None             # e.g. (0.0, 0.0) or (0.0, 0.0, 0.0); None = read-only
+MOTION_DIMENSION = env_str("LAPD_MOTION_DIMENSION", "auto")  # "auto" | "xy" | "xyz"
+# LAPD_MOTION_TARGET is "x, y" or "x, y, z" (e.g. "0, 0"); unset = read-only.
+_MOTION_TARGET_RAW = env_str("LAPD_MOTION_TARGET")
+MOTION_TARGET = parse_move_to(_MOTION_TARGET_RAW) if _MOTION_TARGET_RAW else None
 MOTION_SHOT_NUM = 1
 
 # Data_Run-style motion check (real motors, fake delayed scope)

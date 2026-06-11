@@ -18,10 +18,13 @@ Three independent checks:
     encoder reads back ~0 -- catches a set-zero that the drive ACK'd but did not
     actually apply.
 
-Only ``bmotion_config.toml`` is needed in the current working directory.
+All knobs are environment variables, so an armed configuration can never be
+committed. A typical encoder check on the DAQ PC:
 
-Run with:
-
+    $env:LAPD_BMOTION_ALLOW_MOVE = "1"
+    $env:LAPD_RUN_ENCODER_CHECK = "1"
+    $env:LAPD_BMOTION_TOML = "E:\\Shadow data\\Pat\\bmotion_config.toml"
+    $env:LAPD_BMOTION_MOTION_GROUP = "2"     # group name (e.g. "Hermes") or index
     pytest tests/test_bmotion_recovery_hw.py -v -s
 """
 
@@ -31,36 +34,38 @@ import time
 import unittest
 from pathlib import Path
 
-from _hardware_check_base import HardwareCheckBase
+from _hardware_check_base import HardwareCheckBase, env_flag, env_str
 
 
 # ===========================================================================
-#  EDIT THESE — everything you need to change for a hardware run is here.
+#  Hardware-run knobs — set via environment; committed defaults are safe.
 # ===========================================================================
 
 # Path to the motion-config TOML (absolute path recommended).
-BMOTION_TOML_PATH = r"E:\Shadow data\Pat\bmotion_config.toml"
+BMOTION_TOML_PATH = env_str(
+    "LAPD_BMOTION_TOML", r"E:\Shadow data\Pat\bmotion_config.toml")
 
 # Motion group to drive. Use the group's name (e.g. "Hermes") — recommended,
 # it's unambiguous. You may also use its index (0, 1, 2, ...) in TOML order.
-# None = use the first group in the TOML.
-MOTION_GROUP = 2
+# Unset = use the first group in the TOML.
+MOTION_GROUP = env_str("LAPD_BMOTION_MOTION_GROUP")
 
-# Safety gate: nothing moves a motor until this is True.
-BMOTION_ALLOW_MOVE = True
+# Safety gate: nothing moves a motor until this is set.
+BMOTION_ALLOW_MOVE = env_flag("LAPD_BMOTION_ALLOW_MOVE")
 
 # Turn each check on individually.
-RUN_LONG_MOTION_CHECK = False     # slow full-range move must finish, not time out
-RUN_ENCODER_CHECK = True         # encoder (EP) vs step (IP) agreement around a move
-RUN_FAILURE_CHECK = False         # an unreachable target -> MotorError, then recovers
+RUN_LONG_MOTION_CHECK = env_flag("LAPD_RUN_LONG_MOTION_CHECK")
+RUN_ENCODER_CHECK = env_flag("LAPD_RUN_ENCODER_CHECK")
+RUN_FAILURE_CHECK = env_flag("LAPD_RUN_FAILURE_CHECK")
 # DESTRUCTIVE: set-zero redefines the origin for this group. Off by default even
 # with BMOTION_ALLOW_MOVE; only enable when you intend to re-zero this rig.
-RUN_SET_ZERO_CHECK = False       # zero the group, confirm encoder reads back ~0
+RUN_SET_ZERO_CHECK = env_flag("LAPD_RUN_SET_ZERO_CHECK")
 
 # For the FAILURE check only: a motion-list index for MOTION_GROUP that you KNOW
 # the probe physically cannot reach on this rig (blocked / past an obstruction).
-# Must be set when RUN_FAILURE_CHECK is True.
-FAILURE_TARGET_INDEX = None       # e.g. 7
+# Must be set when RUN_FAILURE_CHECK is on.
+_FAILURE_INDEX_RAW = env_str("LAPD_BMOTION_FAILURE_INDEX")  # e.g. "7"
+FAILURE_TARGET_INDEX = int(_FAILURE_INDEX_RAW) if _FAILURE_INDEX_RAW else None
 
 # Encoder agreement tolerance, in motor revolutions.
 ENCODER_TOL_REV = 0.01
@@ -121,6 +126,10 @@ class _RecoveryHardwareBase(HardwareCheckBase):
 
         print("\n[recovery check] loading TOML / starting RunManager...")
         self.rm = bmotion.actors.RunManager(BMOTION_TOML_PATH, auto_run=True)
+        # Register termination BEFORE any assert/skip below: unittest skips
+        # tearDown when setUp raises (assertTrue failure or skipTest), but
+        # cleanups still run, so the RunManager's threads/connections can't leak.
+        self.addCleanup(self._terminate_rm)
         self.assertTrue(self.rm.mgs, "no motion groups available in the TOML")
 
         self.mg_key = self._select_mg_key()
@@ -152,12 +161,11 @@ class _RecoveryHardwareBase(HardwareCheckBase):
             f"names={[mg.config.get('name') for mg in self.rm.mgs.values()]}"
         )
 
-    def tearDown(self) -> None:
+    def _terminate_rm(self) -> None:
         try:
             self.rm.terminate()
         except Exception as exc:  # noqa: BLE001
             print(f"[recovery check] RunManager.terminate failed: {exc}")
-        super().tearDown()
 
     def _wait_until_idle(self, timeout_s=30.0, poll_s=0.2):
         """Block until the driven group is fully stopped.
