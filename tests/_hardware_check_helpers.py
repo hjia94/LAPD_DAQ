@@ -3,16 +3,50 @@
 Pure functions extracted from the former `scripts/hardware_daq_check.py`. They
 have no side effects so they can be unit-tested directly and reused by the
 per-instrument hardware tests.
+
+Also home to the env_flag/env_str/env_int readers the hardware tests use for
+their run flags and rig-specific values, so an armed configuration lives in
+the environment, never in committed source.
 """
 
 from __future__ import annotations
 
 import argparse
 import configparser
+import os
 
 import numpy as np
 
 LECROY_HEADER_BYTES = 346
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean opt-in from the environment ('1'/'true'/'yes'/'on')."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUTHY
+
+
+def env_str(name: str, default: str | None = None) -> str | None:
+    """Read a string setting from the environment, falling back to default."""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
+def env_int(name: str, default: int | None = None) -> int | None:
+    """Read an integer setting from the environment, falling back to default."""
+    value = env_str(name)
+    return default if value is None else int(value)
+
+
+# Shared by the scope/motion/camera hardware checks; resolved relative to the
+# current working directory unless LAPD_EXPERIMENT_CONFIG is an absolute path.
+EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
 
 
 def parse_move_to(text: str) -> tuple[float, ...]:

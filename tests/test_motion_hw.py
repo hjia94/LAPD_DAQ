@@ -23,9 +23,12 @@ from lapd_daq.devices.legacy_motion import LegacyMotorAdapter
 from lapd_daq.models import PlannedPosition, ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from _hardware_check_base import HardwareCheckBase, env_flag, env_str
+from _hardware_check_base import HardwareCheckBase
 from _hardware_check_helpers import (
+    EXPERIMENT_CONFIG_PATH,
     ensure_fake_scope_config,
+    env_flag,
+    env_str,
     fake_scope_payload,
     fake_time_array,
     parse_move_to,
@@ -42,10 +45,9 @@ RUN_DATA_RUN_MOTION_CHECK = env_flag("LAPD_RUN_DATA_RUN_MOTION_CHECK")
 MOTION_ALLOW_MOVE = env_flag("LAPD_MOTION_ALLOW_MOVE")
 
 # --------------------------------------------------------------------------- #
-# Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
-# the current working directory; pass an absolute path to avoid surprises.
+# Connection info / parameters. EXPERIMENT_CONFIG_PATH (imported above) comes
+# from LAPD_EXPERIMENT_CONFIG; pass an absolute path to avoid surprises.
 # --------------------------------------------------------------------------- #
-EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
 
 # Motion check
 MOTION_DIMENSION = env_str("LAPD_MOTION_DIMENSION", "auto")  # "auto" | "xy" | "xyz"

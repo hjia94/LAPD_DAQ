@@ -19,7 +19,8 @@ from lapd_daq.devices.phantom import PhantomCameraAdapter
 from lapd_daq.models import ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from _hardware_check_base import HardwareCheckBase, env_flag, env_str
+from _hardware_check_base import HardwareCheckBase
+from _hardware_check_helpers import EXPERIMENT_CONFIG_PATH, env_flag
 
 # --------------------------------------------------------------------------- #
 # Run flags — read from the environment; committed defaults are always safe.
@@ -30,11 +31,9 @@ RUN_CAMERA_CHECK = env_flag("LAPD_RUN_CAMERA_CHECK")
 CAMERA_ALLOW_RECORD = env_flag("LAPD_CAMERA_ALLOW_RECORD")
 
 # --------------------------------------------------------------------------- #
-# Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
-# the current working directory; pass an absolute path to avoid surprises.
+# Connection info / parameters. EXPERIMENT_CONFIG_PATH (imported above) comes
+# from LAPD_EXPERIMENT_CONFIG; pass an absolute path to avoid surprises.
 # --------------------------------------------------------------------------- #
-EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
-
 CAMERA_EXPERIMENT_NAME = "hardware_camera_check"
 CAMERA_SHOT_NUM = 1
 # --------------------------------------------------------------------------- #

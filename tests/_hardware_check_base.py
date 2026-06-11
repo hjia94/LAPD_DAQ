@@ -7,8 +7,9 @@ Lives in a leading-underscore module so unittest discovery never collects the
 base class itself.
 
 Hardware-run flags and rig-specific values are read from environment variables
-via env_flag()/env_str() so an enabled flag can never be committed: the source
-defaults are always safe, and the DAQ PC opts in per run, e.g.
+(env_flag/env_str/env_int in _hardware_check_helpers.py) so an enabled flag can
+never be committed: the source defaults are always safe, and the DAQ PC opts in
+per run, e.g.
 
     $env:LAPD_RUN_ENCODER_CHECK = "1"
     $env:LAPD_BMOTION_ALLOW_MOVE = "1"
@@ -20,28 +21,9 @@ is the one place that carries a unittest.TestCase subclass.
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
-
-_TRUTHY = ("1", "true", "yes", "on")
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    """Read a boolean opt-in from the environment ('1'/'true'/'yes'/'on')."""
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in _TRUTHY
-
-
-def env_str(name: str, default: str | None = None) -> str | None:
-    """Read a string setting from the environment, falling back to default."""
-    value = os.environ.get(name)
-    if value is None or not value.strip():
-        return default
-    return value.strip()
 
 
 class HardwareCheckBase(unittest.TestCase):

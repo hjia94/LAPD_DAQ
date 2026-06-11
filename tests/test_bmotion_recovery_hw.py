@@ -34,7 +34,8 @@ import time
 import unittest
 from pathlib import Path
 
-from _hardware_check_base import HardwareCheckBase, env_flag, env_str
+from _hardware_check_base import HardwareCheckBase
+from _hardware_check_helpers import env_flag, env_int, env_str
 
 
 # ===========================================================================
@@ -64,8 +65,7 @@ RUN_SET_ZERO_CHECK = env_flag("LAPD_RUN_SET_ZERO_CHECK")
 # For the FAILURE check only: a motion-list index for MOTION_GROUP that you KNOW
 # the probe physically cannot reach on this rig (blocked / past an obstruction).
 # Must be set when RUN_FAILURE_CHECK is on.
-_FAILURE_INDEX_RAW = env_str("LAPD_BMOTION_FAILURE_INDEX")  # e.g. "7"
-FAILURE_TARGET_INDEX = int(_FAILURE_INDEX_RAW) if _FAILURE_INDEX_RAW else None
+FAILURE_TARGET_INDEX = env_int("LAPD_BMOTION_FAILURE_INDEX")  # e.g. "7"
 
 # Encoder agreement tolerance, in motor revolutions.
 ENCODER_TOL_REV = 0.01

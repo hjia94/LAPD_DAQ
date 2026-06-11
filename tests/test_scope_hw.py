@@ -22,8 +22,13 @@ from lapd_daq.devices.lab_scopes import LabScopesLeCroyScopeAdapter
 from lapd_daq.models import ShotPlan, ShotResult
 from lapd_daq.storage.hdf5 import HDF5RunWriter
 
-from _hardware_check_base import HardwareCheckBase, env_flag, env_str
-from _hardware_check_helpers import restrict_scope_config
+from _hardware_check_base import HardwareCheckBase
+from _hardware_check_helpers import (
+    EXPERIMENT_CONFIG_PATH,
+    env_flag,
+    env_str,
+    restrict_scope_config,
+)
 
 # --------------------------------------------------------------------------- #
 # Run flags — read from the environment; committed defaults are always safe.
@@ -36,10 +41,9 @@ RUN_DATA_RUN_SCOPE_CHECK = env_flag("LAPD_RUN_DATA_RUN_SCOPE_CHECK")
 SCOPE_ALLOW_ACQUIRE = env_flag("LAPD_SCOPE_ALLOW_ACQUIRE")
 
 # --------------------------------------------------------------------------- #
-# Connection info / parameters. EXPERIMENT_CONFIG_PATH is resolved relative to
-# the current working directory; pass an absolute path to avoid surprises.
+# Connection info / parameters. EXPERIMENT_CONFIG_PATH (imported above) comes
+# from LAPD_EXPERIMENT_CONFIG; pass an absolute path to avoid surprises.
 # --------------------------------------------------------------------------- #
-EXPERIMENT_CONFIG_PATH = env_str("LAPD_EXPERIMENT_CONFIG", "experiment_config.txt")
 
 # Scope check
 SCOPE_NAME = env_str("LAPD_SCOPE_NAME")          # None = first scope in [scope_ips]
