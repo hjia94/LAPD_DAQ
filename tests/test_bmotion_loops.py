@@ -403,9 +403,15 @@ class TerminalMotorFailureTests(unittest.TestCase):
         _orig_real = mr.move_with_recovery
         mr.move_with_recovery = fake_move_with_recovery
         bmotion_module._take_shots_at_position = spy_take
+        # The hdf5_path is never opened in this test (the spy sink intercepts
+        # all writes), but use a real temp path anyway: "/dev/null" is not a
+        # file path on Windows and would explode if the loop ever DID open it.
+        unused_dir = tempfile.mkdtemp(prefix="bmloop_")
+        self.addCleanup(shutil.rmtree, unused_dir, ignore_errors=True)
+        unused_hdf5 = os.path.join(unused_dir, "unused.hdf5")
         try:
             shot_num = bmotion_module._run_interleaved(
-                StubMSA(), {"lpscope": 0}, "/dev/null", self.rm,
+                StubMSA(), {"lpscope": 0}, unused_hdf5, self.rm,
                 {"a": "forward"}, 1, 5, sink=_SpySink(),
                 move_opts={"attempts": 2}, run_state=run_state,
             )

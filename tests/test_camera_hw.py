@@ -100,7 +100,9 @@ def _camera_recorder_config(config) -> dict[str, object]:
 
 
 def _resolution(value) -> tuple[int, int]:
-    if isinstance(value, tuple):
+    # Config loaders may hand back a tuple, a list (e.g. parsed JSON/TOML), or
+    # a "WxH" / "W,H" string; accept all three.
+    if isinstance(value, (tuple, list)):
         return (int(value[0]), int(value[1]))
     text = str(value).replace("x", ",")
     first, second = (part.strip() for part in text.split(",", 1))

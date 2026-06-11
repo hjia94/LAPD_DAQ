@@ -64,6 +64,14 @@ def target_coordinates(target: tuple[float, ...]) -> dict[str, float]:
 
 
 def fake_scope_payload(scope_name: str, channel: str, points: int, shot_num: int):
+    # The values span shot_num .. shot_num+points-1; check that range up front
+    # so a large points/shot_num combination fails loudly instead of silently
+    # wrapping around in int16.
+    info = np.iinfo(np.int16)
+    if points and (shot_num < info.min or shot_num + points - 1 > info.max):
+        raise ValueError(
+            f"fake_scope_payload values {shot_num}..{shot_num + points - 1} "
+            f"exceed int16 range (points={points}, shot_num={shot_num})")
     raw = np.arange(points, dtype=np.int16) + np.int16(shot_num)
     return {scope_name: ([channel], {channel: raw}, {channel: fake_lecroy_header(points)})}
 
@@ -73,13 +81,13 @@ def fake_time_array(points: int) -> np.ndarray:
 
 
 def fake_lecroy_header(points: int) -> bytes:
+    # The zero-filled fallback exists only for environments without lab_scopes;
+    # a real failure inside header generation should surface, not be masked.
     try:
         from lab_scopes.lecroy import LeCroyHeader
-
-        header = LeCroyHeader()
-        return header.generate_test_data(NTimes=points)
-    except Exception:
+    except ImportError:
         return bytes(LECROY_HEADER_BYTES)
+    return LeCroyHeader().generate_test_data(NTimes=points)
 
 
 def restrict_scope_config(config: configparser.ConfigParser, scope_name: str) -> None:

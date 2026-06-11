@@ -39,6 +39,11 @@ TRC_FIXTURE_DIR = Path(r"D:\data\raw data")
 TRC_SOURCE_SHOTS = (0, 5)
 TRC_CHANNELS = ("C1", "C2", "C3", "C4")
 
+# The old pydaq reader lives in the separate data-analysis repo (a sibling
+# checkout); the TRC round-trip test imports it from there and must skip --
+# not error -- on machines without that repo.
+DATA_ANALYSIS_ROOT = Path(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
+
 
 # --------------------------------------------------------------------------- #
 # Config parsing
@@ -207,6 +212,8 @@ class HDF5ReaderCompatibilityTests(unittest.TestCase):
                 self.assertAlmostEqual(t0, 0.002)
 
     @unittest.skipUnless(TRC_FIXTURE_DIR.exists(), r"TRC fixtures not found at D:\data\raw data")
+    @unittest.skipUnless(DATA_ANALYSIS_ROOT.exists(),
+                         "data-analysis repo (old pydaq reader) not found")
     def test_trc_replay_scope_writes_hdf5_readable_by_old_pydaq_reader(self):
         missing = [
             TRC_FIXTURE_DIR / f"{channel}-interf-shot{source_shot:05d}.trc"
@@ -217,9 +224,12 @@ class HDF5ReaderCompatibilityTests(unittest.TestCase):
         if missing:
             self.skipTest(f"Missing TRC fixture files: {missing[:3]}")
 
-        data_analysis_root = Path(r"C:\Users\hjia9\Documents\GitHub\data-analysis")
-        sys.path.insert(0, str(data_analysis_root))
-        sys.path.insert(0, str(data_analysis_root / "read"))
+        # Import the OLD reader from the sibling repo, undoing the sys.path
+        # mutation via addCleanup so it can't leak into later tests even if
+        # this one fails mid-way.
+        for entry in (str(DATA_ANALYSIS_ROOT), str(DATA_ANALYSIS_ROOT / "read")):
+            sys.path.insert(0, entry)
+            self.addCleanup(sys.path.remove, entry)
         from read.read_scope_data import (
             read_hdf5_all_scopes_channels,
             read_hdf5_scope_data,
