@@ -4,11 +4,13 @@ Covers `acquire_shot_parallel`, `acquire_shot_dispatch`, and the parallel
 `arm_scopes_for_trigger` (acquisition/scope_runner.py) with fake scope objects --
 no hardware. Verifies:
   * parallel read returns the same all_data structure as sequential acquire_shot,
-  * reads actually overlap (wall-clock ~ max read, not sum of reads),
+  * reads actually overlap (proven by a shared barrier that only releases when
+    both reads are in flight together -- no wall-clock thresholds),
   * a scope that errors is skipped while the others still return,
   * KeyboardInterrupt propagates to abort the run,
   * the parallel_scope_read flag routes acquire_shot_dispatch,
-  * parallel arming overlaps (wall ~ max not sum) and propagates arm errors,
+  * parallel arming overlaps the slaves (same barrier proof), arms the master
+    last, serializes when the flag is off, and propagates arm errors,
   * single_shot_acquisition and the spooled callers route through the dispatcher.
 
 Run:
@@ -16,7 +18,7 @@ Run:
     python -m unittest tests.test_daq_parallel
 """
 
-import time
+import threading
 import unittest
 from configparser import ConfigParser
 from unittest import mock
@@ -28,19 +30,10 @@ from acquisition.scope_runner import MultiScopeAcquisition
 
 
 class FakeScope:
-    """Minimal stand-in for a LeCroy_Scope handle.
+    """Minimal stand-in for a LeCroy_Scope handle."""
 
-    Each read sleeps `read_seconds` to emulate a blocking network transfer; each
-    arm sleeps `arm_seconds`. Real I/O releases the GIL during socket round-trips,
-    and time.sleep does too, so this faithfully models the overlap available to
-    threads.
-    """
-
-    def __init__(self, traces, read_seconds=0.0, arm_seconds=0.0,
-                 raise_exc=None, arm_raise=None, ready=True):
+    def __init__(self, traces, raise_exc=None, arm_raise=None, ready=True):
         self._traces = list(traces)
-        self.read_seconds = read_seconds
-        self.arm_seconds = arm_seconds
         self.raise_exc = raise_exc
         self.arm_raise = arm_raise
         # When False, the scope never reports trigger-ready (INR bit clear), so
@@ -95,20 +88,63 @@ class FakeScope:
         if mode == "":
             return "STOP"
         # 'SINGLE' arm path.
-        if self.arm_seconds:
-            time.sleep(self.arm_seconds)
         if self.arm_raise is not None:
             raise self.arm_raise
         return "SINGLE"
 
     def acquire(self, tr, raw=True):
-        if self.read_seconds:
-            time.sleep(self.read_seconds)
         if self.raise_exc is not None:
             raise self.raise_exc
         data = np.full(8, ord(tr[-1]), dtype=np.int16)
         header = b"hdr-" + tr.encode()
         return data, header
+
+
+# Generous upper bound for the barrier rendezvous below: a correct (parallel)
+# implementation releases the barrier in microseconds; only a regressed
+# (sequential) implementation waits this long before failing.
+_BARRIER_TIMEOUT = 10.0
+
+
+class SyncScope(FakeScope):
+    """FakeScope whose read/arm rendezvous on barriers and log their order.
+
+    A ``threading.Barrier(n)`` only releases once n participants are blocked in
+    ``wait()`` simultaneously, so a test that completes proves the operations
+    truly overlapped -- a deterministic concurrency proof with no wall-clock
+    thresholds to flake under load. If a regression serializes the calls, the
+    barrier times out and raises ``BrokenBarrierError``, failing the test
+    loudly (read errors skip the scope; arm errors propagate from the join).
+
+    ``arm_log`` (a shared list) records ``(name, "start"/"end")`` events around
+    each arm so tests can assert ordering (master last, sequential arms not
+    interleaved). Appends hold the GIL, so the log is thread-safe.
+    """
+
+    def __init__(self, traces, name=None, read_barrier=None, arm_barrier=None,
+                 arm_log=None):
+        super().__init__(traces)
+        self.name = name
+        self.read_barrier = read_barrier
+        self.arm_barrier = arm_barrier
+        self.arm_log = arm_log
+
+    def acquire(self, tr, raw=True):
+        if self.read_barrier is not None:
+            self.read_barrier.wait(timeout=_BARRIER_TIMEOUT)
+        return super().acquire(tr, raw)
+
+    def set_trigger_mode(self, mode):
+        if mode != "SINGLE":
+            return super().set_trigger_mode(mode)
+        if self.arm_log is not None:
+            self.arm_log.append((self.name, "start"))
+        if self.arm_barrier is not None:
+            self.arm_barrier.wait(timeout=_BARRIER_TIMEOUT)
+        result = super().set_trigger_mode(mode)
+        if self.arm_log is not None:
+            self.arm_log.append((self.name, "end"))
+        return result
 
 
 def _make_msa(scopes, parallel_read=True, parallel_arm=True):
@@ -155,17 +191,20 @@ class ParallelReadCorrectnessTest(unittest.TestCase):
                 np.testing.assert_array_equal(seq_data[tr], par_data[tr])
 
     def test_reads_overlap(self):
-        # Two scopes, each read takes 0.2s. Parallel should be ~0.2s, not ~0.4s.
+        # Each scope's read blocks on a shared 2-party barrier, so both reads
+        # must be in flight at the same time for either to complete. If a
+        # regression serialized the reads, the barrier would break and both
+        # scopes would be skipped (read errors are swallowed per scope), so
+        # asserting both scopes returned data proves the overlap.
+        barrier = threading.Barrier(2)
         scopes = {
-            "A": FakeScope(["C1"], read_seconds=0.2),
-            "B": FakeScope(["C2"], read_seconds=0.2),
+            "A": SyncScope(["C1"], read_barrier=barrier),
+            "B": SyncScope(["C2"], read_barrier=barrier),
         }
         active = {"A": 0, "B": 0}
-        msa = _make_msa(scopes)
-        t0 = time.perf_counter()
-        msa.acquire_shot_parallel(active, 1, verbose=False)
-        elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 0.35, f"reads did not overlap (took {elapsed:.3f}s)")
+        out = _make_msa(scopes).acquire_shot_parallel(active, 1, verbose=False)
+        self.assertEqual(set(out), {"A", "B"},
+                         "reads did not overlap (barrier never released)")
 
     def test_failing_scope_skipped(self):
         scopes = {
@@ -224,19 +263,24 @@ class DispatchRoutingTest(unittest.TestCase):
 
 class ParallelArmTest(unittest.TestCase):
     def test_slaves_overlap_master_armed_last(self):
-        # Master is armed LAST and serially; the slaves arm concurrently. With 3
-        # scopes each taking 0.2s, parallel slaves (~0.2s) + master (~0.2s) is
-        # ~0.4s, well under the all-serial 0.6s.
+        # The two slaves' arms block on a shared 2-party barrier, so the call
+        # only completes if both slave arms were in flight together (a
+        # serialized regression breaks the barrier, and arm errors propagate
+        # from the join -- the call would raise). The event log then proves the
+        # master armed strictly AFTER both slaves finished.
+        barrier = threading.Barrier(2)
+        events = []
         scopes = {
-            "A": FakeScope(["C1"], arm_seconds=0.2),
-            "B": FakeScope(["C2"], arm_seconds=0.2),
-            "C": FakeScope(["C3"], arm_seconds=0.2),  # master (last in scope_ips)
+            "A": SyncScope(["C1"], name="A", arm_barrier=barrier, arm_log=events),
+            "B": SyncScope(["C2"], name="B", arm_barrier=barrier, arm_log=events),
+            "C": SyncScope(["C3"], name="C", arm_log=events),  # master (last in scope_ips)
         }
         msa = _make_msa(scopes, parallel_arm=True)
-        t0 = time.perf_counter()
         msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
-        elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 0.55, f"slaves did not overlap (took {elapsed:.3f}s)")
+        self.assertEqual(sorted(e[0] for e in events[:4]), ["A", "A", "B", "B"],
+                         f"slaves did not arm before the master: {events}")
+        self.assertEqual(events[4:], [("C", "start"), ("C", "end")],
+                         f"master was not armed last: {events}")
 
     def test_master_is_last_in_scope_ips(self):
         # The last scope listed in scope_ips is the master regardless of the
@@ -251,16 +295,21 @@ class ParallelArmTest(unittest.TestCase):
         # If the master is inactive, fall back to the last active per scope_ips.
         self.assertEqual(msa._master_scope({"A": 0, "B": 0}), "B")
 
-    def test_sequential_arm_is_slower(self):
+    def test_sequential_arm_is_serialized(self):
+        # With parallel_scope_arm off, arms must happen one at a time in
+        # scope_ips order (slaves first, master last): each arm's start/end
+        # pair is adjacent in the event log, never interleaved with another.
+        events = []
         scopes = {
-            "A": FakeScope(["C1"], arm_seconds=0.15),
-            "B": FakeScope(["C2"], arm_seconds=0.15),
+            "A": SyncScope(["C1"], name="A", arm_log=events),
+            "B": SyncScope(["C2"], name="B", arm_log=events),
+            "C": SyncScope(["C3"], name="C", arm_log=events),  # master
         }
         msa = _make_msa(scopes, parallel_arm=False)
-        t0 = time.perf_counter()
         msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
-        elapsed = time.perf_counter() - t0
-        self.assertGreater(elapsed, 0.28, "sequential arm should sum the arm times")
+        self.assertEqual(events, [("A", "start"), ("A", "end"),
+                                  ("B", "start"), ("B", "end"),
+                                  ("C", "start"), ("C", "end")])
 
     def test_arm_error_propagates(self):
         # A failed slave arm must abort the shot, not be silently swallowed.

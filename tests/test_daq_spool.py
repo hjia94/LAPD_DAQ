@@ -344,7 +344,10 @@ class VerifyAndDeleteTests(unittest.TestCase):
             f.write(b"\x00\x01\x02\x03")
 
         adapter = offload_engine._get_adapter("acquisition")
-        with self.assertRaises(Exception):
+        # The truncated bin no longer matches the sidecar's recorded shape, so
+        # read_shot's reshape raises ValueError (as would a read-back data
+        # mismatch from _verify_shot_in_hdf5) -- not just any Exception.
+        with self.assertRaises(ValueError):
             offload_engine._offload_one_shot(self.spool, self.off_h5, meta,
                                              adapter, 1)
         # Bin is NOT deleted on verification failure.
@@ -462,7 +465,7 @@ class DiskFullRetryTests(unittest.TestCase):
                 raise OSError(errno.ENOSPC, "No space left on device")
 
         with mock.patch.object(spool_format, "write_shot", side_effect=fake_write_shot), \
-                mock.patch.object(spool_format.time, "sleep") as sleep:
+                mock.patch.object(spool_format, "_sleep") as sleep:
             spool_format.write_shot_with_disk_full_retry(
                 self.spool, payload, pause_seconds=0.0, max_retries=3)
         self.assertEqual(len(calls), 3)
@@ -475,7 +478,7 @@ class DiskFullRetryTests(unittest.TestCase):
             raise OSError(errno.ENOSPC, "No space left on device")
 
         with mock.patch.object(spool_format, "write_shot", side_effect=always_full), \
-                mock.patch.object(spool_format.time, "sleep"):
+                mock.patch.object(spool_format, "_sleep"):
             with self.assertRaises(OSError):
                 spool_format.write_shot_with_disk_full_retry(
                     self.spool, payload, pause_seconds=0.0, max_retries=2)
@@ -489,7 +492,7 @@ class DiskFullRetryTests(unittest.TestCase):
             raise OSError(errno.EACCES, "Permission denied")
 
         with mock.patch.object(spool_format, "write_shot", side_effect=other_error), \
-                mock.patch.object(spool_format.time, "sleep") as sleep:
+                mock.patch.object(spool_format, "_sleep") as sleep:
             with self.assertRaises(OSError):
                 spool_format.write_shot_with_disk_full_retry(
                     self.spool, payload, pause_seconds=0.0, max_retries=3)

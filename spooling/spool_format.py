@@ -40,6 +40,11 @@ _META_RUN = "meta_run.pkl"
 _RUN_COMPLETE = "RUN_COMPLETE"
 _SHOT_META = "meta.pkl"
 
+# Injectable sleep seam. Tests patch THIS module attribute
+# (spool_format._sleep) to skip the disk-full retry pause; patching the stdlib
+# ``time`` module's functions would leak into every other module in the process.
+_sleep = time.sleep
+
 # Errors from reading a present-but-broken pickle (run metadata, RUN_COMPLETE, or
 # a shot sidecar). Wrapped uniformly in SpoolMetadataError so callers see one
 # typed "this spool's data is corrupt" failure instead of a raw pickle traceback.
@@ -279,7 +284,7 @@ def write_shot_with_disk_full_retry(
                 f"{pause_seconds:.0f}s for offload to drain "
                 f"(retry {attempt}/{max_retries})."
             )
-            time.sleep(pause_seconds)
+            _sleep(pause_seconds)
 
 
 # --------------------------------------------------------------------------- #

@@ -60,9 +60,13 @@ def _silence_stdout(tc):
 
 
 def _suppress_module_sleep(tc):
-    """No-op bmotion's time.sleep for this test, restoring via addCleanup."""
-    tc.addCleanup(setattr, bmotion_module.time, "sleep", bmotion_module.time.sleep)
-    bmotion_module.time.sleep = lambda *_a, **_kw: None
+    """No-op bmotion's _sleep seam for this test, restoring via addCleanup.
+
+    Patches the module's injectable alias (bmotion._sleep), never the stdlib
+    time module itself -- the latter would leak into every module in the process.
+    """
+    tc.addCleanup(setattr, bmotion_module, "_sleep", bmotion_module._sleep)
+    bmotion_module._sleep = lambda *_a, **_kw: None
 
 
 class BmotionLoopTests(unittest.TestCase):

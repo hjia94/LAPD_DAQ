@@ -17,7 +17,6 @@ so we can assert the recovery ladder behaves:
 No bapsf_motion, hardware, or HDF5 needed.
 """
 
-import time
 import unittest
 
 import numpy as np
@@ -215,22 +214,19 @@ def stuck_while_moving(mg, index, attempt):
 
 class MoveWithRecoveryTests(unittest.TestCase):
     def setUp(self):
-        # Make settle / reconnect polls instant.
-        self._orig_sleep = motor_recovery.time.sleep
-        motor_recovery.time.sleep = lambda *_a, **_k: None
+        # Make settle / reconnect polls instant. Patch the module's injectable
+        # seams (_sleep/_now), never the stdlib time module itself.
+        self.addCleanup(setattr, motor_recovery, "_sleep", motor_recovery._sleep)
+        motor_recovery._sleep = lambda *_a, **_k: None
         # Deterministic, monotonic clock so stall/timeout windows are exact and
         # don't depend on wall-clock speed.
         self._t = {"now": 1000.0}
-        self._orig_time = motor_recovery.time.time
+        self.addCleanup(setattr, motor_recovery, "_now", motor_recovery._now)
 
         def fake_time():
             self._t["now"] += 0.5  # each call advances 0.5 s
             return self._t["now"]
-        motor_recovery.time.time = fake_time
-
-    def tearDown(self):
-        motor_recovery.time.sleep = self._orig_sleep
-        motor_recovery.time.time = self._orig_time
+        motor_recovery._now = fake_time
 
     def _mg(self, behavior):
         return _FakeMG("A", [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], behavior)

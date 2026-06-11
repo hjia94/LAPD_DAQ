@@ -53,6 +53,13 @@ import warnings
 
 import numpy as np
 
+# Injectable clock seams. Tests patch THESE module attributes
+# (motor_recovery._sleep / motor_recovery._now) to make polls instant and the
+# clock deterministic; patching the stdlib ``time`` module's functions would
+# leak fake time into every other module in the process.
+_sleep = time.sleep
+_now = time.time
+
 
 class MotorError(RuntimeError):
     """Raised when motor-move recovery is exhausted (terminal failure).
@@ -489,13 +496,13 @@ def _settle(rm, ml_order_dict, *, stall_timeout, max_move_time, progress_eps,
     A fresh status read is forced before sampling position so progress is judged
     on current data, not the heartbeat cache.
     """
-    time.sleep(poll)
-    overall_deadline = time.time() + max_move_time
+    _sleep(poll)
+    overall_deadline = _now() + max_move_time
     last_pos = None
-    last_progress = time.time()
+    last_progress = _now()
 
     while rm.is_moving:
-        now = time.time()
+        now = _now()
         if now > overall_deadline:
             return "timeout"
 
@@ -508,7 +515,7 @@ def _settle(rm, ml_order_dict, *, stall_timeout, max_move_time, progress_eps,
         elif now - last_progress > stall_timeout:
             return "stalled"
 
-        time.sleep(poll)
+        _sleep(poll)
 
     return "settled"
 
@@ -595,7 +602,7 @@ def move_with_recovery(rm, ml_order_dict, index, *, attempts=30, retry_wait=1.0,
             log(f"Move retry {attempt}/{attempts} at index {index}: "
                 f"waiting {retry_wait}s, soft-stopping and re-issuing.")
             if retry_wait > 0:
-                time.sleep(retry_wait)
+                _sleep(retry_wait)
             for mg_key in ml_order_dict:
                 _try(rm.mgs[mg_key].stop, soft=True)
 

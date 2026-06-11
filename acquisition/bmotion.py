@@ -21,6 +21,13 @@ from .scope_runner import MultiScopeAcquisition, single_shot_acquisition
 
 _POSITION_DTYPE = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
 
+# Injectable clock seams. Tests patch THESE module attributes
+# (bmotion._sleep / bmotion._now) to make motion-wait polls instant and timing
+# deterministic; patching the stdlib ``time`` module's functions would leak
+# fake time into every other module in the process.
+_sleep = time.sleep
+_now = time.time
+
 # Names of motion groups for which we've already warned that the encoder position
 # was unavailable and we fell back to IP. Keeps read_bmotion_positions from
 # emitting that warning on every shot of a long scan (warn once per group).
@@ -52,12 +59,12 @@ class _LineTimeEstimator:
 
     def start_line(self):
         """Call when beginning a new line (just before the line-start move)."""
-        self._current_line_start = time.time()
+        self._current_line_start = _now()
 
     def finish_line(self):
         """Call after the last shot of a line has been acquired."""
         if self._current_line_start is not None:
-            self._line_times.append(time.time() - self._current_line_start)
+            self._line_times.append(_now() - self._current_line_start)
             self.lines_done += 1
             self._current_line_start = None
 
@@ -72,7 +79,7 @@ class _LineTimeEstimator:
         # estimate counts down smoothly within a line instead of only stepping
         # at line boundaries.
         if self._current_line_start is not None and remaining_lines > 0:
-            spent = time.time() - self._current_line_start
+            spent = _now() - self._current_line_start
             total -= min(spent, avg_line)
         return max(total, 0.0)
 
@@ -266,9 +273,9 @@ def move_to_index(
         mg.move_ml(motion_index)
 
     # wait for motion to stop
-    time.sleep(.5)
+    _sleep(.5)
     while rm.is_moving:
-        time.sleep(.5)
+        _sleep(.5)
 
     # disable all motors
     for mg in rm.mgs.values():
