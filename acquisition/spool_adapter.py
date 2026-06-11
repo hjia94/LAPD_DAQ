@@ -76,10 +76,11 @@ def skipped_payload(shot_num, reason, coordinates=None):
 def channel_descriptions(msa):
     """Return the ``[channels]`` description map for the offload to label shots.
 
-    Keyed by the config key (``ScopeName_C<n>``) exactly as it appears in the
-    ``[channels]`` section, so :func:`_descriptions_for` can look up each
-    ``f"{scope}_{trace}"``. This is the only per-channel attr the offload needs
-    that is not already written into the HDF5 by the acquire process.
+    Keys are the ``ScopeName_C<n>`` config keys as ConfigParser returns them,
+    i.e. lowercased by its default ``optionxform``; :func:`_descriptions_for`
+    therefore matches them case-insensitively against each ``f"{scope}_{trace}"``.
+    This is the only per-channel attr the offload needs that is not already
+    written into the HDF5 by the acquire process.
     """
     out = {}
     if msa.config.has_section("channels"):
@@ -150,11 +151,16 @@ def _payload_to_all_data(payload):
 
 
 def _descriptions_for(all_data, meta):
-    chan = meta.get("channel_descriptions", {})
+    # Match case-insensitively: ConfigParser lowercases the [channels] keys the
+    # acquire side puts in the meta (``bdotscope_c1``), while trace names come
+    # from the scope in uppercase (``C1``), so an exact-key lookup would miss
+    # every channel and silently label them all "No description available".
+    chan = {key.lower(): value
+            for key, value in meta.get("channel_descriptions", {}).items()}
     out = {}
     for scope_name, (traces, _d, _h) in all_data.items():
         for tr in traces:
-            key = f"{scope_name}_{tr}"
+            key = f"{scope_name}_{tr}".lower()
             out[(scope_name, tr)] = chan.get(
                 key, f"Channel {tr} - No description available"
             )

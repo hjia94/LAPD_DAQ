@@ -250,6 +250,29 @@ class MultiScopeAcquisition:
         return self.config.get('channels', channel_name,
                                fallback=f'Channel {channel_name} - No description available')
 
+    def warn_missing_channel_descriptions(self, scope_name):
+        """Run-start alert: list displayed channels with no ``[channels]`` entry.
+
+        Such channels are still recorded; their datasets just get the generic
+        "No description available" label. Surfacing the gap while the run is
+        starting lets the user fix the config (or abort) before hours of shots
+        are written with unlabeled data. ``has_option`` goes through
+        ConfigParser's optionxform, so the check is case-insensitive like the
+        description lookups themselves.
+        """
+        try:
+            traces = self.scopes[scope_name].displayed_traces()
+        except Exception as e:
+            print(f"Warning: could not check channel descriptions for "
+                  f"{scope_name}: {e}")
+            return
+        missing = [tr for tr in traces
+                   if not self.config.has_option('channels', f'{scope_name}_{tr}')]
+        if missing:
+            keys = ', '.join(f'{scope_name}_{tr}' for tr in missing)
+            print(f"Warning: no [channels] description for: {keys} -- these "
+                  f"datasets will be labeled 'No description available' in the HDF5")
+
     def get_experiment_description(self):
         """Return the run description, read from ``description.txt``.
 
@@ -328,6 +351,7 @@ class MultiScopeAcquisition:
                 if is_sequence is not None and time_array is not None:
                     self.save_time_arrays(name, time_array, is_sequence)
                     self._save_scope_metadata(name)
+                    self.warn_missing_channel_descriptions(name)
 
                     active_scopes[name] = is_sequence
                     print(f"Successfully initialized {name}")

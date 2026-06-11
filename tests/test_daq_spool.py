@@ -20,19 +20,23 @@ Covers:
 Runs on this PC's .venv (real bapsf_motion / h5py / numpy). No motor required.
 """
 
+import configparser
+import io
 import os
 import errno
 import shutil
 import tempfile
 import threading
+import types
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 import h5py
 import numpy as np
 
 from spooling import ShotPayload, TracePayload, spool_format
-from acquisition import bmotion, hdf5_writer, spool_adapter
+from acquisition import bmotion, hdf5_writer, scope_runner, spool_adapter
 import offload_engine
 from _hdf5_assertions import assert_dataset_filters, assert_hdf5_scope_equivalent
 
@@ -256,6 +260,78 @@ class ParallelSpoolWriteTests(unittest.TestCase):
                     self.assertEqual(ds.dtype, np.dtype("int16"))
                     np.testing.assert_array_equal(ds[()], data[ch])
                     self.assertIn(f"{ch}_header", f[f"{scope_name}/shot_1"])
+
+
+class ChannelDescriptionCaseTests(unittest.TestCase):
+    """The [channels] keys reach the offload lowercased (ConfigParser's default
+    optionxform), while trace names come from the scope uppercase ("C1"); the
+    description lookup must be case-insensitive or every channel in a spooled
+    run is silently labeled "No description available"."""
+
+    def _config(self, text):
+        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+        parser.read_string(text)
+        return parser
+
+    def test_meta_built_from_real_config_resolves_descriptions(self):
+        # Producer: channel_descriptions() emits the ConfigParser-lowercased keys.
+        config = self._config(
+            "[channels]\nLPscope_C1 = LP isat\nLPscope_C2 = LP vsweep\n")
+        chan = spool_adapter.channel_descriptions(types.SimpleNamespace(config=config))
+        self.assertEqual(chan, {"lpscope_c1": "LP isat", "lpscope_c2": "LP vsweep"})
+
+        # Consumer: the offload must resolve those keys against the uppercase
+        # trace names ("C1") in the payload.
+        descriptions = spool_adapter._descriptions_for(
+            _make_all_data(False), {"channel_descriptions": chan})
+        self.assertEqual(descriptions[("lpscope", "C1")], "LP isat")
+        self.assertEqual(descriptions[("lpscope", "C2")], "LP vsweep")
+
+    def test_mixed_case_meta_keys_still_resolve(self):
+        # Old spool dirs (and hand-built metas) carry mixed-case keys.
+        descriptions = spool_adapter._descriptions_for(
+            _make_all_data(False),
+            {"channel_descriptions": {"lpscope_C1": "LP isat"}})
+        self.assertEqual(descriptions[("lpscope", "C1")], "LP isat")
+        self.assertEqual(descriptions[("lpscope", "C2")],
+                         "Channel C2 - No description available")
+
+
+class MissingChannelDescriptionWarningTests(unittest.TestCase):
+    """Run-start warning for displayed channels with no [channels] entry."""
+
+    class _FakeScope:
+        def __init__(self, traces):
+            self._traces = traces
+
+        def displayed_traces(self):
+            return self._traces
+
+    def _msa(self, config_text, traces):
+        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+        parser.read_string(config_text)
+        msa = scope_runner.MultiScopeAcquisition(save_path=None, config=parser)
+        msa.scopes = {"lpscope": self._FakeScope(traces)}
+        return msa
+
+    def _warn_output(self, msa):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            msa.warn_missing_channel_descriptions("lpscope")
+        return buf.getvalue()
+
+    def test_warns_only_for_channels_without_descriptions(self):
+        msa = self._msa("[channels]\nLPscope_C1 = LP isat\n", ["C1", "C2"])
+        out = self._warn_output(msa)
+        self.assertIn("lpscope_C2", out)
+        self.assertNotIn("lpscope_C1", out)
+
+    def test_silent_when_every_channel_is_described(self):
+        # Mixed-case config keys must match: has_option goes through optionxform.
+        msa = self._msa(
+            "[channels]\nLPscope_C1 = LP isat\nLPscope_C2 = LP vsweep\n",
+            ["C1", "C2"])
+        self.assertEqual(self._warn_output(msa), "")
 
 
 class OffloadEquivalenceTests(unittest.TestCase):
