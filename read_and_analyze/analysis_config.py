@@ -31,10 +31,10 @@ Created May.2026
 # SHARED -- used across modules (input file, scope/channel, plot toggles,
 #           filtering pipeline, grid tolerance)
 # ======================================================================================
-DATA_FILE   = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"  # HDF5 file to analyze
+DATA_FILE   = r"M:\BAPSF_Data\Low_Density_Topo\Jun2026\01-Isat-p21-line-Argon-2kG_2026-06-08.hdf5"
 
-SELECT_SCOPE = "lpscope"   # scope to analyze; None = all scopes (shared by every module)
-SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels (shared by every module)
+SELECT_SCOPE = None   # scope to analyze; None = all scopes (shared by every module)
+SELECT_CHAN  = None     # channels to analyze; None = all channels (shared by every module)
 
 SHOW_PLOT   = True  # display figures interactively (shared by every module)
 SAVE_PLOT   = False  # write PNGs to a "plots/" subdir next to the data file (shared by every module)
@@ -59,10 +59,10 @@ FLUCT_SIGNAL_FRAC = 0           # window mean must exceed this fraction of the p
 # ======================================================================================
 # XY_MAP -- plot_xy_map.py: 2D XY-plane map of a reduced scalar per grid position
 # ======================================================================================
-XY_MODE         = "step"     # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
-XY_T_START_MS   = 10.0         # window start (ms), used when XY_MODE == "range"
-XY_T_END_MS     = 22         # window end   (ms), used when XY_MODE == "range"
-XY_T_STEP_MS    = [10.0, 12, 14, 16, 18, 20]  # snapshot time(s) in ms for "step" mode; one panel per time.
+XY_MODE         = "range"     # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
+XY_T_START_MS   = 0         # window start (ms), used when XY_MODE == "range"
+XY_T_END_MS     = 2.0         # window end   (ms), used when XY_MODE == "range"
+XY_T_STEP_MS    = [10,12,15,19]  # snapshot time(s) in ms for "step" mode; one panel per time.
                                    # A single float (e.g. 4.0) is also accepted -> one panel.
 
 XY_SHOT_INDEX   = 0           # which shot (0-based) per position to map; no shot averaging yet

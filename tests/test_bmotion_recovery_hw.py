@@ -39,20 +39,20 @@ from _hardware_check_base import HardwareCheckBase
 # ===========================================================================
 
 # Path to the motion-config TOML (absolute path recommended).
-BMOTION_TOML_PATH = "bmotion_config.toml"
+BMOTION_TOML_PATH = r"E:\Shadow data\Pat\bmotion_config.toml"
 
 # Motion group to drive. Use the group's name (e.g. "Hermes") — recommended,
 # it's unambiguous. You may also use its index (0, 1, 2, ...) in TOML order.
 # None = use the first group in the TOML.
-MOTION_GROUP = None
+MOTION_GROUP = 2
 
 # Safety gate: nothing moves a motor until this is True.
 BMOTION_ALLOW_MOVE = True
 
 # Turn each check on individually.
-RUN_LONG_MOTION_CHECK = True     # slow full-range move must finish, not time out
+RUN_LONG_MOTION_CHECK = False     # slow full-range move must finish, not time out
 RUN_ENCODER_CHECK = True         # encoder (EP) vs step (IP) agreement around a move
-RUN_FAILURE_CHECK = True         # an unreachable target -> MotorError, then recovers
+RUN_FAILURE_CHECK = False         # an unreachable target -> MotorError, then recovers
 # DESTRUCTIVE: set-zero redefines the origin for this group. Off by default even
 # with BMOTION_ALLOW_MOVE; only enable when you intend to re-zero this rig.
 RUN_SET_ZERO_CHECK = False       # zero the group, confirm encoder reads back ~0

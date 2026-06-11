@@ -23,7 +23,7 @@ from acquisition.hdf5_writer import write_description
 from acquisition.run_paths import resolve_run_paths
 
 # Keep this in sync with base_path in Data_Run_bmotion.py.
-base_path = r"E:\Shadow data\Pat"
+base_path = r"E:\Shadow data\Electrode_Biasing\jun2026"
 config_path = os.path.join(base_path, 'experiment_config.ini')
 description_path = os.path.join(base_path, 'description.txt')
 
