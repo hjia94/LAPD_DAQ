@@ -22,6 +22,7 @@ Runs on this PC's .venv (real bapsf_motion / h5py / numpy). No motor required.
 
 import os
 import errno
+import shutil
 import tempfile
 import threading
 import unittest
@@ -36,6 +37,25 @@ import offload_engine
 from _hdf5_assertions import assert_dataset_filters, assert_hdf5_scope_equivalent
 
 REFERENCE_HDF5 = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"
+
+
+def _temp_spool_dir(tc, prefix="spool_"):
+    """A fresh spool dir, removed (with contents) when the test finishes."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    tc.addCleanup(shutil.rmtree, path, ignore_errors=True)
+    return path
+
+
+def _temp_path(tc, name):
+    """A not-yet-existing pathname inside a fresh auto-cleaned temp dir.
+
+    Replacement for tempfile.mktemp(): the writers under test must create the
+    file themselves, so the name has to start absent -- but inside a private
+    directory there is no name race, and cleanup removes whatever was created.
+    """
+    d = tempfile.mkdtemp(prefix="daqspool_")
+    tc.addCleanup(shutil.rmtree, d, ignore_errors=True)
+    return os.path.join(d, name)
 
 
 def _make_all_data(seq=False):
@@ -105,7 +125,7 @@ def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
 
 class SpoolRoundTripTests(unittest.TestCase):
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_")
+        self.spool = _temp_spool_dir(self)
 
     def test_roundtrip_realtime(self):
         all_data = _make_all_data(seq=False)
@@ -160,8 +180,8 @@ class ParallelSpoolWriteTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.serial = tempfile.mkdtemp(prefix="spool_ser_")
-        self.par = tempfile.mkdtemp(prefix="spool_par_")
+        self.serial = _temp_spool_dir(self, "spool_ser_")
+        self.par = _temp_spool_dir(self, "spool_par_")
 
     def _files(self, spool_dir, shot_num):
         shot_dir = os.path.join(spool_dir, "shot_%06d" % shot_num)
@@ -199,61 +219,52 @@ class ParallelSpoolWriteTests(unittest.TestCase):
 
     def test_parallel_offloads_to_correct_hdf5_schema(self):
         """End-to-end: parallel-written spool -> offload -> correct HDF5 schema."""
-        off_h5 = tempfile.mktemp(suffix=".hdf5")
-        try:
-            all_data = _make_two_scope_all_data(False)
-            # Build a two-scope skeleton (the shared helper is single-scope, so
-            # create both scope groups up front, then fill per-scope metadata).
-            ta = np.linspace(0, 1e-3, 128, dtype=np.float64)
-            hdf5_writer.write_experiment_metadata(
-                off_h5, description="unit-test run", source_code={"unit": "test"},
-                raw_config_text="[experiment]\n", config=None,
-                scope_names=["lpscope", "xrayscope"])
-            for sname, ip in (("lpscope", "127.0.0.1"), ("xrayscope", "127.0.0.2")):
-                hdf5_writer.write_scope_metadata(
-                    off_h5, scope_name=sname, description=sname,
-                    ip_address=ip, scope_type="LECROY,TEST,0,0")
-                hdf5_writer.write_time_array(off_h5, sname, ta, 0)
+        off_h5 = _temp_path(self, "parallel_offload.hdf5")
+        all_data = _make_two_scope_all_data(False)
+        # Build a two-scope skeleton (the shared helper is single-scope, so
+        # create both scope groups up front, then fill per-scope metadata).
+        ta = np.linspace(0, 1e-3, 128, dtype=np.float64)
+        hdf5_writer.write_experiment_metadata(
+            off_h5, description="unit-test run", source_code={"unit": "test"},
+            raw_config_text="[experiment]\n", config=None,
+            scope_names=["lpscope", "xrayscope"])
+        for sname, ip in (("lpscope", "127.0.0.1"), ("xrayscope", "127.0.0.2")):
+            hdf5_writer.write_scope_metadata(
+                off_h5, scope_name=sname, description=sname,
+                ip_address=ip, scope_type="LECROY,TEST,0,0")
+            hdf5_writer.write_time_array(off_h5, sname, ta, 0)
 
-            meta = {
-                "writer": "acquisition",
-                "hdf5_path": off_h5,
-                "config_scope_names": ["lpscope", "xrayscope"],
-                "channel_descriptions": {
-                    "lpscope_C1": "LP isat", "lpscope_C2": "LP vsweep",
-                    "xrayscope_C1": "xray",
-                },
-            }
-            spool_format.write_run_metadata(self.par, meta)
-            payload = spool_adapter.all_data_to_payload(all_data, 1, None)
-            spool_format.write_shot(self.par, payload, parallel=True)
-            spool_format.write_run_complete(self.par, 1)
-            offload_engine.run_offload(self.par, poll_seconds=0.01)
+        meta = {
+            "writer": "acquisition",
+            "hdf5_path": off_h5,
+            "config_scope_names": ["lpscope", "xrayscope"],
+            "channel_descriptions": {
+                "lpscope_C1": "LP isat", "lpscope_C2": "LP vsweep",
+                "xrayscope_C1": "xray",
+            },
+        }
+        spool_format.write_run_metadata(self.par, meta)
+        payload = spool_adapter.all_data_to_payload(all_data, 1, None)
+        spool_format.write_shot(self.par, payload, parallel=True)
+        spool_format.write_run_complete(self.par, 1)
+        offload_engine.run_offload(self.par, poll_seconds=0.01)
 
-            with h5py.File(off_h5, "r") as f:
-                for scope_name, (traces, data, _h) in all_data.items():
-                    for ch in traces:
-                        ds = f[f"{scope_name}/shot_1/{ch}_data"]
-                        self.assertEqual(ds.dtype, np.dtype("int16"))
-                        np.testing.assert_array_equal(ds[()], data[ch])
-                        self.assertIn(f"{ch}_header", f[f"{scope_name}/shot_1"])
-        finally:
-            if os.path.exists(off_h5):
-                os.remove(off_h5)
+        with h5py.File(off_h5, "r") as f:
+            for scope_name, (traces, data, _h) in all_data.items():
+                for ch in traces:
+                    ds = f[f"{scope_name}/shot_1/{ch}_data"]
+                    self.assertEqual(ds.dtype, np.dtype("int16"))
+                    np.testing.assert_array_equal(ds[()], data[ch])
+                    self.assertIn(f"{ch}_header", f[f"{scope_name}/shot_1"])
 
 
 class OffloadEquivalenceTests(unittest.TestCase):
     """Completeness gate: offloaded HDF5 must match the in-process writer output."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_")
-        self.off_h5 = tempfile.mktemp(suffix=".hdf5")
-        self.direct_h5 = tempfile.mktemp(suffix=".hdf5")
-
-    def tearDown(self):
-        for p in (self.off_h5, self.direct_h5):
-            if os.path.exists(p):
-                os.remove(p)
+        self.spool = _temp_spool_dir(self)
+        self.off_h5 = _temp_path(self, "offloaded.hdf5")
+        self.direct_h5 = _temp_path(self, "direct.hdf5")
 
     def _build_direct(self, all_data_by_shot, descriptions):
         """Reproduce the in-process path output for the same inputs."""
@@ -305,12 +316,8 @@ class OffloadEquivalenceTests(unittest.TestCase):
 
 class VerifyAndDeleteTests(unittest.TestCase):
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_")
-        self.off_h5 = tempfile.mktemp(suffix=".hdf5")
-
-    def tearDown(self):
-        if os.path.exists(self.off_h5):
-            os.remove(self.off_h5)
+        self.spool = _temp_spool_dir(self)
+        self.off_h5 = _temp_path(self, "verify.hdf5")
 
     def test_good_shot_is_deleted_after_verify(self):
         _build_bmotion_skeleton(self.off_h5, total_shots=1)
@@ -348,12 +355,8 @@ class OffloadResilienceTests(unittest.TestCase):
     """Bug-1 hardening: idempotent retry + poison-shot quarantine/drain."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_res_")
-        self.off_h5 = tempfile.mktemp(suffix=".hdf5")
-
-    def tearDown(self):
-        if os.path.exists(self.off_h5):
-            os.remove(self.off_h5)
+        self.spool = _temp_spool_dir(self, "spool_res_")
+        self.off_h5 = _temp_path(self, "resilience.hdf5")
 
     def test_offload_idempotent_when_shot_already_written(self):
         # Pre-write shot_1's datasets (as an interrupted prior attempt would),
@@ -433,7 +436,7 @@ class DiskFullRetryTests(unittest.TestCase):
     """The only backpressure now: pause+retry on a real disk-full write error."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_df_")
+        self.spool = _temp_spool_dir(self, "spool_df_")
 
     def test_pending_count(self):
         self.assertEqual(spool_format.pending_shot_count(self.spool), 0)
@@ -500,12 +503,12 @@ class MetadataWaitTests(unittest.TestCase):
     will never become a run (e.g. a spool ROOT)."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_meta_")
+        self.spool = _temp_spool_dir(self, "spool_meta_")
 
     def test_waits_for_late_metadata(self):
         # No metadata yet: a short bounded wait should still pick it up once it
         # appears, then drain to completion.
-        off_h5 = tempfile.mktemp(suffix=".hdf5")
+        off_h5 = _temp_path(self, "late_meta.hdf5")
         _build_bmotion_skeleton(off_h5, total_shots=1)
 
         def writer():
@@ -536,13 +539,7 @@ class OffloadErrorPathTests(unittest.TestCase):
     """Error paths give actionable messages instead of bare tracebacks."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_err_")
-        self._h5_files = []
-
-    def tearDown(self):
-        for p in self._h5_files:
-            if os.path.exists(p):
-                os.remove(p)
+        self.spool = _temp_spool_dir(self, "spool_err_")
 
     def test_metadata_without_hdf5_path_raises_clear_error(self):
         # An older/truncated bundle lacking hdf5_path must raise a clear
@@ -566,11 +563,10 @@ class OffloadErrorPathTests(unittest.TestCase):
     def test_list_survives_corrupt_folder(self):
         # A spool ROOT with one good run + one corrupt meta_run.pkl: --list must
         # report both, not abort on the corrupt one.
-        root = tempfile.mkdtemp(prefix="spool_root_")
+        root = _temp_spool_dir(self, "spool_root_")
         good = os.path.join(root, "good_run")
         os.makedirs(good)
-        off_h5 = tempfile.mktemp(suffix=".hdf5")
-        self._h5_files.append(off_h5)
+        off_h5 = _temp_path(self, "list_check.hdf5")
         spool_format.write_run_metadata(good, _make_meta(hdf5_path=off_h5))
 
         bad = os.path.join(root, "bad_run")
@@ -612,19 +608,14 @@ class SetupFailureTests(unittest.TestCase):
     real error and NOT leave a misleading RUN_COMPLETE for the offload."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_setupfail_")
-        self.off_h5 = tempfile.mktemp(suffix=".hdf5")
+        self.spool = _temp_spool_dir(self, "spool_setupfail_")
+        self.off_h5 = _temp_path(self, "setupfail.hdf5")
         # Config with NO scope_ips and NO position section: initialize_scopes
         # returns {} so the grid runner raises "No valid data" before the loop
         # and before write_run_metadata -- the exact setup-failure path.
-        self.cfg = tempfile.mktemp(suffix=".ini")
+        self.cfg = _temp_path(self, "setupfail.ini")
         with open(self.cfg, "w") as f:
             f.write("[experiment]\nname = setupfail\ndescription = t\n[nshots]\nnum_duplicate_shots = 1\n")
-
-    def tearDown(self):
-        for p in (self.off_h5, self.cfg):
-            if os.path.exists(p):
-                os.remove(p)
 
     def test_grid_setup_failure_surfaces_real_error_no_run_complete(self):
         from acquisition import run_acquisition_spooled
@@ -643,10 +634,11 @@ class OffloadMissingTargetTests(unittest.TestCase):
     """The offload must refuse to run if the acquire-created file is absent."""
 
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_")
+        self.spool = _temp_spool_dir(self)
 
     def test_missing_destination_raises(self):
-        missing = tempfile.mktemp(suffix=".hdf5")
+        # Never created -- the offload must refuse to run against it.
+        missing = _temp_path(self, "never_created.hdf5")
         spool_format.write_run_metadata(self.spool, _make_meta(hdf5_path=missing))
         spool_format.write_run_complete(self.spool, 0)
         with self.assertRaises(FileNotFoundError):
@@ -699,12 +691,8 @@ class GridOffloadTests(unittest.TestCase):
     def setUp(self):
         from acquisition import grid_spool_adapter
         self.grid_spool_adapter = grid_spool_adapter
-        self.spool = tempfile.mkdtemp(prefix="spool_grid_")
-        self.off_h5 = tempfile.mktemp(suffix=".hdf5")
-
-    def tearDown(self):
-        if os.path.exists(self.off_h5):
-            os.remove(self.off_h5)
+        self.spool = _temp_spool_dir(self, "spool_grid_")
+        self.off_h5 = _temp_path(self, "grid.hdf5")
 
     def _run(self, nz, coords_for):
         _build_grid_skeleton(self.off_h5, total_shots=2, nz=nz)
@@ -743,7 +731,7 @@ class GridOffloadTests(unittest.TestCase):
 
 class CrashSafetyTests(unittest.TestCase):
     def setUp(self):
-        self.spool = tempfile.mkdtemp(prefix="spool_")
+        self.spool = _temp_spool_dir(self)
 
     def test_tmp_dir_without_done_is_ignored(self):
         os.makedirs(os.path.join(self.spool, "shot_000003.tmp"))
@@ -769,7 +757,10 @@ class SchemaMatchesReferenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.spool = tempfile.mkdtemp(prefix="spool_")
-        cls.off_h5 = tempfile.mktemp(suffix=".hdf5")
+        cls.addClassCleanup(shutil.rmtree, cls.spool, ignore_errors=True)
+        out_dir = tempfile.mkdtemp(prefix="daqspool_")
+        cls.addClassCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+        cls.off_h5 = os.path.join(out_dir, "ref_shaped.hdf5")
         # Acquire-side: build the skeleton shaped like the reference.
         _build_ref_shaped_skeleton(cls.off_h5)
         spool_format.write_run_metadata(cls.spool, {
@@ -786,11 +777,6 @@ class SchemaMatchesReferenceTests(unittest.TestCase):
             spool_format.write_shot(cls.spool, _ref_shaped_payload(shot_num))
         spool_format.write_run_complete(cls.spool, 2)
         offload_engine.run_offload(cls.spool, poll_seconds=0.01)
-
-    @classmethod
-    def tearDownClass(cls):
-        if os.path.exists(cls.off_h5):
-            os.remove(cls.off_h5)
 
     def test_schema_matches_reference(self):
         with h5py.File(REFERENCE_HDF5, "r") as ref, h5py.File(self.off_h5, "r") as new:

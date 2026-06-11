@@ -20,6 +20,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -47,18 +48,33 @@ def tearDownModule():
     restore_modules()
 
 
+def _silence_stdout(tc):
+    """Redirect stdout for the rest of the test, restoring via addCleanup.
+
+    Cleanup-based (not a tearDown pair) so an exception later in setUp can't
+    leave the whole process's unittest output swallowed.
+    """
+    ctx = contextlib.redirect_stdout(io.StringIO())
+    ctx.__enter__()
+    tc.addCleanup(ctx.__exit__, None, None, None)
+
+
+def _suppress_module_sleep(tc):
+    """No-op bmotion's time.sleep for this test, restoring via addCleanup."""
+    tc.addCleanup(setattr, bmotion_module.time, "sleep", bmotion_module.time.sleep)
+    bmotion_module.time.sleep = lambda *_a, **_kw: None
+
+
 class BmotionLoopTests(unittest.TestCase):
     def setUp(self):
         # Suppress the half-second sleeps in move_to_index — irrelevant for
         # unit tests and would slow the suite to a crawl.
-        self._orig_sleep = bmotion_module.time.sleep
-        bmotion_module.time.sleep = lambda *_a, **_kw: None
+        _suppress_module_sleep(self)
 
         # Silence the loop's print statements so the unittest output stays
         # clean. (Per-test rather than module-level so failures still surface
         # via the assertion machinery.)
-        self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
-        self._stdout_ctx.__enter__()
+        _silence_stdout(self)
 
         # Two motion groups: A has a 3x1 grid (3 points), B has a 5x1 grid (5 points).
         # Real rectangular grids are required by the writer's validation.
@@ -68,14 +84,10 @@ class BmotionLoopTests(unittest.TestCase):
         self.mg_b = StubMotionGroup("B", ml_b)
         self.rm = StubRunManager({"a": self.mg_a, "b": self.mg_b})
 
-    def tearDown(self):
-        bmotion_module.time.sleep = self._orig_sleep
-        self._stdout_ctx.__exit__(None, None, None)
-
     # ----- configure_bmotion_hdf5_group ----------------------------------- #
     def test_configure_hdf5_writes_execution_order(self):
-        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
-        toml_path = make_toml_file()
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
         ml_order = {"a": "forward", "b": "backward"}
         total_shots = (3 + 5) * 2  # sequential nshots=2
 
@@ -112,8 +124,8 @@ class BmotionLoopTests(unittest.TestCase):
                 self.assertEqual(ds.dtype.names, ("shot_num", "x", "y"))
 
     def test_configure_hdf5_defaults_execution_order_to_interleaved(self):
-        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
-        toml_path = make_toml_file()
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
         bmotion_module.configure_bmotion_hdf5_group(
             hdf5_path, 5, 1, toml_path, self.rm,
             ["a"], ml_order={"a": "forward"},
@@ -169,8 +181,8 @@ class BmotionLoopTests(unittest.TestCase):
     def test_take_shots_skips_on_value_error(self):
         nshots = 2
         ml_order = {"a": "forward"}
-        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
-        toml_path = make_toml_file()
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
         bmotion_module.configure_bmotion_hdf5_group(
             hdf5_path, nshots, 1, toml_path, self.rm, ["a"],
             ml_order=ml_order, execution_order="interleaved",
@@ -222,8 +234,8 @@ class BmotionLoopTests(unittest.TestCase):
         non_grid = np.array([[0.0, 0.0], [1.0, 2.0], [3.0, 4.0]])
         mg = StubMotionGroup("NG", non_grid)
         rm = StubRunManager({"ng": mg})
-        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
-        toml_path = make_toml_file()
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
         with self.assertRaisesRegex(RuntimeError, "rectangular grid"):
             bmotion_module.configure_bmotion_hdf5_group(
                 hdf5_path, 3, 1, toml_path, rm, ["ng"],
@@ -237,8 +249,8 @@ class BmotionLoopTests(unittest.TestCase):
         ml_3d = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         mg = StubMotionGroup("M3", ml_3d, space_labels=("x", "y", "z"))
         rm = StubRunManager({"m3": mg})
-        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
-        toml_path = make_toml_file()
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
         with self.assertRaisesRegex(RuntimeError, r"axis labels"):
             bmotion_module.configure_bmotion_hdf5_group(
                 hdf5_path, 2, 1, toml_path, rm, ["m3"],
@@ -249,8 +261,8 @@ class BmotionLoopTests(unittest.TestCase):
         ml = make_grid_motion_list(nx=2, ny=2)
         mg = StubMotionGroup("RT", ml, space_labels=("r", "theta"))
         rm = StubRunManager({"rt": mg})
-        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"])
-        toml_path = make_toml_file()
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
         with self.assertRaisesRegex(RuntimeError, r"axis labels"):
             bmotion_module.configure_bmotion_hdf5_group(
                 hdf5_path, 4, 1, toml_path, rm, ["rt"],
@@ -297,14 +309,11 @@ class SpoolSinkTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
-        self._stdout_ctx.__enter__()
+        _silence_stdout(self)
         self.spool = tempfile.mkdtemp(prefix="spool_sink_")
+        self.addCleanup(shutil.rmtree, self.spool, ignore_errors=True)
         self.mg = StubMotionGroup("A", make_grid_motion_list(nx=2, ny=1))
         self.rm = StubRunManager({"a": self.mg})
-
-    def tearDown(self):
-        self._stdout_ctx.__exit__(None, None, None)
 
     def test_spool_sink_writes_only_bins(self):
         from spooling import spool_format
@@ -356,13 +365,9 @@ class TerminalMotorFailureTests(unittest.TestCase):
     here -- recovery only raises when the motor is genuinely stuck."""
 
     def setUp(self):
-        self._stdout_ctx = contextlib.redirect_stdout(io.StringIO())
-        self._stdout_ctx.__enter__()
+        _silence_stdout(self)
         self.mg = StubMotionGroup("A", make_grid_motion_list(nx=5, ny=1))
         self.rm = StubRunManager({"a": self.mg})
-
-    def tearDown(self):
-        self._stdout_ctx.__exit__(None, None, None)
 
     def test_motor_error_skips_position_and_continues(self):
         from acquisition.motor_recovery import MotorError

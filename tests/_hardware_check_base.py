@@ -55,12 +55,13 @@ class HardwareCheckBase(unittest.TestCase):
 
     def _allocate_tempdir(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._cleanup_tempdir)
         self.tmp_dir = Path(self._tmp.name)
         self.output_path = self.tmp_dir / f"{self.label}_check.hdf5"
 
-    def tearDown(self) -> None:
+    def _cleanup_tempdir(self) -> None:
         try:
             self._tmp.cleanup()
-        except (PermissionError, OSError):
+        except OSError:
             # HDF5 file on Windows may still be locked briefly; non-fatal.
             pass

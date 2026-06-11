@@ -19,6 +19,7 @@ Tests use `from _bmotion_stubs import StubMotionGroup, StubRunManager, ...`.
 
 import contextlib
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -98,6 +99,32 @@ def install_stubs():
     for name in _STUBBED_MODULE_NAMES:
         _SAVED_MODULES[name] = sys.modules.get(name, _ABSENT)
 
+    # Everything from here to the assignment of bmotion_module runs under
+    # try/finally: if any stub install or module load raises, the finally
+    # still puts the real sys.modules back, so a failure here can't leak the
+    # stub bapsf_motion/xarray/acquisition packages into sibling tests.
+    try:
+        bmotion_module = _install_and_load()
+    finally:
+        # Loading is done (or failed): on success bmotion_module holds its own
+        # bindings (it did `from .scope_runner import single_shot_acquisition`
+        # at load, so the stub is captured in its namespace, not re-read from
+        # sys.modules). Restore the real sys.modules NOW -- before any sibling
+        # test module is imported under `unittest discover` -- so the stub
+        # `acquisition`/`xarray` packages don't leak and break their top-level
+        # `from acquisition import spool_adapter` etc. The bmotion tests' own
+        # lazy `from . import spool_adapter` / `from spooling import
+        # spool_format` then resolve against the real packages, which is fine.
+        restore_modules()
+
+
+def _install_and_load():
+    """Install the stub modules and load acquisition/bmotion.py against them.
+
+    Returns the loaded module; only install_stubs() assigns it to the global,
+    and only after this returns successfully -- so a failed load leaves
+    ``bmotion_module`` as None and a retry is possible.
+    """
     # bapsf_motion + bapsf_motion.actors
     bmotion_stub = types.ModuleType("bapsf_motion")
     actors_stub = types.ModuleType("bapsf_motion.actors")
@@ -147,19 +174,10 @@ def install_stubs():
     spec = importlib.util.spec_from_file_location(
         "acquisition.bmotion", _BMOTION_PATH,
     )
-    bmotion_module = importlib.util.module_from_spec(spec)
-    sys.modules["acquisition.bmotion"] = bmotion_module
-    spec.loader.exec_module(bmotion_module)
-
-    # Loading is done: bmotion_module holds its own bindings (it did
-    # `from .scope_runner import single_shot_acquisition` at load, so the stub is
-    # captured in its namespace, not re-read from sys.modules). Restore the real
-    # sys.modules NOW -- before any sibling test module is imported under
-    # `unittest discover` -- so the stub `acquisition`/`xarray` packages don't
-    # leak and break their top-level `from acquisition import spool_adapter` etc.
-    # The bmotion tests' own lazy `from . import spool_adapter` / `from spooling
-    # import spool_format` then resolve against the real packages, which is fine.
-    restore_modules()
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["acquisition.bmotion"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def restore_modules():
@@ -278,11 +296,22 @@ class StubMSA:
 # --------------------------------------------------------------------------- #
 # Temp-file factories shared by the loop tests
 # --------------------------------------------------------------------------- #
-def make_temp_hdf5_with_scopes(scope_ips):
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass  # already gone, or briefly locked on Windows; non-fatal
+
+
+def make_temp_hdf5_with_scopes(scope_ips, *, tc):
     """Create a temp HDF5 with the per-scope top-level group structure that
-    `_take_shots_at_position`'s skip path expects."""
+    `_take_shots_at_position`'s skip path expects.
+
+    ``tc`` is the calling TestCase; the file is removed via its addCleanup.
+    """
     tmp = tempfile.NamedTemporaryFile(suffix=".hdf5", delete=False)
     tmp.close()
+    tc.addCleanup(_remove_quietly, tmp.name)
     with h5py.File(tmp.name, "w") as f:
         for scope_name in scope_ips:
             f.create_group(scope_name)
@@ -301,10 +330,11 @@ def make_grid_motion_list(nx, ny, x0=0.0, y0=0.0, dx=1.0, dy=1.0):
     return np.stack([xx.ravel(), yy.ravel()], axis=1)
 
 
-def make_toml_file(text="# stub bmotion toml\n"):
+def make_toml_file(text="# stub bmotion toml\n", *, tc):
     tmp = tempfile.NamedTemporaryFile(suffix=".toml", mode="w", delete=False)
     tmp.write(text)
     tmp.close()
+    tc.addCleanup(_remove_quietly, tmp.name)
     return tmp.name
 
 
