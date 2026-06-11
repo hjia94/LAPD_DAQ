@@ -86,41 +86,57 @@ def _make_meta(scope_name="lpscope", hdf5_path=None):
     }
 
 
-def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
-                            total_shots=4, mg_name="MG_A"):
-    """Create the HDF5 skeleton exactly as the acquire process now does.
+def _write_scope_skeleton(hdf5_path, scopes=None, n_samples=128,
+                          description="unit-test run",
+                          scope_type="LECROY,TEST,0,0"):
+    """The skeleton prefix every builder shares: experiment metadata, then
+    per-scope metadata + time array, via the same `main` writers acquire calls
+    -- so a test offload fills a file shaped exactly like acquire's.
 
-    Uses the same `main` writers acquire calls (write_experiment_metadata,
-    write_scope_metadata, write_time_array, write_bmotion_position_groups), so a
-    test offload fills a file that is byte-for-byte what acquire would create.
-    Returns the channel descriptions map used to build the slim meta.
+    ``scopes`` maps scope name -> (description, ip_address).
     """
+    if scopes is None:
+        scopes = {"lpscope": ("test scope", "127.0.0.1")}
     time_array = np.linspace(0, 1e-3, n_samples, dtype=np.float64)
     hdf5_writer.write_experiment_metadata(
         hdf5_path,
-        description="unit-test run",
+        description=description,
         source_code={"unit": "test"},
-        raw_config_text="[experiment]\ndescription = unit-test run\n",
+        raw_config_text=f"[experiment]\ndescription = {description}\n",
         config=None,
-        scope_names=[scope_name],
+        scope_names=list(scopes),
     )
-    hdf5_writer.write_scope_metadata(
-        hdf5_path, scope_name=scope_name, description="test scope",
-        ip_address="127.0.0.1", scope_type="LECROY,TEST,0,0",
-    )
-    hdf5_writer.write_time_array(hdf5_path, scope_name, time_array, 0)
+    for scope_name, (scope_desc, ip_address) in scopes.items():
+        hdf5_writer.write_scope_metadata(
+            hdf5_path, scope_name=scope_name, description=scope_desc,
+            ip_address=ip_address, scope_type=scope_type,
+        )
+        hdf5_writer.write_time_array(hdf5_path, scope_name, time_array, 0)
 
+
+def _write_two_point_bmotion_positions(hdf5_path, mg_name, total_shots, xs, y):
+    """Two-position bmotion Control/Positions groups (setup + preallocated
+    positions_array), via the same writer acquire calls."""
     setup = np.zeros(2, dtype=bmotion._POSITION_DTYPE)
     setup["shot_num"] = [1, 2]
-    setup["x"] = [-1.0, 0.0]
-    setup["y"] = [2.0, 2.0]
+    setup["x"] = xs
+    setup["y"] = [y, y]
     bmotion.write_bmotion_position_groups(
         hdf5_path,
         total_shots=total_shots,
         toml_text="# stub toml\n",
         selection_blob='{"mg_keys": ["0"], "execution_order": "interleaved"}',
-        prepared=[("0", mg_name, setup, np.array([-1.0, 0.0]), np.array([2.0]))],
+        prepared=[("0", mg_name, setup, np.asarray(xs, dtype=float), np.array([y]))],
     )
+
+
+def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
+                            total_shots=4, mg_name="MG_A"):
+    """Create the bmotion HDF5 skeleton exactly as the acquire process does."""
+    _write_scope_skeleton(hdf5_path, {scope_name: ("test scope", "127.0.0.1")},
+                          n_samples=n_samples)
+    _write_two_point_bmotion_positions(hdf5_path, mg_name, total_shots,
+                                       xs=[-1.0, 0.0], y=2.0)
 
 
 class SpoolRoundTripTests(unittest.TestCase):
@@ -221,18 +237,10 @@ class ParallelSpoolWriteTests(unittest.TestCase):
         """End-to-end: parallel-written spool -> offload -> correct HDF5 schema."""
         off_h5 = _temp_path(self, "parallel_offload.hdf5")
         all_data = _make_two_scope_all_data(False)
-        # Build a two-scope skeleton (the shared helper is single-scope, so
-        # create both scope groups up front, then fill per-scope metadata).
-        ta = np.linspace(0, 1e-3, 128, dtype=np.float64)
-        hdf5_writer.write_experiment_metadata(
-            off_h5, description="unit-test run", source_code={"unit": "test"},
-            raw_config_text="[experiment]\n", config=None,
-            scope_names=["lpscope", "xrayscope"])
-        for sname, ip in (("lpscope", "127.0.0.1"), ("xrayscope", "127.0.0.2")):
-            hdf5_writer.write_scope_metadata(
-                off_h5, scope_name=sname, description=sname,
-                ip_address=ip, scope_type="LECROY,TEST,0,0")
-            hdf5_writer.write_time_array(off_h5, sname, ta, 0)
+        _write_scope_skeleton(off_h5, {
+            "lpscope": ("lpscope", "127.0.0.1"),
+            "xrayscope": ("xrayscope", "127.0.0.2"),
+        })
 
         meta = {
             "writer": "acquisition",
@@ -651,17 +659,8 @@ class OffloadMissingTargetTests(unittest.TestCase):
 def _build_grid_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
                          total_shots=2, nz=None):
     """Create the grid (PositionManager) HDF5 skeleton like acquire now does."""
-    time_array = np.linspace(0, 1e-3, n_samples, dtype=np.float64)
-    hdf5_writer.write_experiment_metadata(
-        hdf5_path, description="grid unit-test", source_code={"unit": "test"},
-        raw_config_text="[experiment]\ndescription = grid unit-test\n",
-        config=None, scope_names=[scope_name],
-    )
-    hdf5_writer.write_scope_metadata(
-        hdf5_path, scope_name=scope_name, description="test scope",
-        ip_address="127.0.0.1", scope_type="LECROY,TEST,0,0",
-    )
-    hdf5_writer.write_time_array(hdf5_path, scope_name, time_array, 0)
+    _write_scope_skeleton(hdf5_path, {scope_name: ("test scope", "127.0.0.1")},
+                          n_samples=n_samples, description="grid unit-test")
 
     if nz is None:
         dtype = [('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]
@@ -835,26 +834,13 @@ class SchemaMatchesReferenceTests(unittest.TestCase):
 
 
 def _build_ref_shaped_skeleton(hdf5_path, mg_name="<Athena>    p21_LP"):
-    time_array = np.linspace(0, 1e-3, 256, dtype=np.float64)
-    hdf5_writer.write_experiment_metadata(
-        hdf5_path, description="schema check", source_code={"unit": "test"},
-        raw_config_text="[experiment]\ndescription = schema check\n",
-        config=None, scope_names=["lpscope"],
+    _write_scope_skeleton(
+        hdf5_path, {"lpscope": ("LeCroy regular black scope", "192.168.7.67")},
+        n_samples=256, description="schema check",
+        scope_type="LECROY,WR8208HD,TEST,0",
     )
-    hdf5_writer.write_scope_metadata(
-        hdf5_path, scope_name="lpscope", description="LeCroy regular black scope",
-        ip_address="192.168.7.67", scope_type="LECROY,WR8208HD,TEST,0",
-    )
-    hdf5_writer.write_time_array(hdf5_path, "lpscope", time_array, 0)
-    setup = np.zeros(2, dtype=bmotion._POSITION_DTYPE)
-    setup["shot_num"] = [1, 2]
-    setup["x"] = [-15.0, -14.0]
-    setup["y"] = [15.0, 15.0]
-    bmotion.write_bmotion_position_groups(
-        hdf5_path, total_shots=2, toml_text="# bmotion toml\n",
-        selection_blob='{"mg_keys": ["0"], "execution_order": "interleaved"}',
-        prepared=[("0", mg_name, setup, np.array([-15.0, -14.0]), np.array([15.0]))],
-    )
+    _write_two_point_bmotion_positions(hdf5_path, mg_name, total_shots=2,
+                                       xs=[-15.0, -14.0], y=15.0)
 
 
 def _ref_shaped_payload(shot_num):

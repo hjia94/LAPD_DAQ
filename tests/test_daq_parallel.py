@@ -155,21 +155,7 @@ def _make_msa(scopes, parallel_read=True, parallel_arm=True):
         "parallel_scope_arm": "true" if parallel_arm else "false",
     }
     config["scope_ips"] = {name: "0.0.0.0" for name in scopes}
-    msa = MultiScopeAcquisition.__new__(MultiScopeAcquisition)
-    # Bypass __init__'s connection logic; set just what the read/arm path touches.
-    msa.config = config
-    msa.raw_config_text = ""
-    msa.scopes = dict(scopes)
-    msa.figures = {}
-    msa.time_arrays = {}
-    msa._arm_channels = {}
-    msa.scope_ips = {name: "0.0.0.0" for name in scopes}
-    msa.parallel_scope_read = parallel_read
-    msa.parallel_scope_arm = parallel_arm
-    msa.parallel_spool_write = True
-    msa.slave_ready_timeout = 5.0
-    msa._sync_warned = False
-    return msa
+    return MultiScopeAcquisition.for_testing(scopes, config)
 
 
 class ParallelReadCorrectnessTest(unittest.TestCase):

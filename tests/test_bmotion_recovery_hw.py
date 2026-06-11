@@ -105,6 +105,28 @@ def _ml_index(spec, ml_size: int) -> int:
     return idx
 
 
+def _classify_ep_ip_failure(motor, ip, ep_counts, steps_per_rev, encoder_resolution):
+    """Why an EP/IP comparison cannot be computed, or None if it can.
+
+    Checks the inputs in dependency order and names the first missing piece, so
+    a hardware read miss is diagnosable instead of a generic 'unavailable':
+    a NACK'd IP read (comes back as the motor's ack_flags enum, not a number),
+    no encoder reading, or missing scaling constants.
+    """
+    ack_flags = getattr(motor, "ack_flags", None)
+    if ack_flags is not None and isinstance(ip, ack_flags):
+        return (f"drive returned IP={ip.name} "
+                f"(NACK'd while moving — is it still moving?)")
+    if ep_counts is None:
+        return ("no encoder reading returned (still moving, or drive "
+                "has no encoder)")
+    if steps_per_rev in (None, 0):
+        return "steps_per_rev (gearing) not available from the drive"
+    if encoder_resolution in (None, 0):
+        return "encoder_resolution not available from the drive"
+    return None
+
+
 class _RecoveryHardwareBase(HardwareCheckBase):
     """Shared RunManager lifecycle + raw EP/IP readers for the recovery checks."""
 
@@ -209,31 +231,12 @@ class _RecoveryHardwareBase(HardwareCheckBase):
             motor = ax.motor
             ip = motor.send_command("get_position")
             ep_counts = _read_encoder_counts(motor)  # negative-safe raw read
-
-            # A NACK / lost-connection / malformed IP read comes back as the
-            # motor's own ack_flags enum, not a number.
-            ack_flags = getattr(motor, "ack_flags", None)
-
-            def _is_ack(v):
-                return ack_flags is not None and isinstance(v, ack_flags)
-
-            # Identify the failure cause before attempting the math.
             spr_q = getattr(motor, "steps_per_rev", None)
             spr = getattr(spr_q, "value", spr_q)
             er = _encoder_resolution(motor)
 
-            reason = None
-            if _is_ack(ip):
-                reason = (f"drive returned IP={ip.name} "
-                          f"(NACK'd while moving — is it still moving?)")
-            elif ep_counts is None:
-                reason = ("no encoder reading returned (still moving, or drive "
-                          "has no encoder)")
-            elif spr in (None, 0):
-                reason = "steps_per_rev (gearing) not available from the drive"
-            elif er in (None, 0):
-                reason = "encoder_resolution not available from the drive"
-
+            # Identify the failure cause before attempting the math.
+            reason = _classify_ep_ip_failure(motor, ip, ep_counts, spr, er)
             if reason is not None:
                 print(f"[recovery check] {self.mg_key} axis {idx} {when}: "
                       f"EP/IP unavailable — {reason}")

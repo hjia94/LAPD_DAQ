@@ -224,6 +224,25 @@ class MultiScopeAcquisition:
         else:
             self.scope_ips = {}
 
+    @classmethod
+    def for_testing(cls, scopes, config):
+        """Build an instance wired to pre-made (fake) scope objects.
+
+        Test-only constructor: goes through ``__init__`` (so the attribute set
+        and config-derived flags can never drift from real construction -- no
+        ``__new__`` surgery in tests), then injects ``scopes`` as-is. Nothing
+        here opens a connection or touches the filesystem; ``save_path`` is
+        None because tests using this never write HDF5 through the instance.
+
+        Args:
+            scopes: {scope_name: scope_object} used directly (fakes in tests).
+            config: ConfigParser; [acquisition] flags and [scope_ips] are read
+                exactly as in normal construction.
+        """
+        msa = cls(save_path=None, config=config)
+        msa.scopes = dict(scopes)
+        return msa
+
     def cleanup(self):
         """Close every open scope handle."""
         print("Cleaning up scope resources...")
