@@ -300,38 +300,26 @@ class ChannelDescriptionCaseTests(unittest.TestCase):
 class MissingChannelDescriptionWarningTests(unittest.TestCase):
     """Run-start warning for displayed channels with no [channels] entry."""
 
-    class _FakeScope:
-        def __init__(self, traces):
-            self._traces = traces
-
-        def displayed_traces(self):
-            return self._traces
-
-    def _msa(self, config_text, traces):
+    def _warn_output(self, config_text, traces):
         parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
         parser.read_string(config_text)
         msa = scope_runner.MultiScopeAcquisition(save_path=None, config=parser)
-        msa.scopes = {"lpscope": self._FakeScope(traces)}
-        return msa
-
-    def _warn_output(self, msa):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            msa.warn_missing_channel_descriptions("lpscope")
+            msa.warn_missing_channel_descriptions("lpscope", traces)
         return buf.getvalue()
 
     def test_warns_only_for_channels_without_descriptions(self):
-        msa = self._msa("[channels]\nLPscope_C1 = LP isat\n", ["C1", "C2"])
-        out = self._warn_output(msa)
+        out = self._warn_output("[channels]\nLPscope_C1 = LP isat\n", ["C1", "C2"])
         self.assertIn("lpscope_C2", out)
         self.assertNotIn("lpscope_C1", out)
 
     def test_silent_when_every_channel_is_described(self):
         # Mixed-case config keys must match: has_option goes through optionxform.
-        msa = self._msa(
+        out = self._warn_output(
             "[channels]\nLPscope_C1 = LP isat\nLPscope_C2 = LP vsweep\n",
             ["C1", "C2"])
-        self.assertEqual(self._warn_output(msa), "")
+        self.assertEqual(out, "")
 
 
 class OffloadEquivalenceTests(unittest.TestCase):

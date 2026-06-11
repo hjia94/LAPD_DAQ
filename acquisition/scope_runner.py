@@ -73,9 +73,12 @@ def init_acquire_from_scope(scope, scope_name):
         scope: LeCroy_Scope instance
         scope_name: Name of the scope
     Returns:
-        tuple: (is_sequence, time_array)
+        tuple: (is_sequence, time_array, traces)
             - is_sequence: 0 for RealTime mode, 1 for sequence mode
             - time_array: Time array for the scope
+            - traces: displayed trace names, returned so the caller can reuse
+              them (e.g. the missing-description check) without a second
+              displayed_traces() round-trip to the scope
     """
     time_array = None
     is_sequence = None
@@ -106,9 +109,9 @@ def init_acquire_from_scope(scope, scope_name):
     # Check if we got valid data
     if is_sequence is None or time_array is None:
         print(f"Warning: Could not get valid data from any trace on {scope_name}")
-        return None, None
+        return None, None, traces
 
-    return is_sequence, time_array
+    return is_sequence, time_array, traces
 
 
 def acquire_from_scope(scope, scope_name, ref_channel=None):
@@ -250,22 +253,17 @@ class MultiScopeAcquisition:
         return self.config.get('channels', channel_name,
                                fallback=f'Channel {channel_name} - No description available')
 
-    def warn_missing_channel_descriptions(self, scope_name):
+    def warn_missing_channel_descriptions(self, scope_name, traces):
         """Run-start alert: list displayed channels with no ``[channels]`` entry.
 
         Such channels are still recorded; their datasets just get the generic
         "No description available" label. Surfacing the gap while the run is
         starting lets the user fix the config (or abort) before hours of shots
-        are written with unlabeled data. ``has_option`` goes through
+        are written with unlabeled data. ``traces`` is the displayed-trace list
+        the caller already fetched at init, and ``has_option`` goes through
         ConfigParser's optionxform, so the check is case-insensitive like the
         description lookups themselves.
         """
-        try:
-            traces = self.scopes[scope_name].displayed_traces()
-        except Exception as e:
-            print(f"Warning: could not check channel descriptions for "
-                  f"{scope_name}: {e}")
-            return
         missing = [tr for tr in traces
                    if not self.config.has_option('channels', f'{scope_name}_{tr}')]
         if missing:
@@ -346,12 +344,12 @@ class MultiScopeAcquisition:
 
                 scope.set_trigger_mode('SINGLE')
 
-                is_sequence, time_array = init_acquire_from_scope(scope, name)
+                is_sequence, time_array, traces = init_acquire_from_scope(scope, name)
 
                 if is_sequence is not None and time_array is not None:
                     self.save_time_arrays(name, time_array, is_sequence)
                     self._save_scope_metadata(name)
-                    self.warn_missing_channel_descriptions(name)
+                    self.warn_missing_channel_descriptions(name, traces)
 
                     active_scopes[name] = is_sequence
                     print(f"Successfully initialized {name}")
