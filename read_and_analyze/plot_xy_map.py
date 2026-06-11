@@ -47,10 +47,11 @@ from lab_scopes.io.hdf5 import (
 try:  # works as a package (python -m read_and_analyze.plot_xy_map)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
+        resolve_data_file,
     )
     from read_and_analyze.filter_data import _as_list, _filter_trace
     from read_and_analyze.analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA,
+        MED_SIZE, GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
@@ -59,10 +60,11 @@ try:  # works as a package (python -m read_and_analyze.plot_xy_map)
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
+        resolve_data_file,
     )
     from filter_data import _as_list, _filter_trace
     from analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA,
+        MED_SIZE, GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
@@ -484,4 +486,4 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
 
 
 if __name__ == "__main__":
-    plot_xy_map(DEFAULT_FILE)
+    plot_xy_map(resolve_data_file())

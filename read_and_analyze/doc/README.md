@@ -56,7 +56,10 @@ everywhere it applies.
 
 ```python
 # SHARED — used by every module
-DATA_FILE    = r"D:\data\LAPD\my_run.hdf5"  # the HDF5 file to analyze
+DATA_DIR     = r"E:\Shadow data\..."        # Data_Run_bmotion.py's output folder (its base_path)
+DATA_FILE    = None                         # None = auto-pick the newest COMPLETED run in
+                                            # DATA_DIR (in-progress runs are skipped);
+                                            # or pin one file: r"D:\data\LAPD\my_run.hdf5"
 SELECT_SCOPE = "lpscope"   # scope to analyze; None = all scopes
 SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels
 SHOW_PLOT    = True        # display figures interactively

@@ -50,7 +50,7 @@ from lab_scopes.io.hdf5 import (
 try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _position_for_shot, _scope_groups, _shot_numbers,
-        _channel_names, _sample_shots,
+        _channel_names, _sample_shots, resolve_data_file,
     )
     from read_and_analyze.filter_data import (
         _as_list, _filter_trace,
@@ -58,7 +58,7 @@ try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _position_for_shot, _scope_groups, _shot_numbers,
-        _channel_names, _sample_shots,
+        _channel_names, _sample_shots, resolve_data_file,
     )
     from filter_data import (
         _as_list, _filter_trace,
@@ -72,7 +72,7 @@ except ImportError:  # fallback when run directly from inside the folder
     import smart_trigger_config as cfg
 
 # General knobs hoisted to module level for convenience / backwards compat.
-DEFAULT_FILE = cfg.DATA_FILE   # input HDF5 file (shared via analysis_config)
+# (The input file is resolved at run time via resolve_data_file, not a knob here.)
 SCOPE       = cfg.SCOPE
 CHANNELS    = cfg.CHANNELS
 MED_SIZE    = cfg.MED_SIZE
@@ -610,7 +610,8 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
 
 
 if __name__ == "__main__":
-    records = analyze_smart_triggers(DEFAULT_FILE)
+    data_file = resolve_data_file()
+    records = analyze_smart_triggers(data_file)
     _print_table(records)
     if SHOW_PLOT or SAVE_PLOT:
-        plot_smart_triggers(DEFAULT_FILE)
+        plot_smart_triggers(data_file)

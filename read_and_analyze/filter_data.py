@@ -33,10 +33,12 @@ from lab_scopes.io.hdf5 import (
 try:  # works as a package (python -m read_and_analyze.filter_data)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
+        resolve_data_file,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
+        resolve_data_file,
     )
 
 # --------------------------------------------------------------------------------------
@@ -46,12 +48,12 @@ except ImportError:  # fallback when run directly from inside the folder
 # --------------------------------------------------------------------------------------
 try:  # works as a package (python -m read_and_analyze.filter_data)
     from read_and_analyze.analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
     )
 
@@ -242,4 +244,4 @@ def plot_sample_traces(path, scope=None, channels=None,
 
 
 if __name__ == "__main__":
-    plot_sample_traces(DEFAULT_FILE)
+    plot_sample_traces(resolve_data_file())

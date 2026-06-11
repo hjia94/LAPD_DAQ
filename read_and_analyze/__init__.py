@@ -17,6 +17,9 @@ _READER_NAMES = (
     "validate_file",
     "print_summary",
     "plot_traces",
+    "find_latest_run",
+    "is_run_complete",
+    "resolve_data_file",
 )
 _FLUCTUATION_NAMES = (
     "find_quiet_window",

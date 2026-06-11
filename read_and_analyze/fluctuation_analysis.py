@@ -18,7 +18,8 @@ Filtering, shot grouping, and trace loading are imported from
 There is NO command line; all knobs are the constants below (filtering knobs
 live in ``filter_data``). Run with:
     python -m read_and_analyze.fluctuation_analysis
-Edit DEFAULT_FILE / the constants to change the file or parameters.
+Edit DATA_FILE/DATA_DIR and the constants in analysis_config.py to change the
+file (or auto-pick the newest completed run) and parameters.
 
 Setup (once):  python -m pip install scipy
 
@@ -35,24 +36,26 @@ from lab_scopes.io.hdf5 import read_hdf5_scope_tarr
 try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
+        resolve_data_file,
     )
     from read_and_analyze.filter_data import (
         _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
     )
     from read_and_analyze.analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
+        resolve_data_file,
     )
     from filter_data import (
         _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
     )
     from analysis_config import (
-        DATA_FILE as DEFAULT_FILE, MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
@@ -396,7 +399,8 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
 
 
 if __name__ == "__main__":
-    records = find_quiet_window(DEFAULT_FILE)
+    data_file = resolve_data_file()
+    records = find_quiet_window(data_file)
     _print_table(records)
     if SHOW_PLOT or SAVE_PLOT:
-        plot_quiet_window(DEFAULT_FILE)
+        plot_quiet_window(data_file)

@@ -31,7 +31,14 @@ Created May.2026
 # SHARED -- used across modules (input file, scope/channel, plot toggles,
 #           filtering pipeline, grid tolerance)
 # ======================================================================================
-DATA_FILE   = r"M:\BAPSF_Data\Low_Density_Topo\Jun2026\01-Isat-p21-line-Argon-2kG_2026-06-08.hdf5"
+# Where Data_Run_bmotion.py writes its run HDF5 files (its base_path). Used only
+# when DATA_FILE is None: the newest COMPLETED run in this folder is analyzed.
+DATA_DIR    = r"E:\Shadow data\Electrode_Biasing\jun2026"
+
+# Explicit input file. None = auto: pick the newest completed run in DATA_DIR
+# (a run still being acquired/offloaded is skipped). Set a path to pin one file,
+# e.g. r"M:\BAPSF_Data\Low_Density_Topo\Jun2026\01-Isat-p21-line-Argon-2kG_2026-06-08.hdf5"
+DATA_FILE   = None
 
 SELECT_SCOPE = None   # scope to analyze; None = all scopes (shared by every module)
 SELECT_CHAN  = None     # channels to analyze; None = all channels (shared by every module)

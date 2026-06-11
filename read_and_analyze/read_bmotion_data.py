@@ -14,6 +14,7 @@ Created May.2026
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -38,11 +39,11 @@ from lab_scopes.io.hdf5 import (
 # imported here under the historical names so the rest of the module is unchanged.
 try:  # works as a package (python -m read_and_analyze.read_bmotion_data)
     from read_and_analyze.analysis_config import (
-        DATA_FILE as DEFAULT_FILE, SHOW_PLOT, SAVE_PLOT,
+        DATA_DIR, DATA_FILE as DEFAULT_FILE, SHOW_PLOT, SAVE_PLOT,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from analysis_config import (
-        DATA_FILE as DEFAULT_FILE, SHOW_PLOT, SAVE_PLOT,
+        DATA_DIR, DATA_FILE as DEFAULT_FILE, SHOW_PLOT, SAVE_PLOT,
     )
 
 NON_SCOPE_GROUPS = {"Configuration", "Control"}  # root groups that aren't scopes
@@ -147,6 +148,96 @@ def _position_for_shot(positions, shot_num):
         if 0 <= idx < len(arr) and int(arr["shot_num"][idx]) == shot_num:
             return float(arr["x"][idx]), float(arr["y"][idx])
     return None
+
+
+# ======================================================================================
+# Input-file resolution  (newest completed Data_Run_bmotion.py output)
+# ======================================================================================
+
+def _planned_total_shots(f):
+    """Planned shot count of an open run file, or None if it has no positions.
+
+    Data_Run_bmotion.py preallocates ``/Control/Positions/<mg>/positions_array``
+    to the run's total shot count when it writes the HDF5 skeleton, so its
+    length is the planned total even before the first shot is acquired. Reads
+    only the dataset shape (no array data) -- this runs once per candidate file
+    when scanning a folder, possibly over a network share.
+    """
+    if "Control" not in f or "Positions" not in f["Control"]:
+        return None
+    lengths = [grp["positions_array"].shape[0]
+               for grp in f["Control"]["Positions"].values()
+               if "positions_array" in grp]
+    return max(lengths) if lengths else None
+
+
+def is_run_complete(path):
+    """True if ``path`` is a fully offloaded Data_Run_bmotion.py run.
+
+    Complete = the final planned shot group (``shot_<total>``) exists in every
+    scope group. The offload fills shots in order and a skipped shot still gets
+    a (marked) group, so the last planned shot being present means the spool
+    fully drained into this file. Unreadable/locked files, files with no shots
+    yet, and non-bmotion files (no /Control/Positions) all count as incomplete.
+
+    Completion is inferred from file content rather than the pipeline's
+    authoritative ``RUN_COMPLETE`` sentinel because that sentinel lives in the
+    spool folder (DAQ PC fast disk), which is neither derivable from the HDF5
+    path nor mounted on an analysis PC; content inference also works for files
+    that predate this helper.
+    """
+    import h5py
+    try:
+        with h5py.File(path, "r") as f:
+            total = _planned_total_shots(f)
+            scopes = _scope_groups(f)
+            if total is None or not scopes:
+                return False
+            return all(f"shot_{total}" in f[s] for s in scopes)
+    except OSError:
+        return False
+
+
+def find_latest_run(data_dir=None):
+    """Path of the newest completed run HDF5 in ``data_dir`` (default DATA_DIR).
+
+    Candidates are tried newest-first by modification time; a file still being
+    acquired/offloaded (or unreadable) is skipped with a notice. If candidates
+    exist but none is complete, the newest is returned with a WARNING (a run
+    halted early is still analyzable -- the readers tolerate missing shots).
+    Raises FileNotFoundError if the folder holds no .hdf5 files at all.
+    """
+    folder = DATA_DIR if data_dir is None else data_dir
+    candidates = sorted(glob.glob(os.path.join(folder, "*.hdf5")),
+                        key=os.path.getmtime, reverse=True)
+    if not candidates:
+        raise FileNotFoundError(
+            f"No .hdf5 files found in {folder!r} -- set DATA_DIR/DATA_FILE in "
+            "analysis_config.py or pass a file path on the command line.")
+    for path in candidates:
+        if is_run_complete(path):
+            return path
+        print(f"Skipping incomplete/in-progress run: {os.path.basename(path)}")
+    newest = candidates[0]
+    print(f"WARNING: no completed run in {folder!r}; falling back to newest "
+          f"file: {os.path.basename(newest)}")
+    return newest
+
+
+def resolve_data_file(path=None):
+    """Resolve the input file every module should analyze.
+
+    Precedence: explicit ``path`` argument, then ``DATA_FILE`` from
+    analysis_config.py, then the newest completed run in ``DATA_DIR``
+    (:func:`find_latest_run`). This is the single entry point the sibling
+    analysis modules use, so they all agree on the file.
+    """
+    chosen = path or DEFAULT_FILE
+    if chosen:
+        return chosen
+    chosen = find_latest_run()
+    print(f"Auto-selected latest completed run: {chosen}")
+    return chosen
 
 
 # ======================================================================================
@@ -477,8 +568,9 @@ def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=Non
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="Inspect/validate a Data_Run_bmotion.py HDF5 file and plot traces.")
-    p.add_argument("path", nargs="?", default=DEFAULT_FILE,
-                   help=f"HDF5 file (default: {DEFAULT_FILE})")
+    p.add_argument("path", nargs="?", default=None,
+                   help="HDF5 file (default: DATA_FILE from analysis_config if "
+                        f"set, else the newest completed run in {DATA_DIR})")
     # --no-show/--no-save override SHOW_PLOT/SAVE_PLOT for a single run.
     p.add_argument("--no-show", action="store_true",
                    help=f"do not display plots (overrides SHOW_PLOT={SHOW_PLOT})")
@@ -489,6 +581,12 @@ def main(argv=None):
     p.add_argument("--shots", nargs="+", type=int, default=None,
                    help="shot numbers to overlay (default: first/middle/last)")
     args = p.parse_args(argv)
+
+    try:
+        args.path = resolve_data_file(args.path)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
 
     if not os.path.exists(args.path):
         print(f"ERROR: file not found: {args.path}", file=sys.stderr)
