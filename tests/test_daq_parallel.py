@@ -163,6 +163,10 @@ def _make_msa(scopes, parallel_read=True, parallel_arm=True):
     msa.figures = {}
     msa.time_arrays = {}
     msa._arm_channels = {}
+    # initialize_scopes captures each scope's displayed traces here; the read
+    # path indexes it directly, so seed it as init would.
+    msa._displayed_traces = {name: tuple(s.displayed_traces())
+                             for name, s in scopes.items()}
     msa.scope_ips = {name: "0.0.0.0" for name in scopes}
     msa.parallel_scope_read = parallel_read
     msa.parallel_scope_arm = parallel_arm
