@@ -22,6 +22,10 @@ class LabScopesLeCroyScopeAdapter:
         # Reference channel chosen at arm time (arm_single), polled for the
         # fresh-sweep completion check during acquire.
         self._arm_channel = None
+        # Displayed traces captured once at initialize() and reused every shot,
+        # so the whole run reads one fixed channel set (see
+        # init_acquire_from_scope in acquisition.scope_runner for the rationale).
+        self._displayed_traces = None
 
     def connect(self) -> None:
         from lab_scopes.lecroy import LeCroyScope
@@ -35,6 +39,7 @@ class LabScopesLeCroyScopeAdapter:
         traces = self.scope.displayed_traces()
         if not traces:
             raise RuntimeError(f"No displayed traces found on scope {self.name}")
+        self._displayed_traces = traces
         self._time_array = self.scope.time_array(traces[0])
 
     def arm(self) -> None:
@@ -49,11 +54,13 @@ class LabScopesLeCroyScopeAdapter:
 
     def acquire(self, shot_num: int) -> ScopeShot:
         scope = self._require_scope()
+        if self._displayed_traces is None:
+            raise RuntimeError(f"Scope {self.name} has not been initialized")
         # Wait once for a fresh acquisition (sweep-counter based) before reading
         # every trace -- one completed sweep means all channels are ready.
-        _stop_triggering(scope, self._arm_channel)
+        wait_for_fresh_acquisition(scope, self._arm_channel)
         traces = []
-        for trace_name in scope.displayed_traces():
+        for trace_name in self._displayed_traces:
             raw, header = scope.acquire(trace_name, raw=True)
             traces.append(
                 ScopeTrace(
@@ -87,7 +94,7 @@ class LabScopesLeCroyScopeAdapter:
         return self.scope
 
 
-def _stop_triggering(scope, channel=None, timeout: float = 25.0) -> None:
+def wait_for_fresh_acquisition(scope, channel=None, timeout: float = 25.0) -> None:
     """Block until the scope is STOPped AND a *fresh* single acquisition landed.
 
     Two-stage check (``wait_for_stop_then_complete``): wait for ``TRIG_MODE STOP``
@@ -97,6 +104,10 @@ def _stop_triggering(scope, channel=None, timeout: float = 25.0) -> None:
     counter is the authority -- a leftover STOP from a prior shot reads counter 0
     and is never mistaken for fresh data. ``channel`` is the reference channel
     cleared at arm time; if None the first displayed channel is used.
+
+    Raises RuntimeError on timeout or when no channel is available to poll.
+    Shared by this adapter and acquisition.scope_runner (the spooled path) so
+    the completion contract lives in exactly one place.
     """
     if channel is None:
         channels = scope.displayed_channels()

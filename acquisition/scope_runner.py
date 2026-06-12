@@ -2,8 +2,9 @@
 
 Layered like this:
 
-    helper functions (stop_triggering, init_acquire_from_scope,
-        acquire_from_scope, acquire_from_scope_sequence)
+    helper functions (init_acquire_from_scope, acquire_from_scope,
+        acquire_from_scope_sequence; the shared completion wait lives in
+        lapd_daq.devices.lab_scopes.wait_for_fresh_acquisition)
         - talk to a single LeCroy_Scope instance
 
     MultiScopeAcquisition class
@@ -36,46 +37,19 @@ from .config import load_experiment_config
 # =============================================================================
 # Single-scope helpers
 # =============================================================================
-def stop_triggering(scope, channel=None, timeout=25.0):
-    """Block until the scope is STOPped AND a *fresh* single acquisition landed.
-
-    Two-stage check (``wait_for_stop_then_complete``): wait for ``TRIG_MODE STOP``
-    as a fast hint, then confirm via the monotonic sweep counter
-    (``sweeps_per_acq``) that a new edge was actually captured this shot. STOP
-    alone is ambiguous (the scope reads STOP both before any trigger and after a
-    previous one); ``arm_single`` clears the counter at arm time, so a counter
-    >= 1 here unambiguously means fresh data exists.
-
-    ``channel`` is the reference channel cleared at arm time; if None, the first
-    displayed channel is used. Returns True when fresh data exists, False on
-    timeout. (Default timeout matches the old 500 * 0.05 s budget.)
-    """
-    try:
-        if channel is None:
-            channels = scope.displayed_channels()
-            channel = channels[0] if channels else None
-        if channel is None:
-            print('Scope has no displayed channel to poll for completion')
-            return False
-        if scope.wait_for_stop_then_complete(channel, timeout=timeout):
-            return True
-    except KeyboardInterrupt:
-        print('Keyboard interrupted in stop_triggering')
-        raise
-
-    print('Scope did not complete a fresh acquisition')
-    return False
-
-
 def init_acquire_from_scope(scope, scope_name):
     """Initialize acquisition from a single scope and get initial data and time arrays
     Args:
         scope: LeCroy_Scope instance
         scope_name: Name of the scope
     Returns:
-        tuple: (is_sequence, time_array)
+        tuple: (is_sequence, time_array, traces)
             - is_sequence: 0 for RealTime mode, 1 for sequence mode
             - time_array: Time array for the scope
+            - traces: displayed-trace tuple captured here. The caller caches it
+              and passes it to every per-shot acquire so the whole run reads
+              one fixed channel set: a per-shot re-scan costs round-trips and
+              silently drops any channel whose :TRACE? reply times out.
     """
     time_array = None
     is_sequence = None
@@ -106,31 +80,33 @@ def init_acquire_from_scope(scope, scope_name):
     # Check if we got valid data
     if is_sequence is None or time_array is None:
         print(f"Warning: Could not get valid data from any trace on {scope_name}")
-        return None, None
+        return None, None, ()
 
-    return is_sequence, time_array
+    return is_sequence, time_array, traces
 
 
-def acquire_from_scope(scope, scope_name, ref_channel=None):
+def acquire_from_scope(scope, scope_name, traces, ref_channel=None):
     """Acquire data from a single scope with optimized speed (int16/raw).
 
     Per-scope steps of one shot:
-      4. check the scope is STOPped and a fresh sweep landed (stop_triggering:
-         TRIG_MODE STOP hint -> sweep-counter confirm on ``ref_channel`` cleared
-         at arm time);
+      4. check the scope is STOPped and a fresh sweep landed
+         (wait_for_fresh_acquisition: TRIG_MODE STOP hint -> sweep-counter
+         confirm on ``ref_channel`` cleared at arm time);
       5. if so, data exists -> read every displayed trace (one completed sweep
          means all channels of that sweep are ready, so no per-trace polling);
       otherwise raise so the shot is recorded as having no valid data.
+
+    ``traces`` is the displayed-trace tuple captured at init time
+    (see init_acquire_from_scope).
     """
+    from lapd_daq.devices.lab_scopes import wait_for_fresh_acquisition
+
     data = {}
     headers = {}
     active_traces = []
 
-    # Step 4: check STOP + fresh-sweep. Step 5: data exists only if it returns True.
-    if stop_triggering(scope, ref_channel) is not True:
-        raise Exception('Scope did not complete a fresh acquisition')
-
-    traces = scope.displayed_traces()
+    # Step 4: check STOP + fresh-sweep. Step 5: raises if no fresh data exists.
+    wait_for_fresh_acquisition(scope, ref_channel)
 
     for tr in traces:
         data[tr], headers[tr] = scope.acquire(tr, raw=True)
@@ -139,16 +115,18 @@ def acquire_from_scope(scope, scope_name, ref_channel=None):
     return active_traces, data, headers
 
 
-def acquire_from_scope_sequence(scope, scope_name, ref_channel=None):
-    """Acquire sequence mode data from a single scope (int16/raw)."""
+def acquire_from_scope_sequence(scope, scope_name, traces, ref_channel=None):
+    """Acquire sequence mode data from a single scope (int16/raw).
+
+    ``traces`` as in acquire_from_scope.
+    """
+    from lapd_daq.devices.lab_scopes import wait_for_fresh_acquisition
+
     data = {}
     headers = {}
     active_traces = []
 
-    if stop_triggering(scope, ref_channel) is not True:
-        raise Exception('Scope did not complete a fresh acquisition')
-
-    traces = scope.displayed_traces()
+    wait_for_fresh_acquisition(scope, ref_channel)
 
     for tr in traces:
         segment_data, header = scope.acquire_sequence_data(tr)
@@ -186,6 +164,9 @@ class MultiScopeAcquisition:
         # the completion check so a fresh-sweep transition is read on the same
         # channel that was cleared. {scope_name: "C1"}.
         self._arm_channels = {}
+        # Per-scope displayed-trace tuple captured once at initialize_scopes and
+        # reused every shot. {scope_name: ("C1", "C2", ...)}.
+        self._displayed_traces = {}
         self.config = config
         self.raw_config_text = raw_config_text
         self.description_path = description_path
@@ -314,18 +295,20 @@ class MultiScopeAcquisition:
 
             try:
                 LeCroy_Scope = _lecroy_scope_class()
-                self.scopes[name] = LeCroy_Scope(ip, verbose=False)
+                # 30 s timeout. Set via the constructor (which normalizes units),
+                # never via scope.scope.timeout -- the VICP transport takes seconds.
+                self.scopes[name] = LeCroy_Scope(ip, verbose=False, timeout=30.0)
                 scope = self.scopes[name]
 
                 # Optimize scope settings for faster acquisition
                 scope.scope.chunk_size = 4 * 1024 * 1024  # 4MB transfer chunk
-                scope.scope.timeout = 30000  # 30 second timeout
 
                 scope.set_trigger_mode('SINGLE')
 
-                is_sequence, time_array = init_acquire_from_scope(scope, name)
+                is_sequence, time_array, traces = init_acquire_from_scope(scope, name)
 
                 if is_sequence is not None and time_array is not None:
+                    self._displayed_traces[name] = traces
                     self.save_time_arrays(name, time_array, is_sequence)
                     self._save_scope_metadata(name)
 
@@ -359,10 +342,11 @@ class MultiScopeAcquisition:
         """
         scope = self.scopes[name]
         ref_channel = self._arm_channels.get(name)
+        traces = self._displayed_traces[name]
         if mode == 0:
-            return acquire_from_scope(scope, name, ref_channel)
+            return acquire_from_scope(scope, name, traces, ref_channel)
         elif mode == 1:
-            return acquire_from_scope_sequence(scope, name, ref_channel)
+            return acquire_from_scope_sequence(scope, name, traces, ref_channel)
         else:
             raise ValueError(f"Invalid active_scopes value for {name}: {mode}")
 
