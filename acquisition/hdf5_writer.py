@@ -115,6 +115,12 @@ def write_experiment_metadata(save_path, description, source_code,
         f.attrs['source_code'] = str(source_code)
 
         config_group = f.require_group('Configuration')
+        if 'experiment_config' in config_group:
+            raise RuntimeError(
+                f"{save_path} already holds an initialized run "
+                "(Configuration/experiment_config exists). Resume is not "
+                "supported; delete or rotate the file to start a fresh run."
+            )
         config_group.create_dataset(
             'experiment_config',
             data=np.bytes_(_serialize_config(raw_config_text, config)),
@@ -181,6 +187,38 @@ def write_time_array(save_path, scope_name, time_array, is_sequence):
         time_ds.attrs['dtype'] = str(time_array.dtype)
 
 
+def no_description_label(channel):
+    """Sentinel description for a channel with no ``[channels]`` config entry.
+
+    Single source of truth: the in-process writer and the offload adapters
+    used to build this string independently (with different texts), so the
+    same undescribed channel was labeled differently depending on which path
+    wrote the shot. The standalone ``lapd_daq.storage.hdf5`` writer keeps its
+    own copy of this string (it cannot import this package); keep the two in
+    sync if the text ever changes.
+    """
+    return f"Channel {channel} - No description available"
+
+
+def resolve_channel_descriptions(all_data, descriptions):
+    """Resolve ``{(scope_name, trace): description}`` for every trace in ``all_data``.
+
+    ``descriptions`` maps ``"<scope>_<channel>"`` config keys to text. Matching
+    is case-insensitive: ConfigParser lowercases the ``[channels]`` keys
+    (``bdotscope_c1``) while trace names come from the scope in uppercase
+    (``C1``), so an exact-key lookup would miss every channel and silently
+    label them all with the no-description sentinel. Shared by the in-process
+    writer and the offload adapters so both paths label datasets identically.
+    """
+    chan = {key.lower(): value for key, value in descriptions.items()}
+    return {
+        (scope_name, tr): chan.get(f"{scope_name}_{tr}".lower(),
+                                   no_description_label(tr))
+        for scope_name, (traces, _data, _headers) in all_data.items()
+        for tr in traces
+    }
+
+
 def write_shot_data(save_path, all_data, shot_num, channel_descriptions,
                     overwrite=False):
     """Write shot_N for every scope (raw int16, blosc2/lzf-compressed, fletcher32 on).
@@ -237,7 +275,7 @@ def _write_shot_data_into(f, all_data, shot_num, channel_descriptions,
             )
             header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))
             data_ds.attrs['description'] = channel_descriptions.get(
-                (scope_name, tr), f"Channel {tr} - No description available"
+                (scope_name, tr), no_description_label(tr)
             )
             data_ds.attrs['dtype'] = 'int16'
             header_ds.attrs['description'] = f'Binary header data for {tr}'

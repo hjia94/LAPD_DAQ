@@ -113,6 +113,19 @@ def get_experiment_name(config):
     return (name or 'experiment').strip()
 
 
+def get_channel_descriptions(config):
+    """Return the raw ``[channels]`` map: ``{"<scope>_<channel>": description}``.
+
+    Keys come back as ConfigParser stores them, i.e. lowercased by its default
+    ``optionxform``; consumers match them case-insensitively against the
+    uppercase scope trace names (see
+    :func:`acquisition.hdf5_writer.resolve_channel_descriptions`).
+    """
+    if not config.has_section('channels'):
+        return {}
+    return dict(config.items('channels'))
+
+
 def hdf5_filename(exp_name, date=None):
     """Build the standard HDF5 filename ``<exp_name>_<YYYY-MM-DD>.hdf5``.
 

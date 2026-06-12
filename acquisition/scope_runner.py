@@ -229,10 +229,6 @@ class MultiScopeAcquisition:
         return self.config.get('scopes', scope_name,
                                fallback=f'Scope {scope_name} - No description available')
 
-    def get_channel_description(self, channel_name):
-        return self.config.get('channels', channel_name,
-                               fallback=f'Channel {channel_name} - No description available')
-
     def warn_missing_channel_descriptions(self, scope_name, traces):
         """Run-start alert: list displayed channels with no ``[channels]`` entry.
 
@@ -242,7 +238,9 @@ class MultiScopeAcquisition:
         are written with unlabeled data. ``traces`` is the displayed-trace list
         the caller already fetched at init, and ``has_option`` goes through
         ConfigParser's optionxform, so the check is case-insensitive like the
-        description lookups themselves.
+        description lookups themselves. Note ``has_option`` also sees
+        ``[DEFAULT]`` keys, matching how the lookups fall through to defaults:
+        a stray DEFAULT key both silences the warning and supplies the value.
         """
         missing = [tr for tr in traces
                    if not self.config.has_option('channels', f'{scope_name}_{tr}')]
@@ -295,11 +293,8 @@ class MultiScopeAcquisition:
         ``overwrite`` replaces an existing shot group instead of raising; left
         in as a general capability (no caller sets it on this branch).
         """
-        descriptions = {
-            (scope_name, tr): self.get_channel_description(f"{scope_name}_{tr}")
-            for scope_name, (traces, _data, _headers) in all_data.items()
-            for tr in traces
-        }
+        descriptions = hdf5_writer.resolve_channel_descriptions(
+            all_data, config_module.get_channel_descriptions(self.config))
         hdf5_writer.write_shot_data(self.save_path, all_data, shot_num, descriptions,
                                     overwrite=overwrite)
 

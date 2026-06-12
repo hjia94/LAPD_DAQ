@@ -77,16 +77,12 @@ def channel_descriptions(msa):
     """Return the ``[channels]`` description map for the offload to label shots.
 
     Keys are the ``ScopeName_C<n>`` config keys as ConfigParser returns them,
-    i.e. lowercased by its default ``optionxform``; :func:`_descriptions_for`
-    therefore matches them case-insensitively against each ``f"{scope}_{trace}"``.
+    i.e. lowercased by its default ``optionxform``; the offload matches them
+    case-insensitively via :func:`hdf5_writer.resolve_channel_descriptions`.
     This is the only per-channel attr the offload needs that is not already
     written into the HDF5 by the acquire process.
     """
-    out = {}
-    if msa.config.has_section("channels"):
-        for key, value in msa.config.items("channels"):
-            out[key] = value
-    return out
+    return config_module.get_channel_descriptions(msa.config)
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +101,8 @@ def write_shot(hdf5_path, payload, meta):
         return
 
     all_data = _payload_to_all_data(payload)
-    descriptions = _descriptions_for(all_data, meta)
+    descriptions = hdf5_writer.resolve_channel_descriptions(
+        all_data, meta.get("channel_descriptions", {}))
     with h5py.File(hdf5_path, "a", **hdf5_writer.SHOT_WRITE_OPEN_KWARGS) as f:
         hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num,
                                           descriptions)
@@ -148,23 +145,6 @@ def _payload_to_all_data(payload):
         headers = {t.channel: t.header for t in traces}
         all_data[scope_name] = (tr_names, data, headers)
     return all_data
-
-
-def _descriptions_for(all_data, meta):
-    # Match case-insensitively: ConfigParser lowercases the [channels] keys the
-    # acquire side puts in the meta (``bdotscope_c1``), while trace names come
-    # from the scope in uppercase (``C1``), so an exact-key lookup would miss
-    # every channel and silently label them all "No description available".
-    chan = {key.lower(): value
-            for key, value in meta.get("channel_descriptions", {}).items()}
-    out = {}
-    for scope_name, (traces, _d, _h) in all_data.items():
-        for tr in traces:
-            key = f"{scope_name}_{tr}".lower()
-            out[(scope_name, tr)] = chan.get(
-                key, f"Channel {tr} - No description available"
-            )
-    return out
 
 
 def _write_skip(hdf5_path, payload, meta):

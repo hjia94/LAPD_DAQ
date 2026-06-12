@@ -282,16 +282,15 @@ class ChannelDescriptionCaseTests(unittest.TestCase):
 
         # Consumer: the offload must resolve those keys against the uppercase
         # trace names ("C1") in the payload.
-        descriptions = spool_adapter._descriptions_for(
-            _make_all_data(False), {"channel_descriptions": chan})
+        descriptions = hdf5_writer.resolve_channel_descriptions(
+            _make_all_data(False), chan)
         self.assertEqual(descriptions[("lpscope", "C1")], "LP isat")
         self.assertEqual(descriptions[("lpscope", "C2")], "LP vsweep")
 
     def test_mixed_case_meta_keys_still_resolve(self):
         # Old spool dirs (and hand-built metas) carry mixed-case keys.
-        descriptions = spool_adapter._descriptions_for(
-            _make_all_data(False),
-            {"channel_descriptions": {"lpscope_C1": "LP isat"}})
+        descriptions = hdf5_writer.resolve_channel_descriptions(
+            _make_all_data(False), {"lpscope_C1": "LP isat"})
         self.assertEqual(descriptions[("lpscope", "C1")], "LP isat")
         self.assertEqual(descriptions[("lpscope", "C2")],
                          "Channel C2 - No description available")
