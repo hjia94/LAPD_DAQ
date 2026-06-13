@@ -271,9 +271,9 @@ class ParallelSpoolWriteTests(unittest.TestCase):
 class ChannelDescriptionCaseTests(unittest.TestCase):
     """The [channels] keys come back from ConfigParser lowercased (its default
     optionxform), while trace names come from the scope uppercase ("C1"); the
-    resolution must be case-insensitive or every channel is silently labeled
-    "No description available". Descriptions are resolved once at scope init
-    and written as <CH>_description attrs on the scope group."""
+    resolver must be case-insensitive or every channel is silently labeled
+    "No description available". (That the resolved attrs actually land on the
+    scope group is covered end-to-end by the offload/parallel pipeline tests.)"""
 
     def _config(self, text):
         parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
@@ -298,18 +298,6 @@ class ChannelDescriptionCaseTests(unittest.TestCase):
             {"lpscope_C1": "LP isat"}, "lpscope", ["C1", "C2"])
         self.assertEqual(resolved["C1"], "LP isat")
         self.assertEqual(resolved["C2"], "Channel C2 - No description available")
-
-    def test_descriptions_land_as_scope_group_attrs(self):
-        # End to end through the canonical writer: the attrs must be on the
-        # scope group, and the shot datasets must NOT carry per-shot copies.
-        h5 = _temp_path(self, "desc_attrs.hdf5")
-        _build_bmotion_skeleton(h5, total_shots=1)
-        hdf5_writer.write_shot_data(h5, _make_all_data(False), 1)
-        with h5py.File(h5, "r") as f:
-            assert_channel_description_attrs(
-                self, f, "lpscope", {"C1": "LP isat", "C2": "LP vsweep"})
-            self.assertNotIn("description",
-                             f["lpscope/shot_1/C1_data"].attrs)
 
 
 class MissingChannelDescriptionWarningTests(unittest.TestCase):
