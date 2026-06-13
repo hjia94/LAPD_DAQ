@@ -33,13 +33,22 @@ Run every module **from the LAPD_DAQ repo root** as `python -m read_and_analyze.
 | [`read_bmotion_data.py`](../read_bmotion_data.py) | Validates the file (groups, dtypes, positions, sampled traces) and overlays raw voltage traces per scope. Prints a summary + `PASS`/`WARN`/`FAIL` report (exit code `1` on any `FAIL`). | `python -m read_and_analyze.read_bmotion_data [file.hdf5]` |
 | [`filter_data.py`](../filter_data.py) | Shows the denoising pipeline — raw vs median vs median+Gaussian — on a sample trace, so you can tune the filter. Owns the shared filtering helpers other modules reuse. | `python -m read_and_analyze.filter_data` |
 | [`fluctuation_analysis.py`](../fluctuation_analysis.py) | Finds, per position, the **flattest / most reproducible** time window (see [below](#fluctuation-analysis)). Prints a best-first table + a score/overlay figure. | `python -m read_and_analyze.fluctuation_analysis` |
-| [`plot_xy_map.py`](../plot_xy_map.py) | Reduces each grid position's trace to one scalar (mean over a time range, or value at one instant) and renders a **2D XY map** (`imshow`, optional contours). Falls back to a line plot for 1D scans. | `python -m read_and_analyze.plot_xy_map` |
+| [`plot_xy_map.py`](../plot_xy_map.py) | Reduces each grid position's trace to one scalar (mean over a time range, or value at one instant) and renders a **2D XY map** (`imshow`, optional contours). Genuine 2D planes only; line scans are skipped (use `plot_x_line`). | `python -m read_and_analyze.plot_xy_map` |
+| [`plot_x_line.py`](../plot_x_line.py) | The 1D **line-scan** counterpart to `plot_xy_map`: reduces each position to a scalar and plots value vs probe position. Auto-detects the moving axis (x or y). Genuine 2D planes are skipped. | `python -m read_and_analyze.plot_x_line` |
 | [`smart_trigger_analysis.py`](../smart_trigger_analysis.py) | Replays a LeCroy scope's **SmartTriggers** post-hoc (see [below](#smarttrigger-scan)) and reports which events would have triggered. Prints a per-shot table + a per-shot scan figure. | `python -m read_and_analyze.smart_trigger_analysis` |
+| [`fix_channel_descriptions.py`](../fix_channel_descriptions.py) | Maintenance CLI: retrofits per-channel `<CH>_description` attributes onto an **existing** run HDF5 by re-parsing the stored `experiment_config`. Idempotent (skips groups already labeled unless `--force`); accepts a file or folder. | `python -m read_and_analyze.fix_channel_descriptions <file_or_folder> [--force] [--recursive]` |
 
-`read_bmotion_data` is the only one with a CLI. Its options:
-`--no-show` / `--no-save` (override plot toggles), `--scope NAME`,
-`--channels C1 C2`, `--shots 1 250 510`. All other modules are configured by
-editing constants (below) — there is no command line.
+Two modules have a CLI: `read_bmotion_data` and `fix_channel_descriptions`.
+`read_bmotion_data` options: `--no-show` / `--no-save` (override plot toggles),
+`--scope NAME`, `--channels C1 C2`, `--shots 1 250 510`. The remaining analysis
+modules (`filter_data`, `fluctuation_analysis`, `plot_xy_map`, `plot_x_line`,
+`smart_trigger_analysis`) are configured by editing constants (below) — there is
+no command line.
+
+> A separate internal hook, [`auto_plot.py`](../auto_plot.py), is not run by hand:
+> the acquisition/offload scripts call it after a run to render the 1D line
+> profile (via `plot_x_line`), gated by the `[analysis] auto_plot` config key. It
+> forces `show=False`/save-only and can never crash the run.
 
 ---
 
@@ -60,10 +69,13 @@ DATA_DIR     = r"E:\Shadow data\..."        # Data_Run_bmotion.py's output folde
 DATA_FILE    = None                         # None = auto-pick the newest COMPLETED run in
                                             # DATA_DIR (in-progress runs are skipped);
                                             # or pin one file: r"D:\data\LAPD\my_run.hdf5"
-SELECT_SCOPE = "lpscope"   # scope to analyze; None = all scopes
-SELECT_CHAN  = ["C1"]      # channels to analyze; None = all channels
+SELECT_SCOPE = None        # scope to analyze; None = all scopes
+SELECT_CHAN  = None        # channels to analyze; None = all channels
 SHOW_PLOT    = True        # display figures interactively
 SAVE_PLOT    = False       # write PNGs to a "plots/" subdir next to the data file
+AUTO_PLOT    = True        # fallback default for the auto_plot.py post-run hook when
+                           # called without a config; the run's [analysis] auto_plot
+                           # key (experiment_config.ini) overrides this in acquisition
 MED_SIZE     = 5           # median-filter width in SAMPLES (spike removal); 1 = off
 GAUSS_SIGMA  = 20          # Gaussian smoothing width in SAMPLES; 0 = off
 POS_TOL      = 0.5         # group repeat shots within this many mm
@@ -72,19 +84,23 @@ POS_TOL      = 0.5         # group repeat shots within this many mm
 FLUCT_WINDOW_US   = 10.0   # window width (us) slid across the record
 FLUCT_SIGNAL_FRAC = 0      # window |mean| must exceed this fraction of the position's peak
 
-# XY_MAP — plot_xy_map.py only
-XY_MODE         = "range"  # "range" = mean over [T_START_MS, T_END_MS]; "step" = value at T_STEP_MS
-XY_T_START_MS   = 4.0      # range start (ms)
-XY_T_END_MS     = 4.5      # range end (ms)
-XY_T_STEP_MS    = 0.1      # snapshot time (ms), used when XY_MODE == "step"
+# XY_MAP — plot_xy_map.py and plot_x_line.py
+XY_MODE         = "range"  # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
+XY_T_START_MS   = 0        # range start (ms), used when XY_MODE == "range"
+XY_T_END_MS     = 2.0      # range end (ms), used when XY_MODE == "range"
+XY_T_STEP_MS    = [10,12,15,19]  # snapshot time(s) in ms for "step" mode; one panel per time
+                                 # (a single float, e.g. 4.0, is also accepted -> one panel)
+XY_SHOT_INDEX   = 0        # which shot (0-based) per position to map; no shot averaging yet
 XY_SHOW_CONTOUR = False    # overlay contour lines
 XY_N_CONTOURS   = 8        # contour count when XY_SHOW_CONTOUR is True
-XY_CMAP         = "viridis"
+XY_CMAP         = "rainbow"
 ```
 
 > The SmartTrigger scan keeps its **own** plot toggles in `smart_trigger_config.py`
-> (`SHOW_PLOT`/`SAVE_PLOT`); the shared toggles above drive the other four modules.
-> `read_bmotion_data` can also override its toggles per-run with `--no-show`/`--no-save`.
+> (`SHOW_PLOT`/`SAVE_PLOT`); the shared toggles above drive the other analysis
+> modules (`read_bmotion_data`, `filter_data`, `fluctuation_analysis`,
+> `plot_xy_map`, `plot_x_line`). `read_bmotion_data` can also override its toggles
+> per-run with `--no-show`/`--no-save`.
 
 ### `smart_trigger_config.py` — SmartTrigger scan only
 
@@ -226,5 +242,11 @@ per-channel WAVEDESC header (handled by `lab_scopes`).
 [`read_bmotion_data.py`](../read_bmotion_data.py),
 [`filter_data.py`](../filter_data.py),
 [`fluctuation_analysis.py`](../fluctuation_analysis.py),
-[`plot_xy_map.py`](../plot_xy_map.py), and
-[`smart_trigger_analysis.py`](../smart_trigger_analysis.py).*
+[`plot_xy_map.py`](../plot_xy_map.py),
+[`plot_x_line.py`](../plot_x_line.py),
+[`smart_trigger_analysis.py`](../smart_trigger_analysis.py),
+[`fix_channel_descriptions.py`](../fix_channel_descriptions.py), and
+[`auto_plot.py`](../auto_plot.py). The
+[`test_read_analyze_doc_sync`](../../tests/test_read_analyze_doc_sync.py) test
+enforces that every module is listed here and that the config constants shown
+above still exist.*
