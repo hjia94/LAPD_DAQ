@@ -20,21 +20,28 @@ Covers:
 Runs on this PC's .venv (real bapsf_motion / h5py / numpy). No motor required.
 """
 
+import configparser
+import io
 import os
 import errno
 import shutil
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 import h5py
 import numpy as np
 
 from spooling import ShotPayload, TracePayload, spool_format
-from acquisition import bmotion, hdf5_writer, spool_adapter
+from acquisition import bmotion, hdf5_writer, scope_runner, spool_adapter
 import offload_engine
-from _hdf5_assertions import assert_dataset_filters, assert_hdf5_scope_equivalent
+from _hdf5_assertions import (
+    assert_channel_description_attrs,
+    assert_dataset_filters,
+    assert_hdf5_scope_equivalent,
+)
 
 REFERENCE_HDF5 = r"D:\data\LAPD\03-LP-p21p29p41-plane-Helium_2026-05-20.hdf5"
 
@@ -74,15 +81,15 @@ def _make_all_data(seq=False):
 
 
 def _make_meta(scope_name="lpscope", hdf5_path=None):
-    """The slim run-info bundle the offload reads (no skeleton material)."""
+    """The slim run-info bundle the offload reads (no skeleton material).
+
+    Channel descriptions are no longer part of it: they are scope-group attrs
+    written by the acquire process at init (see write_scope_metadata).
+    """
     return {
         "writer": "acquisition",
         "hdf5_path": hdf5_path,
         "config_scope_names": [scope_name],
-        "channel_descriptions": {
-            f"{scope_name}_C1": "LP isat",
-            f"{scope_name}_C2": "LP vsweep",
-        },
     }
 
 
@@ -93,7 +100,6 @@ def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
     Uses the same `main` writers acquire calls (write_experiment_metadata,
     write_scope_metadata, write_time_array, write_bmotion_position_groups), so a
     test offload fills a file that is byte-for-byte what acquire would create.
-    Returns the channel descriptions map used to build the slim meta.
     """
     time_array = np.linspace(0, 1e-3, n_samples, dtype=np.float64)
     hdf5_writer.write_experiment_metadata(
@@ -107,6 +113,7 @@ def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
     hdf5_writer.write_scope_metadata(
         hdf5_path, scope_name=scope_name, description="test scope",
         ip_address="127.0.0.1", scope_type="LECROY,TEST,0,0",
+        channel_descriptions={"C1": "LP isat", "C2": "LP vsweep"},
     )
     hdf5_writer.write_time_array(hdf5_path, scope_name, time_array, 0)
 
@@ -228,20 +235,21 @@ class ParallelSpoolWriteTests(unittest.TestCase):
             off_h5, description="unit-test run", source_code={"unit": "test"},
             raw_config_text="[experiment]\n", config=None,
             scope_names=["lpscope", "xrayscope"])
+        scope_channel_descs = {
+            "lpscope": {"C1": "LP isat", "C2": "LP vsweep"},
+            "xrayscope": {"C1": "xray"},
+        }
         for sname, ip in (("lpscope", "127.0.0.1"), ("xrayscope", "127.0.0.2")):
             hdf5_writer.write_scope_metadata(
                 off_h5, scope_name=sname, description=sname,
-                ip_address=ip, scope_type="LECROY,TEST,0,0")
+                ip_address=ip, scope_type="LECROY,TEST,0,0",
+                channel_descriptions=scope_channel_descs[sname])
             hdf5_writer.write_time_array(off_h5, sname, ta, 0)
 
         meta = {
             "writer": "acquisition",
             "hdf5_path": off_h5,
             "config_scope_names": ["lpscope", "xrayscope"],
-            "channel_descriptions": {
-                "lpscope_C1": "LP isat", "lpscope_C2": "LP vsweep",
-                "xrayscope_C1": "xray",
-            },
         }
         spool_format.write_run_metadata(self.par, meta)
         payload = spool_adapter.all_data_to_payload(all_data, 1, None)
@@ -251,11 +259,70 @@ class ParallelSpoolWriteTests(unittest.TestCase):
 
         with h5py.File(off_h5, "r") as f:
             for scope_name, (traces, data, _h) in all_data.items():
+                assert_channel_description_attrs(
+                    self, f, scope_name, scope_channel_descs[scope_name])
                 for ch in traces:
                     ds = f[f"{scope_name}/shot_1/{ch}_data"]
                     self.assertEqual(ds.dtype, np.dtype("int16"))
                     np.testing.assert_array_equal(ds[()], data[ch])
                     self.assertIn(f"{ch}_header", f[f"{scope_name}/shot_1"])
+
+
+class ChannelDescriptionCaseTests(unittest.TestCase):
+    """The [channels] keys come back from ConfigParser lowercased (its default
+    optionxform), while trace names come from the scope uppercase ("C1"); the
+    resolver must be case-insensitive or every channel is silently labeled
+    "No description available". (That the resolved attrs actually land on the
+    scope group is covered end-to-end by the offload/parallel pipeline tests.)"""
+
+    def _config(self, text):
+        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+        parser.read_string(text)
+        return parser
+
+    def test_real_config_keys_resolve_against_uppercase_traces(self):
+        from acquisition import config as config_module
+
+        config = self._config(
+            "[channels]\nLPscope_C1 = LP isat\nLPscope_C2 = LP vsweep\n")
+        chan = config_module.get_channel_descriptions(config)
+        self.assertEqual(chan, {"lpscope_c1": "LP isat", "lpscope_c2": "LP vsweep"})
+
+        resolved = hdf5_writer.scope_channel_descriptions(
+            chan, "lpscope", ["C1", "C2"])
+        self.assertEqual(resolved,
+                         {"C1": "LP isat", "C2": "LP vsweep"})
+
+    def test_mixed_case_keys_still_resolve_and_missing_get_sentinel(self):
+        resolved = hdf5_writer.scope_channel_descriptions(
+            {"lpscope_C1": "LP isat"}, "lpscope", ["C1", "C2"])
+        self.assertEqual(resolved["C1"], "LP isat")
+        self.assertEqual(resolved["C2"], "Channel C2 - No description available")
+
+
+class MissingChannelDescriptionWarningTests(unittest.TestCase):
+    """Run-start warning for displayed channels with no [channels] entry."""
+
+    def _warn_output(self, config_text, traces):
+        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+        parser.read_string(config_text)
+        msa = scope_runner.MultiScopeAcquisition(save_path=None, config=parser)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            msa.warn_missing_channel_descriptions("lpscope", traces)
+        return buf.getvalue()
+
+    def test_warns_only_for_channels_without_descriptions(self):
+        out = self._warn_output("[channels]\nLPscope_C1 = LP isat\n", ["C1", "C2"])
+        self.assertIn("lpscope_C2", out)
+        self.assertNotIn("lpscope_C1", out)
+
+    def test_silent_when_every_channel_is_described(self):
+        # Mixed-case config keys must match: has_option goes through optionxform.
+        out = self._warn_output(
+            "[channels]\nLPscope_C1 = LP isat\nLPscope_C2 = LP vsweep\n",
+            ["C1", "C2"])
+        self.assertEqual(out, "")
 
 
 class OffloadEquivalenceTests(unittest.TestCase):
@@ -266,12 +333,11 @@ class OffloadEquivalenceTests(unittest.TestCase):
         self.off_h5 = _temp_path(self, "offloaded.hdf5")
         self.direct_h5 = _temp_path(self, "direct.hdf5")
 
-    def _build_direct(self, all_data_by_shot, descriptions):
+    def _build_direct(self, all_data_by_shot):
         """Reproduce the in-process path output for the same inputs."""
         _build_bmotion_skeleton(self.direct_h5, total_shots=len(all_data_by_shot))
         for shot_num, all_data in all_data_by_shot.items():
-            hdf5_writer.write_shot_data(self.direct_h5, all_data, shot_num,
-                                        descriptions)
+            hdf5_writer.write_shot_data(self.direct_h5, all_data, shot_num)
             with h5py.File(self.direct_h5, "a") as f:
                 ds = f["Control/Positions/MG_A/positions_array"]
                 ds[shot_num - 1] = (shot_num, float(shot_num), 2.0)
@@ -280,10 +346,9 @@ class OffloadEquivalenceTests(unittest.TestCase):
 
     def test_offload_matches_direct_writer(self):
         shots = {1: _make_all_data(False), 2: _make_all_data(False)}
-        descriptions = {("lpscope", "C1"): "LP isat", ("lpscope", "C2"): "LP vsweep"}
 
         # Direct in-process path.
-        self._build_direct(shots, descriptions)
+        self._build_direct(shots)
 
         # Spool + offload path: acquire creates the skeleton, offload fills it.
         _build_bmotion_skeleton(self.off_h5, total_shots=2)
@@ -367,8 +432,7 @@ class OffloadResilienceTests(unittest.TestCase):
         # must verify the existing data, and must delete the bin.
         _build_bmotion_skeleton(self.off_h5, total_shots=1)
         all_data = _make_all_data(False)
-        descriptions = {("lpscope", "C1"): "LP isat", ("lpscope", "C2"): "LP vsweep"}
-        hdf5_writer.write_shot_data(self.off_h5, all_data, 1, descriptions)
+        hdf5_writer.write_shot_data(self.off_h5, all_data, 1)
 
         spool_format.write_run_metadata(self.spool, _make_meta(hdf5_path=self.off_h5))
         payload = spool_adapter.all_data_to_payload(all_data, 1, {"MG_A": (1.0, 2.0)})
@@ -703,7 +767,6 @@ class GridOffloadTests(unittest.TestCase):
             "writer": "grid",
             "hdf5_path": self.off_h5,
             "config_scope_names": ["lpscope"],
-            "channel_descriptions": {"lpscope_C1": "isat", "lpscope_C2": "vsweep"},
             "nz": nz,
         })
         for shot in (1, 2):
@@ -770,11 +833,6 @@ class SchemaMatchesReferenceTests(unittest.TestCase):
             "writer": "acquisition",
             "hdf5_path": cls.off_h5,
             "config_scope_names": ["lpscope"],
-            "channel_descriptions": {
-                "lpscope_C1": "LP@P41 Isat 50ohm",
-                "lpscope_C2": "LP@P29 Isat 50ohm",
-                "lpscope_C3": "LP@P21 Isat 50ohm",
-            },
         })
         for shot_num in (1, 2):
             spool_format.write_shot(cls.spool, _ref_shaped_payload(shot_num))
@@ -811,7 +869,9 @@ class SchemaMatchesReferenceTests(unittest.TestCase):
             self.assertEqual(new_ds.chunks, new_ds.shape)
             self.assertEqual(ref_ds.chunks, ref_ds.shape)
             self.assertEqual(new_ds.attrs["dtype"], "int16")
-            self.assertIn("description", dict(new_ds.attrs))
+            # New layout: channel descriptions are scope-group attrs (the
+            # reference file predates this and carries per-shot copies instead).
+            self.assertIn("C1_description", dict(new["lpscope"].attrs))
 
             ref_hdr = ref["lpscope"]["shot_1"]["C1_header"]
             new_hdr = new["lpscope"]["shot_1"]["C1_header"]
@@ -844,6 +904,11 @@ def _build_ref_shaped_skeleton(hdf5_path, mg_name="<Athena>    p21_LP"):
     hdf5_writer.write_scope_metadata(
         hdf5_path, scope_name="lpscope", description="LeCroy regular black scope",
         ip_address="192.168.7.67", scope_type="LECROY,WR8208HD,TEST,0",
+        channel_descriptions={
+            "C1": "LP@P41 Isat 50ohm",
+            "C2": "LP@P29 Isat 50ohm",
+            "C3": "LP@P21 Isat 50ohm",
+        },
     )
     hdf5_writer.write_time_array(hdf5_path, "lpscope", time_array, 0)
     setup = np.zeros(2, dtype=bmotion._POSITION_DTYPE)

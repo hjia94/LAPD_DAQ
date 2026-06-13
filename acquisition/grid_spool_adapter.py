@@ -29,7 +29,6 @@ WRITER_TAG = "grid"
 # identical to the bmotion path; only the coordinates payload differs.
 all_data_to_payload = spool_adapter.all_data_to_payload
 skipped_payload = spool_adapter.skipped_payload
-channel_descriptions = spool_adapter.channel_descriptions
 
 
 # --------------------------------------------------------------------------- #
@@ -48,9 +47,8 @@ def write_shot(hdf5_path, payload, meta):
         return
 
     all_data = spool_adapter._payload_to_all_data(payload)
-    descriptions = spool_adapter._descriptions_for(all_data, meta)
     with h5py.File(hdf5_path, "a", **hdf5_writer.SHOT_WRITE_OPEN_KWARGS) as f:
-        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num, descriptions)
+        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num)
         _write_positions(f, payload, meta)
 
 

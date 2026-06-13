@@ -115,6 +115,12 @@ def write_experiment_metadata(save_path, description, source_code,
         f.attrs['source_code'] = str(source_code)
 
         config_group = f.require_group('Configuration')
+        if 'experiment_config' in config_group:
+            raise RuntimeError(
+                f"{save_path} already holds an initialized run "
+                "(Configuration/experiment_config exists). Resume is not "
+                "supported; delete or rotate the file to start a fresh run."
+            )
         config_group.create_dataset(
             'experiment_config',
             data=np.bytes_(_serialize_config(raw_config_text, config)),
@@ -152,13 +158,45 @@ def write_description(save_path, description):
         f.attrs['description'] = description
 
 
-def write_scope_metadata(save_path, scope_name, description, ip_address, scope_type):
-    """Write per-scope metadata attributes onto the scope group."""
+# Suffix for the per-channel description attributes written on a scope group
+# (e.g. ``C1_description``). Single source of truth for the layout so the
+# writer, the reader, and the old-file retrofit tool agree on one convention;
+# the plain ``description`` scope attr (the scope's own free-text label) is NOT
+# a channel description and is excluded by :func:`channel_descriptions_from_attrs`.
+CHANNEL_DESCRIPTION_SUFFIX = '_description'
+
+
+def channel_descriptions_from_attrs(attrs):
+    """Read ``{channel: text}`` from a scope group's ``<CH>_description`` attrs.
+
+    Inverse of the per-channel writes in :func:`write_scope_metadata`. Skips the
+    scope's own ``description`` attr (the bare suffix with no channel prefix).
+    """
+    return {
+        name[:-len(CHANNEL_DESCRIPTION_SUFFIX)]: attrs[name]
+        for name in attrs
+        if name.endswith(CHANNEL_DESCRIPTION_SUFFIX) and name != 'description'
+    }
+
+
+def write_scope_metadata(save_path, scope_name, description, ip_address, scope_type,
+                         channel_descriptions=None):
+    """Write per-scope metadata attributes onto the scope group.
+
+    ``channel_descriptions`` is a ``{trace: text}`` mapping (see
+    :func:`scope_channel_descriptions`); each entry lands as a
+    ``<trace>_description`` attribute on the scope group. This is the canonical
+    on-disk location for channel descriptions: written once at scope init by
+    the acquire process, so it exists even if the run dies on shot 1 and the
+    offload never needs the config.
+    """
     with h5py.File(save_path, 'a') as f:
         scope_group = f[scope_name]
         scope_group.attrs['description'] = description
         scope_group.attrs['ip_address'] = ip_address
         scope_group.attrs['scope_type'] = scope_type
+        for trace, text in (channel_descriptions or {}).items():
+            scope_group.attrs[f'{trace}{CHANNEL_DESCRIPTION_SUFFIX}'] = text
 
 
 def write_time_array(save_path, scope_name, time_array, is_sequence):
@@ -181,26 +219,55 @@ def write_time_array(save_path, scope_name, time_array, is_sequence):
         time_ds.attrs['dtype'] = str(time_array.dtype)
 
 
-def write_shot_data(save_path, all_data, shot_num, channel_descriptions,
-                    overwrite=False):
+def no_description_label(channel):
+    """Sentinel description for a channel with no ``[channels]`` config entry.
+
+    Single source of truth: the in-process writer and the offload adapters
+    used to build this string independently (with different texts), so the
+    same undescribed channel was labeled differently depending on which path
+    wrote the shot. The standalone ``lapd_daq.storage.hdf5`` writer keeps its
+    own copy of this string (it cannot import this package); keep the two in
+    sync if the text ever changes.
+    """
+    return f"Channel {channel} - No description available"
+
+
+def scope_channel_descriptions(descriptions, scope_name, traces):
+    """Resolve ``{trace: description}`` for one scope's displayed traces.
+
+    ``descriptions`` maps ``"<scope>_<channel>"`` config keys to text (the raw
+    ``[channels]`` section). Matching is case-insensitive: ConfigParser
+    lowercases the keys (``bdotscope_c1``) while trace names come from the
+    scope in uppercase (``C1``), so an exact-key lookup would miss every
+    channel and silently label them all with the no-description sentinel.
+    """
+    chan = {key.lower(): value for key, value in descriptions.items()}
+    return {
+        tr: chan.get(f"{scope_name}_{tr}".lower(), no_description_label(tr))
+        for tr in traces
+    }
+
+
+def write_shot_data(save_path, all_data, shot_num, overwrite=False):
     """Write shot_N for every scope (raw int16, blosc2/lzf-compressed, fletcher32 on).
 
     Args:
         save_path: HDF5 file path
         all_data: {scope_name: (traces, data, headers)} as produced by acquire_shot
         shot_num: 1-based shot number
-        channel_descriptions: {(scope_name, trace): description_string}
         overwrite: when True, replace an existing shot_N group instead of
             raising. A general capability; no caller sets it on this branch.
             When False, an existing shot is treated as a programming error.
+
+    Channel descriptions are NOT written here: they live once per scope as
+    ``<trace>_description`` attributes on the scope group (see
+    :func:`write_scope_metadata`), not duplicated on every shot's datasets.
     """
     with h5py.File(save_path, 'a', **SHOT_WRITE_OPEN_KWARGS) as f:
-        _write_shot_data_into(f, all_data, shot_num, channel_descriptions,
-                              overwrite=overwrite)
+        _write_shot_data_into(f, all_data, shot_num, overwrite=overwrite)
 
 
-def _write_shot_data_into(f, all_data, shot_num, channel_descriptions,
-                          overwrite=False):
+def _write_shot_data_into(f, all_data, shot_num, overwrite=False):
     """Write shot_N groups into an already-open HDF5 file handle.
 
     Split out of :func:`write_shot_data` so a caller that must also write other
@@ -236,9 +303,6 @@ def _write_shot_data_into(f, all_data, shot_num, channel_descriptions,
                 **_COMPRESSION_KWARGS,
             )
             header_ds = shot_group.create_dataset(f'{tr}_header', data=np.void(headers[tr]))
-            data_ds.attrs['description'] = channel_descriptions.get(
-                (scope_name, tr), f"Channel {tr} - No description available"
-            )
             data_ds.attrs['dtype'] = 'int16'
             header_ds.attrs['description'] = f'Binary header data for {tr}'
 

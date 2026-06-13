@@ -49,7 +49,9 @@ def init_acquire_from_scope(scope, scope_name):
             - traces: displayed-trace tuple captured here. The caller caches it
               and passes it to every per-shot acquire so the whole run reads
               one fixed channel set: a per-shot re-scan costs round-trips and
-              silently drops any channel whose :TRACE? reply times out.
+              silently drops any channel whose :TRACE? reply times out. Also
+              reused for the missing-description check at init, avoiding a
+              second displayed_traces() round-trip to the scope.
     """
     time_array = None
     is_sequence = None
@@ -227,9 +229,25 @@ class MultiScopeAcquisition:
         return self.config.get('scopes', scope_name,
                                fallback=f'Scope {scope_name} - No description available')
 
-    def get_channel_description(self, channel_name):
-        return self.config.get('channels', channel_name,
-                               fallback=f'Channel {channel_name} - No description available')
+    def warn_missing_channel_descriptions(self, scope_name, traces):
+        """Run-start alert: list displayed channels with no ``[channels]`` entry.
+
+        Such channels are still recorded; their datasets just get the generic
+        "No description available" label. Surfacing the gap while the run is
+        starting lets the user fix the config (or abort) before hours of shots
+        are written with unlabeled data. ``traces`` is the displayed-trace list
+        the caller already fetched at init, and ``has_option`` goes through
+        ConfigParser's optionxform, so the check is case-insensitive like the
+        description lookups themselves. Note ``has_option`` also sees
+        ``[DEFAULT]`` keys, matching how the lookups fall through to defaults:
+        a stray DEFAULT key both silences the warning and supplies the value.
+        """
+        missing = [tr for tr in traces
+                   if not self.config.has_option('channels', f'{scope_name}_{tr}')]
+        if missing:
+            keys = ', '.join(f'{scope_name}_{tr}' for tr in missing)
+            print(f"Warning: no [channels] description for: {keys} -- these "
+                  f"datasets will be labeled 'No description available' in the HDF5")
 
     def get_experiment_description(self):
         """Return the run description, read from ``description.txt``.
@@ -255,13 +273,24 @@ class MultiScopeAcquisition:
             scope_names=self.scope_ips.keys(),
         )
 
-    def _save_scope_metadata(self, scope_name):
+    def _save_scope_metadata(self, scope_name, traces):
+        """Write the scope group's attrs, including the per-channel descriptions.
+
+        ``traces`` is the displayed-trace tuple captured at init. The channel
+        descriptions are resolved from the config here, once, and written as
+        ``<trace>_description`` scope-group attributes -- the canonical on-disk
+        location -- so neither the spool metadata nor the offload ever has to
+        carry them.
+        """
         hdf5_writer.write_scope_metadata(
             self.save_path,
             scope_name=scope_name,
             description=self.get_scope_description(scope_name),
             ip_address=self.scope_ips[scope_name],
             scope_type=self.scopes[scope_name].idn_string,
+            channel_descriptions=hdf5_writer.scope_channel_descriptions(
+                config_module.get_channel_descriptions(self.config),
+                scope_name, traces),
         )
 
     def save_time_arrays(self, scope_name, time_array, is_sequence):
@@ -275,12 +304,7 @@ class MultiScopeAcquisition:
         ``overwrite`` replaces an existing shot group instead of raising; left
         in as a general capability (no caller sets it on this branch).
         """
-        descriptions = {
-            (scope_name, tr): self.get_channel_description(f"{scope_name}_{tr}")
-            for scope_name, (traces, _data, _headers) in all_data.items()
-            for tr in traces
-        }
-        hdf5_writer.write_shot_data(self.save_path, all_data, shot_num, descriptions,
+        hdf5_writer.write_shot_data(self.save_path, all_data, shot_num,
                                     overwrite=overwrite)
 
     # -- scope lifecycle -----------------------------------------------------
@@ -310,7 +334,8 @@ class MultiScopeAcquisition:
                 if is_sequence is not None and time_array is not None:
                     self._displayed_traces[name] = traces
                     self.save_time_arrays(name, time_array, is_sequence)
-                    self._save_scope_metadata(name)
+                    self._save_scope_metadata(name, traces)
+                    self.warn_missing_channel_descriptions(name, traces)
 
                     active_scopes[name] = is_sequence
                     print(f"Successfully initialized {name}")
@@ -717,7 +742,6 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                 "writer": grid_spool_adapter.WRITER_TAG,
                 "hdf5_path": hdf5_path,
                 "config_scope_names": list(active_scopes.keys()),
-                "channel_descriptions": grid_spool_adapter.channel_descriptions(msa),
                 "description_path": description_path,
                 "nz": pos_manager.nz if pos_manager is not None else None,
             })

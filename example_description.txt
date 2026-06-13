@@ -1,19 +1,240 @@
-LAPD_DAQ hardware diagnostic template
+==============================================================================
+LAPD_DAQ experiment_config.ini -- INSTRUCTIONS
+==============================================================================
 
-Purpose:
-- Run one real-scope Data_Run-style check without motor movement.
-- Run one real-motor Data_Run-style check with fake delayed scope data.
+example_experiment_config.ini is a clean, comment-free template. Copy it to
+experiment_config.ini and edit it for your run. Every section is documented
+below. The active defaults are intentionally small so the hardware diagnostics
+can run without starting a full scan.
 
-Edit this description for the actual experiment before production runs.
+On the DAQ PC, force-reinstall the matching lab_scopes release into the venv:
+  pip install --force-reinstall --no-deps "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git@v0.3.0"
 
+
+FORMATTING RULES
 ------------------------------------------------------------------------------
-This is the free-text run description. Copy this file to `description.txt` in
-the same folder as experiment_config.ini (your base_path) and edit it for your
-run.
+- Values are taken LITERALLY -- no quotes, no brackets:
+      Correct:  motion_groups = Hades, Athena
+      Wrong:    motion_groups = "Hades, Athena"   (quotes become part of the value)
+- Keep comments on their OWN line. (Trailing "# ..." after a value is
+  stripped, but an own-line comment is always unambiguous.) The example .ini
+  is kept comment-free on purpose; if you add notes, put them on their own line.
+- Sections may appear in any order.
+- Continuation lines of a multi-line value must be indented at least one
+  space; a line starting in column 0 ends the value.
 
-You can write or edit this file BEFORE or DURING the data run. Its contents are
-written into the HDF5 file's top-level `description` attribute once when the run
-starts, and OVERWRITTEN again when the run finishes (after all shots are
-written) -- so the final stored description reflects this file as of run
-completion. There is no formatting requirement: write as much free text as you
-like, over as many lines as you like.
+
+THE BMOTION WORKFLOW (Data_Run_bmotion.py) reads:
+  [storage] (REQUIRED)   [experiment]  [nshots]  [scopes]  [scope_ips]
+  [channels]  [bmotion]  [acquisition] (optional)  [analysis] (optional)
+Probe motion itself (planes, drives, motion lists, transforms) is defined in
+the separate bmotion TOML, not here; [bmotion] only selects which drives run
+and in which direction. The free-text run description lives in description.txt
+(see [experiment] and "RUN DESCRIPTION" below), not in this file.
+[position], [motor_ips], [camera_config], [raspberry_pi] are LEGACY (older
+--mode grid/camera/dropper paths) -- bmotion users can ignore them.
+
+
+[storage]
+------------------------------------------------------------------------------
+REQUIRED -- acquisition is spooled-only and aborts without spool_dir.
+Each shot is written as raw int16 bin files to the fast local spool_dir; a
+separate Offload_Run.py process copies shots into the HDF5 under hdf5_dir,
+verifies each write by reading it back, and deletes the spooled copy. This
+keeps the scopes from waiting on the slow output disk.
+
+Both keys are DIRECTORIES, not file paths. The HDF5 filename is always derived
+from [experiment] name: <hdf5_dir>/<name>_<YYYY-MM-DD>.hdf5. hdf5_dir is
+optional (when omitted the HDF5 goes into the run's base_path); hdf5_path is a
+deprecated alias for hdf5_dir. Put spool_dir and hdf5_dir on DIFFERENT physical
+disks (e.g. local SSD + USB/network drive), otherwise the split provides no
+speed benefit.
+
+Optional disk-full handling: if the offload can't keep up and the spool disk
+fills, acquisition pauses to let the offload drain and retries instead of
+aborting. Defaults:
+  disk_full_pause_seconds = 30
+  disk_full_max_retries = 3
+
+
+[acquisition]
+------------------------------------------------------------------------------
+OPTIONAL per-shot parallelism. All three flags default to true; set false to
+fall back to sequential behaviour (e.g. to A/B timing). No-ops with one scope.
+
+parallel_scope_arm: arm all scopes for the next trigger concurrently. Serial
+  arming leaves a window where a trigger edge is caught by some scopes and
+  missed by others, desyncing the run by a shot. Recommended true for any
+  multi-scope run.
+parallel_scope_read: read each scope's waveform concurrently (each scope has
+  its own network connection, so the transfers overlap).
+parallel_spool_write: write each scope's spool files concurrently. Good on an
+  SSD/NVMe spool disk; set false on a single spinning HDD (seek thrashing).
+
+slave_ready_timeout: seconds (float) to wait for each SLAVE scope to report,
+  via its INR register, that its trigger is armed BEFORE the master is armed
+  (a slave not yet ready would miss the master's edge and desync the run). If
+  the wait expires the shot is recorded as skipped rather than captured
+  desynced. Only matters with 2+ scopes; default 5.0.
+
+
+[nshots]
+------------------------------------------------------------------------------
+num_duplicate_shots: shots taken at EACH motion position. Integer only; keep
+  at 1 for diagnostics.
+num_run_repeats: legacy grid path only; bmotion does not repeat the scan.
+
+
+[bmotion]
+------------------------------------------------------------------------------
+Read only by Data_Run_bmotion.py. Selects which of the TOML's motion groups
+run and in which direction. Omitting the whole section means: all groups,
+forward, interleaved.
+
+motion_groups: drive names, case-insensitive, comma- or space-separated --
+  e.g. Hades, Athena, Hermes, Apollo (matched against the TOML's
+  motion_group.<X>.drive.name). "all" or blank selects every group. An unknown
+  name raises an error listing the available drives. (Numeric TOML indices,
+  e.g. "0, 2", still work as a fallback.)
+direction: one bare word for ALL selected drives (forward | backward), or a
+  per-drive map, e.g. Hades=forward, Athena=backward. Unlisted drives default
+  to forward; naming a drive not in motion_groups is an error.
+execution_order: "interleaved" (default) -- all groups advance together, with
+  nshots at each motion-list index; or "sequential" -- each group completes its
+  full scan before the next starts (idle groups are not recorded).
+
+Motor-error recovery (optional; defaults shown). A failed or stalled move is
+retried at the same target on an escalating ladder (soft-stop -> re-issue,
+which re-clears alarms / re-enables); if exhausted, the run stops cleanly and
+the HDF5 is finalized with all shots taken so far.
+  move_attempts = 30          total attempts including the first
+  move_retry_wait_s = 1       seconds between attempts
+  move_stall_timeout_s = 10   seconds of no position progress = stall
+  move_max_time_s = 300       absolute ceiling per move (hung-link backstop)
+  position_tol = 0.5          max |achieved - target| per axis to count as arrived
+  position_progress_eps = 0.125    min per-axis change counted as progress
+  encoder_mismatch_tol_rev = 0.01  warn-only: encoder vs step disagreement (revs)
+
+
+[experiment]
+------------------------------------------------------------------------------
+name: builds the output HDF5 filename <hdf5_dir>/<name>_<YYYY-MM-DD>.hdf5.
+  Defaults to 'experiment'.
+The free-text run description lives in description.txt next to this config
+(see "RUN DESCRIPTION" below), NOT here. An old `description` key in this
+section is ignored.
+
+
+[scopes]
+------------------------------------------------------------------------------
+Display name = free-text description. The name on the left (e.g. BdotScope) is
+the scope key referenced by [scope_ips] and [channels].
+
+MASTER/SLAVE TRIGGERING: the trigger comes from a free-running timer the DAQ
+cannot gate, so to guarantee every scope captures the SAME edge, one scope is
+the MASTER and the rest are SLAVES:
+  * Wiring: master's TRIGGER-OUT (Aux Out) -> every slave's EXT input.
+  * Front-panel trigger sources (set MANUALLY; the software does not set them):
+    master = the external timer; each slave = EXT.
+  * The MASTER is the LAST scope listed in [scope_ips]: the DAQ arms all slaves
+    first, confirms them live, then arms the master last, so no slave can fire
+    before the master.
+
+
+[channels] -- HOW TO ENTER CHANNEL DESCRIPTIONS
+------------------------------------------------------------------------------
+One channel per line, EXACT FORMAT:
+
+      ScopeName_C<n> = free-text description
+
+ScopeName is a key from [scopes]/[scope_ips]; <n> is the scope channel number
+(C1 ... C8); the value is free text, taken literally.
+      Correct:  BdotScope_C1 = Bdot probe, x-axis, 10 turns
+      Wrong:    BdotScope_C1 = "Bdot probe"    (quotes end up in the HDF5)
+      Wrong:    BdotScope C1 = ...             (must be underscore + C<n>)
+
+Case does NOT matter (bdotscope_c1 == BdotScope_C1), but the scope name must be
+SPELLED like its [scopes] key -- a misspelled key is silently unused.
+Channels with no entry are still captured and saved; they just get the generic
+label "Channel C<n> - No description available". Add C5-C8 keys only on an
+8-channel scope where you want those labeled. Do NOT put keys in a [DEFAULT]
+section: ConfigParser folds them into every section and they show up as bogus
+channel entries here.
+
+WHERE THE DESCRIPTIONS GO IN THE HDF5: each description is written ONCE at
+scope init as a `C<n>_description` attribute on that scope's group (next to the
+scope's own `description`/`ip_address` attrs) -- e.g. BdotScope/@C1_description.
+They are on disk the moment scope init finishes, even if the run dies on shot 1;
+they are no longer duplicated on every per-shot dataset.
+
+FIXING OLD FILES: runs taken before this layout lack the scope-group attrs, but
+every HDF5 stores its verbatim config in Configuration/experiment_config. To
+retrofit the attrs in place from that stored config:
+      python -m read_and_analyze.fix_channel_descriptions <file.hdf5>
+Add --force to overwrite attrs that are already present. It is idempotent and
+prints a per-scope summary of what it wrote.
+
+
+[scope_ips]
+------------------------------------------------------------------------------
+Bare IPs, one per [scopes] key. ORDER MATTERS: the LAST scope listed is the
+MASTER (see [scopes]). In the example, XrayScope is the master.
+
+
+[analysis]
+------------------------------------------------------------------------------
+OPTIONAL. After the offload finishes writing the HDF5, render the 1D line
+profile (one PNG per scope/channel) into a plots/ subfolder next to the data
+file; never opens a window. Auto-detects x-line vs y-line and no-ops on plane /
+single-point runs, so leaving it on is harmless. Default true.
+
+
+RUN DESCRIPTION (description.txt)
+------------------------------------------------------------------------------
+This is separate from the instructions above: it is the free-text description
+of the actual experiment, NOT the config documentation. Create a file named
+description.txt in the same folder as experiment_config.ini (your base_path)
+and write the run description there.
+
+You can write or edit description.txt BEFORE or DURING the data run. Its
+contents are written into the HDF5 file's top-level `description` attribute once
+when the run starts, and OVERWRITTEN again when the run finishes (after all
+shots are written) -- so the final stored description reflects the file as of
+run completion. There is no formatting requirement: write as much free text as
+you like, over as many lines as you like.
+
+
+==============================================================================
+LEGACY SECTIONS -- used only by the older --mode grid/camera/dropper paths.
+Safe to ignore for bmotion.
+==============================================================================
+
+[camera_config]
+  --mode camera / --mode dropper and the camera hardware diagnostic only.
+  resolution is width,height -- comma-separated, no parentheses.
+
+[raspberry_pi]
+  Raspberry Pi trigger settings for --mode dropper. Edit before use.
+
+[position]
+  Programs the motor for --mode grid WITHOUT bmotion. Integers/floats, no
+  quotes. The example default is a single position at x=0 cm, y=0 cm; confirm a
+  target is safe for the installed probe and motor geometry before changing it.
+  Include nz/zmin/zmax for a 3D (xyz) scan; omit them for 2D (xy).
+      Example real XY scan:        Example 3D extension (add all three):
+        nx = 31                      nz = 11
+        ny = 41                      zmin = -5
+        xmin = -15                   zmax = 5
+        xmax = 15
+        ymin = -20
+        ymax = 20
+
+[motor_ips]
+  Direct motor-controller IPs for --mode grid and data-run-motion. Bare IPs.
+  Add a `z = ...` line for a 3D drive.
+
+  45-degree probe acquisition is NOT implemented on this branch. These lines
+  are kept only as a reference for the pre-refactor hardware PC workflow:
+      probe_list = P16,P22,P29,P34,P42
+      xstart = {"P16": -38, "P22": -18, "P29": -38, "P34": -38, "P42": -38}
+      xstop = {"P16": -38, "P22": 18, "P29": -38, "P34": -38, "P42": -38}

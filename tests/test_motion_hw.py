@@ -191,12 +191,7 @@ class DataRunMotionHardware(HardwareCheckBase):
         print(f"[data-run-motion] pausing {DATA_RUN_MOTION_PAUSE_S:.3f}s")
         time.sleep(DATA_RUN_MOTION_PAUSE_S)
         payload = fake_scope_payload(DATA_RUN_FAKE_SCOPE, DATA_RUN_FAKE_CHANNEL, DATA_RUN_FAKE_POINTS, shot_num)
-        hdf5_writer.write_shot_data(
-            self.output_path,
-            payload,
-            shot_num,
-            {(DATA_RUN_FAKE_SCOPE, DATA_RUN_FAKE_CHANNEL): "Fake delayed scope data; motors moved for this shot"},
-        )
+        hdf5_writer.write_shot_data(self.output_path, payload, shot_num)
 
     def _record_position(self, pos_manager, mc, shot_num: int) -> None:
         if pos_manager.nz is None:

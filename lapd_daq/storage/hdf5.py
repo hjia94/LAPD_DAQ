@@ -22,6 +22,13 @@ class HDF5RunWriter:
     def __init__(self, path: str | Path, config: RunConfig):
         self.path = Path(path)
         self.config = config
+        # Lowercased once so the per-trace lookup in write_scope_shot is a dict
+        # get instead of a linear scan; trace names come from the scope in
+        # uppercase while the config keys are lowercase.
+        self._channel_descriptions = {
+            key.lower(): value
+            for key, value in config.channel_descriptions.items()
+        }
 
     def initialize(self, scope_metadata: dict[str, dict[str, object]],
                    time_arrays: dict[str, np.ndarray],
@@ -88,7 +95,7 @@ class HDF5RunWriter:
                     data=np.void(trace.header),
                 )
                 data_ds.attrs["description"] = _channel_description(
-                    self.config.channel_descriptions,
+                    self._channel_descriptions,
                     scope_shot.scope_name,
                     trace.channel,
                 )
@@ -228,11 +235,17 @@ def _hdf5_attr(value):
 
 
 def _channel_description(descriptions: dict[str, str], scope_name: str, channel: str) -> str:
-    wanted = f"{scope_name}_{channel}".lower()
-    for key, value in descriptions.items():
-        if key.lower() == wanted:
-            return value
-    return f"Channel {channel} - No description available"
+    """Look up a channel's description; ``descriptions`` has pre-lowercased keys
+    (built once in HDF5RunWriter.__init__).
+
+    The fallback text mirrors ``acquisition.hdf5_writer.no_description_label``
+    (not importable from here: acquisition depends on this package, not the
+    reverse); keep the two in sync if the text ever changes.
+    """
+    return descriptions.get(
+        f"{scope_name}_{channel}".lower(),
+        f"Channel {channel} - No description available",
+    )
 
 
 RunWriter = HDF5RunWriter
