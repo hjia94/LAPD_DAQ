@@ -32,6 +32,19 @@ def assert_channel_datasets(tc, shot_group, channels, points=None):
                            f"{channel}_data length mismatch")
 
 
+def assert_channel_description_attrs(tc, h5, scope_name, expected):
+    """Assert the scope group carries the canonical ``<CH>_description`` attrs.
+
+    ``expected`` maps channel name -> description text. This is the coverage
+    the original case bug slipped through: nothing asserted the description
+    actually landed in the file.
+    """
+    scope_group = h5[scope_name]
+    for channel, text in expected.items():
+        tc.assertEqual(scope_group.attrs.get(f"{channel}_description"), text,
+                       f"{scope_name} attr {channel}_description mismatch")
+
+
 def assert_positions_array(tc, h5, expected_shot_count):
     """Assert Control/Positions/positions_array has the correct shot_num column."""
     positions = h5.get("Control/Positions/positions_array")
@@ -70,6 +83,12 @@ def assert_hdf5_scope_equivalent(tc, path_a, path_b, scope_name="lpscope"):
     import h5py
     with h5py.File(path_a, "r") as a, h5py.File(path_b, "r") as b:
         tc.assertEqual(sorted(a[scope_name].keys()), sorted(b[scope_name].keys()))
+        # Canonical channel descriptions are scope-group attrs (written once at
+        # init); both paths share the skeleton writer, so they must agree.
+        for attr in set(a[scope_name].attrs) | set(b[scope_name].attrs):
+            if attr.endswith("_description"):
+                tc.assertEqual(a[scope_name].attrs.get(attr),
+                               b[scope_name].attrs.get(attr), attr)
         for shot in a[scope_name]:
             if not shot.startswith("shot_"):
                 continue

@@ -5,8 +5,7 @@ time arrays, ``Control/Positions``) directly on the destination file before any
 shots, so this adapter is only responsible for the *per-shot* mapping:
 
 * **Acquire side** — turn this path's native ``all_data`` (and per-motion-group
-  positions) into a :class:`spooling.ShotPayload`, plus :func:`channel_descriptions`
-  for the slim run-info bundle.
+  positions) into a :class:`spooling.ShotPayload`.
 * **Offload side** — turn a :class:`spooling.ShotPayload` back into the existing
   :mod:`acquisition.hdf5_writer` shot write + the per-shot bmotion position row,
   filling the already-created HDF5 so the result matches the in-process writer.
@@ -73,18 +72,6 @@ def skipped_payload(shot_num, reason, coordinates=None):
     )
 
 
-def channel_descriptions(msa):
-    """Return the ``[channels]`` description map for the offload to label shots.
-
-    Keys are the ``ScopeName_C<n>`` config keys as ConfigParser returns them,
-    i.e. lowercased by its default ``optionxform``; the offload matches them
-    case-insensitively via :func:`hdf5_writer.resolve_channel_descriptions`.
-    This is the only per-channel attr the offload needs that is not already
-    written into the HDF5 by the acquire process.
-    """
-    return config_module.get_channel_descriptions(msa.config)
-
-
 # --------------------------------------------------------------------------- #
 # Offload side
 # --------------------------------------------------------------------------- #
@@ -101,11 +88,8 @@ def write_shot(hdf5_path, payload, meta):
         return
 
     all_data = _payload_to_all_data(payload)
-    descriptions = hdf5_writer.resolve_channel_descriptions(
-        all_data, meta.get("channel_descriptions", {}))
     with h5py.File(hdf5_path, "a", **hdf5_writer.SHOT_WRITE_OPEN_KWARGS) as f:
-        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num,
-                                          descriptions)
+        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num)
         _write_positions(f, payload, meta)
 
 

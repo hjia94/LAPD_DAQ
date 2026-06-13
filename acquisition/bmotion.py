@@ -794,15 +794,14 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                 execution_order=execution_order,
             )
 
-            # Slim run-info: the offload only needs which adapter to use, the
-            # exact file to fill (computed once by the caller), and the channel
-            # descriptions used to label each shot's datasets. Everything else is
-            # already written into the HDF5 above.
+            # Slim run-info: the offload only needs which adapter to use and the
+            # exact file to fill (computed once by the caller). Everything else
+            # -- including the per-channel descriptions, which live as scope-group
+            # attributes -- is already written into the HDF5 above.
             spool_format.write_run_metadata(spool_dir, {
                 "writer": spool_adapter.WRITER_TAG,
                 "hdf5_path": hdf5_path,
                 "config_scope_names": list(active_scopes.keys()),
-                "channel_descriptions": spool_adapter.channel_descriptions(msa),
                 "description_path": description_path,
                 "total_shots": total_shots,
             })

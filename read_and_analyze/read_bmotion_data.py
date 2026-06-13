@@ -32,8 +32,9 @@ from lab_scopes.io.hdf5 import (
     read_hdf5_scope_channel_shots,
     read_hdf5_scope_data,
     read_hdf5_scope_tarr,
-    read_scope_channel_descriptions,
 )
+
+from acquisition.hdf5_writer import channel_descriptions_from_attrs
 
 # User-changeable knobs live in analysis_config.py (single source of truth);
 # imported here under the historical names so the rest of the module is unchanged.
@@ -80,6 +81,37 @@ def _channel_names(scope_group, shot_num):
     if shot is None:
         return []
     return sorted(k[:-5] for k in shot.keys() if k.endswith("_data"))
+
+
+def read_channel_descriptions(f, scope_name):
+    """Return ``{channel: description}`` for a scope, handling both layouts.
+
+    New files (canonical): the acquire process writes one ``<CH>_description``
+    attribute per displayed channel on the scope group at init time. Old files:
+    the description was duplicated as a ``description`` attribute on every
+    shot's ``<CH>_data`` dataset, so fall back to the first shot that actually
+    holds data (a skipped shot is just a marker group with no ``*_data``).
+    Replaces ``lab_scopes.io.hdf5.read_scope_channel_descriptions``, which
+    hardcodes ``shot_1`` and silently returns nothing when that shot was
+    skipped. Old files can be upgraded in place to the new layout with
+    ``python -m read_and_analyze.fix_channel_descriptions``.
+    """
+    if scope_name not in f:
+        return {}
+    scope_group = f[scope_name]
+
+    descriptions = channel_descriptions_from_attrs(scope_group.attrs)
+    if descriptions:
+        return descriptions
+
+    for shot_num in _shot_numbers(scope_group):
+        shot = scope_group[f"shot_{shot_num}"]
+        for ch in _channel_names(scope_group, shot_num):
+            descriptions[ch] = shot[f"{ch}_data"].attrs.get(
+                "description", "No description available")
+        if descriptions:
+            break
+    return descriptions
 
 
 def _sample_shots(shot_nums, n=3):
@@ -454,7 +486,7 @@ def print_summary(path):
                 t = ta[()]
                 print(f"  time_array: {ta.shape[0]} samples, "
                       f"{t[0] * 1e3:.3f}..{t[-1] * 1e3:.3f} ms, dt={ (t[1]-t[0])*1e6:.4g} us")
-            for ch, d in read_scope_channel_descriptions(f, scope).items():
+            for ch, d in read_channel_descriptions(f, scope).items():
                 print(f"    {ch}: {d}")
 
         positions = read_positions(f)
@@ -513,7 +545,7 @@ def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=Non
                 print(f"Scope '{sc}': no plottable (non-skipped) shots")
                 continue
             use_channels = channels if channels else _channel_names(sg, use_shots[0])
-            descs = read_scope_channel_descriptions(f, sc)
+            descs = read_channel_descriptions(f, sc)
 
             fig, axes = plt.subplots(len(use_channels), 1, sharex=True,
                                      figsize=(10, 2.4 * len(use_channels)), squeeze=False)

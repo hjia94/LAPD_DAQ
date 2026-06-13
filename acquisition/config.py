@@ -119,7 +119,7 @@ def get_channel_descriptions(config):
     Keys come back as ConfigParser stores them, i.e. lowercased by its default
     ``optionxform``; consumers match them case-insensitively against the
     uppercase scope trace names (see
-    :func:`acquisition.hdf5_writer.resolve_channel_descriptions`).
+    :func:`acquisition.hdf5_writer.scope_channel_descriptions`).
     """
     if not config.has_section('channels'):
         return {}

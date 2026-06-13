@@ -273,13 +273,24 @@ class MultiScopeAcquisition:
             scope_names=self.scope_ips.keys(),
         )
 
-    def _save_scope_metadata(self, scope_name):
+    def _save_scope_metadata(self, scope_name, traces):
+        """Write the scope group's attrs, including the per-channel descriptions.
+
+        ``traces`` is the displayed-trace tuple captured at init. The channel
+        descriptions are resolved from the config here, once, and written as
+        ``<trace>_description`` scope-group attributes -- the canonical on-disk
+        location -- so neither the spool metadata nor the offload ever has to
+        carry them.
+        """
         hdf5_writer.write_scope_metadata(
             self.save_path,
             scope_name=scope_name,
             description=self.get_scope_description(scope_name),
             ip_address=self.scope_ips[scope_name],
             scope_type=self.scopes[scope_name].idn_string,
+            channel_descriptions=hdf5_writer.scope_channel_descriptions(
+                config_module.get_channel_descriptions(self.config),
+                scope_name, traces),
         )
 
     def save_time_arrays(self, scope_name, time_array, is_sequence):
@@ -293,9 +304,7 @@ class MultiScopeAcquisition:
         ``overwrite`` replaces an existing shot group instead of raising; left
         in as a general capability (no caller sets it on this branch).
         """
-        descriptions = hdf5_writer.resolve_channel_descriptions(
-            all_data, config_module.get_channel_descriptions(self.config))
-        hdf5_writer.write_shot_data(self.save_path, all_data, shot_num, descriptions,
+        hdf5_writer.write_shot_data(self.save_path, all_data, shot_num,
                                     overwrite=overwrite)
 
     # -- scope lifecycle -----------------------------------------------------
@@ -325,7 +334,7 @@ class MultiScopeAcquisition:
                 if is_sequence is not None and time_array is not None:
                     self._displayed_traces[name] = traces
                     self.save_time_arrays(name, time_array, is_sequence)
-                    self._save_scope_metadata(name)
+                    self._save_scope_metadata(name, traces)
                     self.warn_missing_channel_descriptions(name, traces)
 
                     active_scopes[name] = is_sequence
@@ -733,7 +742,6 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                 "writer": grid_spool_adapter.WRITER_TAG,
                 "hdf5_path": hdf5_path,
                 "config_scope_names": list(active_scopes.keys()),
-                "channel_descriptions": grid_spool_adapter.channel_descriptions(msa),
                 "description_path": description_path,
                 "nz": pos_manager.nz if pos_manager is not None else None,
             })
