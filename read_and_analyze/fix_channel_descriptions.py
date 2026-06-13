@@ -8,8 +8,9 @@ writes the canonical ``<CH>_description`` attributes onto each scope group --
 the same layout new acquisitions write at scope init -- so any reader (e.g.
 ``read_bmotion_data.py``) finds the descriptions without touching per-shot data.
 
-Usage:
-    python -m read_and_analyze.fix_channel_descriptions <file.hdf5> [--force]
+Usage (a single file, or every ``*.hdf5`` in a folder):
+    python -m read_and_analyze.fix_channel_descriptions <file_or_folder> [--force]
+    python -m read_and_analyze.fix_channel_descriptions <folder> --recursive
 
 Idempotent: scope groups that already have ``<CH>_description`` attributes are
 left alone unless ``--force`` rewrites them from the stored config.
@@ -18,6 +19,7 @@ left alone unless ``--force`` rewrites them from the stored config.
 import argparse
 import configparser
 import sys
+from pathlib import Path
 
 import h5py
 
@@ -87,28 +89,69 @@ def fix_file(path, force=False):
     return written
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Retrofit <CH>_description scope-group attributes onto an "
-                    "old run HDF5 file, from its stored experiment config.")
-    parser.add_argument("path", help="HDF5 file to fix in place")
-    parser.add_argument("--force", action="store_true",
-                        help="rewrite attributes even if already present")
-    args = parser.parse_args(argv)
+def find_hdf5_files(folder, recursive=False):
+    """List ``*.hdf5`` files in ``folder`` (matching either case), sorted.
 
-    written = fix_file(args.path, force=args.force)
+    ``Path.glob``/``rglob`` only yield files for a ``*.ext`` pattern, so the
+    result never contains directories.
+    """
+    folder = Path(folder)
+    walk = folder.rglob if recursive else folder.glob
+    return sorted({p for ext in ("*.hdf5", "*.HDF5") for p in walk(ext)})
+
+
+def _print_file_result(path, written):
+    """Print the per-scope summary for one file's :func:`fix_file` result."""
+    print(path)
+    if isinstance(written, Exception):
+        print(f"  ERROR: {written}")
+        return
     if not written:
-        print("No scope groups found (nothing to fix).")
-        return 1
+        print("  No scope groups found (nothing to fix).")
+        return
     for scope_name, resolved in written.items():
         if not resolved:
-            print(f"{scope_name}: descriptions already present, skipped "
+            print(f"  {scope_name}: descriptions already present, skipped "
                   "(use --force to rewrite)")
             continue
-        print(f"{scope_name}:")
+        print(f"  {scope_name}:")
         for channel, text in resolved.items():
-            print(f"  {channel}_description = {text}")
-    return 0
+            print(f"    {channel}_description = {text}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Retrofit <CH>_description scope-group attributes onto old "
+                    "run HDF5 file(s), from their stored experiment config. "
+                    "Accepts a single .hdf5 file or a folder of them.")
+    parser.add_argument("path", help="HDF5 file, or folder of *.hdf5 files, to fix in place")
+    parser.add_argument("--force", action="store_true",
+                        help="rewrite attributes even if already present")
+    parser.add_argument("--recursive", "-r", action="store_true",
+                        help="when path is a folder, also descend into subfolders")
+    args = parser.parse_args(argv)
+
+    path = Path(args.path)
+    if path.is_dir():
+        files = find_hdf5_files(path, recursive=args.recursive)
+        if not files:
+            print(f"No *.hdf5 files found in {path}.")
+            return 1
+    else:
+        files = [path]
+
+    failed = 0
+    for f in files:
+        try:
+            written = fix_file(str(f), force=args.force)
+        except Exception as exc:  # one bad file must not abort the batch
+            written = exc
+            failed += 1
+        _print_file_result(f, written)
+
+    if len(files) > 1:
+        print(f"\nProcessed {len(files)} file(s), {failed} failed.")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
