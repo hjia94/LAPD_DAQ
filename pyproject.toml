@@ -20,13 +20,23 @@ scope = [
     # lab_scopes is fetched from GitHub so `pip install ".[scope]"` works on any
     # machine (test PCs, fresh checkouts) with no extra steps.
     #
+    # Pinned to v0.3.2 — the first release that fixes BOTH silent channel
+    # data-loss bugs in the LeCroy driver:
+    #   - v0.3.1 fixed C1 data-loss on 4-channel scopes (stale latched CMR
+    #     dropped C1 during trace discovery).
+    #   - v0.3.2 fixed the mirror-image C5-C8 data-loss on 8-channel scopes by
+    #     reading channel count from VBS app.Acquisition.Channels instead of the
+    #     unreliable IDN/CMR probe.
+    # Earlier releases silently acquired no data on the affected channels, so do
+    # NOT loosen this pin below v0.3.2.
+    #
     # Dev override: to co-develop against a local checkout instead, run
     #     pip install -e ../lab_scopes
     # AFTER installing this extra. That converts lab_scopes to an editable
     # install pointing at your local source. Note that re-running
     # `pip install ".[scope]"` will re-fetch from git and replace the editable
     # copy, so re-apply the editable install when needed.
-    "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git",
+    "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git@v0.3.2",
     "pyvisa",
     "pyvisa-py",   # pure-Python VISA backend for the legacy PyVISA path
 ]

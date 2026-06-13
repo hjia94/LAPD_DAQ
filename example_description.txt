@@ -8,7 +8,7 @@ below. The active defaults are intentionally small so the hardware diagnostics
 can run without starting a full scan.
 
 On the DAQ PC, force-reinstall the matching lab_scopes release into the venv:
-  pip install --force-reinstall --no-deps "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git@v0.3.0"
+  pip install --force-reinstall --no-deps "lab_scopes @ git+https://github.com/hjia94/lab_scopes.git@v0.3.2"
 
 
 FORMATTING RULES
