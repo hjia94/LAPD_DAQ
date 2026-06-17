@@ -18,16 +18,10 @@ from scipy.optimize import minimize
 # TODO: fix calculate_velocity to read from cm_per_turn directly
 #############################################################################################
 #############################################################################################
-"""
-Class Motor_Control_2D: controls 2D probe drive with 2-motors (x,y) using Motor_Control_1D
-
-functions: wait_for_motion_complete, test_limit, probe_to_motor, calculate_velocity, set_movement_velocity
-properties: motor_velocity, motor_positions, stop_now, reset_motor, set_zero, enable, disable
-"""
 class Motor_Control_2D:
+	"""Controls a 2-motor (x, y) probe drive built on Motor_Control_1D."""
 
 	def __init__(self, x_ip_addr = None, y_ip_addr = None, **kwargs):
-		# Get verbose setting from kwargs, default to False
 		verbose = kwargs.get('verbose', False)
 		
 		self.x_mc = Motor_Control(verbose=True, server_ip_addr= x_ip_addr, name='x', cm_per_turn = 0.254, stop_switch_mode=2)
@@ -35,16 +29,13 @@ class Motor_Control_2D:
 		# Velmex model number NN10-0300-E01-21 (short black linear drives)
 		
 		self.probe_in = 58.771 # Distance from chamber wall to chamber center
-		self.poi = 120.5 # Length of probe outside the chamber from pivot to end (needs to be re-measured everytime new probe is installed)
+		self.poi = 120.5 # Probe length outside chamber, pivot to end (re-measure per probe)
 		self.ph = 20 # Height from probe shaft to center of rotating bar
-		
-		# Initialize boundary checker with the same verbose setting
+
 		self.boundary_checker = BoundaryChecker(verbose=verbose)
 
 	#-------------------------------------------------------------------------------------------
-	"""
-	Set and get the target velocity of motor in units of rev/sec
-	"""
+	# Target motor velocity, units of rev/sec
 	@property
 	def motor_velocity(self):
 		return self.x_mc.motor_speed, self.y_mc.motor_speed
@@ -56,26 +47,16 @@ class Motor_Control_2D:
 		self.y_mc.motor_speed = yv
 
 	#-------------------------------------------------------------------------------------------
-	"""
-	Set motor velocity according to its current position and target position
-	"""
 	def set_movement_velocity(self, motor_x, motor_y):
+		"""Set per-motor velocity so the probe moves on a straight line to target."""
 		x_m, y_m = self.motor_positions
-
-		# distance between current motor position to final motor position
 		delta_x = abs(motor_x - x_m)
 		delta_y = abs(motor_y - y_m)
-
-		# calculate velocity such that probe moves on a straight line
 		v_motor_x, v_motor_y = self.calculate_velocity(delta_x, delta_y)
-
-		# Set motor velocity accordingly
 		self.motor_velocity = v_motor_x, v_motor_y
 
-	"""
-	Convert probe velocity vector to motor velocity vector
-	"""
 	def calculate_velocity(self, del_x, del_y):
+		"""Convert a probe velocity vector to a motor velocity vector."""
 		default_speed = 5.0
 
 		del_r = math.sqrt(del_x**2 + del_y**2)
@@ -94,9 +75,7 @@ class Motor_Control_2D:
 		return v_motor_x, v_motor_y
 
 	#--------------------------------------------------------------------------------------------------
-	"""
-	Set and get current motor position
-	"""
+	# Current motor position (get/set); setter waits for motion to complete
 	@property
 	def motor_positions(self):
 		return self.x_mc.motor_position, self.y_mc.motor_position
@@ -110,17 +89,15 @@ class Motor_Control_2D:
 		self.wait_for_motion_complete()
 			
 	#-------------------------------------------------------------------------------------------
-	"""
-	Execute after move command send to motor. Wait till motor stops moving.
-	"""
 	def wait_for_motion_complete(self):
+		"""Block until both motors stop moving (or a 5-min timeout)."""
 		timeout = time.time() + 300
 
 		while True:
 			try:
 				x_stat = self.x_mc.motor_status
 				y_stat = self.y_mc.motor_status
-				
+
 				x_not_moving = x_stat.find('M') == -1
 				y_not_moving = y_stat.find('M') == -1
 
@@ -161,25 +138,21 @@ class Motor_Control_2D:
 		return x_al, y_al
 
 	#-------------------------------------------------------------------------------------------
-	"""
-	Convert probe space dimensions to motor movement in unit of cm 
-	"""
 	def probe_to_motor_LAPD(self, x, y):
+		"""Convert probe-space position (cm) to motor movement (cm)."""
 		x = self.probe_in - x
-		
+
 		D = math.sqrt(x**2 + y**2)
 		d2 = self.ph/math.sqrt((y/x)**2+1)
 		Ltc = y/x * d2
-		
+
 		motor_x = D - self.probe_in
 		motor_y = self.ph - d2 - (self.poi + Ltc)*y/x
-		
+
 		return motor_x, motor_y
 
-	"""
-	Convert encoder feedback from motor to actual probe position using scipy.minimize
-	"""
 	def motor_to_probe(self, motor_x, motor_y):
+		"""Recover probe position from motor encoder feedback via scipy.minimize."""
 		def distance_fun(r1, r2):
 			a = numpy.array(r1)
 			b = numpy.array(r2)
@@ -244,18 +217,11 @@ class Motor_Control_2D:
 #############################################################################################
 #############################################################################################
 
-"""
-Class Motor_Control_3D: controls 3D probe drive with 3-motors (x,y,z) using Motor_Control_1D
-
-functions: wait_for_motion_complete, test_limit, probe_to_motor, calculate_velocity, set_movement_velocity
-properties: motor_velocity, motor_positions, stop_now, reset_motor, set_zero, enable, disable
-"""
 class Motor_Control_3D:
+	"""Controls a 3-motor (x, y, z) probe drive built on Motor_Control_1D."""
 	def __init__(self, *args, **kwargs):
-		# Get verbose setting from kwargs, default to False
 		verbose = kwargs.get('verbose', False)
-		
-		# Initialize motors with the same verbose setting
+
 		self.x_mc = Motor_Control(verbose=verbose, server_ip_addr=args[0], name='x', cm_per_turn=0.254, stop_switch_mode=1)
 		self.y_mc = Motor_Control(verbose=verbose, server_ip_addr=args[1], name='y', cm_per_turn=0.254, stop_switch_mode=1)
 		self.z_mc = Motor_Control(verbose=verbose, server_ip_addr=args[2], name='z', cm_per_turn=0.254, stop_switch_mode=1)
@@ -266,16 +232,13 @@ class Motor_Control_3D:
 		self.ph = 30 # Height from probe shaft to center of rotating bar
 
 		self.motor_velocity = 4, 4, 4
-		
-		# Initialize boundary checker with the same verbose setting
+
 		self.boundary_checker = BoundaryChecker(verbose=verbose)
-		
+
 		self._current_pos = None
 
 	#-------------------------------------------------------------------------------------------
-	"""
-	Set and get the target velocity of motor in units of rev/sec
-	"""
+	# Target motor velocity, units of rev/sec
 	@property
 	def motor_velocity(self):
 		return self.x_mc.motor_speed, self.y_mc.motor_speed, self.z_mc.motor_speed
@@ -288,43 +251,34 @@ class Motor_Control_3D:
 		self.z_mc.motor_speed = zv
 
 	#-------------------------------------------------------------------------------------------
-	"""
-	Set motor velocity according to its current position and target position
-	"""
 	def set_movement_velocity(self, mpos_current, mpos_target):
+		"""Scale per-motor velocity so the longest-travel axis runs at max speed."""
 		x_m, y_m, z_m = mpos_current
 		motor_x, motor_y, motor_z = mpos_target
 
-		# Calculate distances to move
 		delta_x = abs(motor_x - x_m)
 		delta_y = abs(motor_y - y_m)
 		delta_z = abs(motor_z - z_m)
 
-		# Find the largest distance to determine which motor should run at max speed
 		max_delta = max(delta_x, delta_y, delta_z)
-		default_speed = 2.0  # Maximum speed in rev/sec
-		
+		default_speed = 2.0  # Max speed in rev/sec
+
 		if max_delta == 0:
 			self.motor_velocity = 0.0, 0.0, 0.0
 			return
-			
-		# Calculate velocities - the motor with largest distance will run at max speed
+
 		v_x = default_speed * delta_x / max_delta
 		v_y = default_speed * delta_y / max_delta
 		v_z = default_speed * delta_z / max_delta
 
-		# Round to 3 decimal places to avoid floating point issues
 		v_motor_x = round(v_x, 3)
 		v_motor_y = round(v_y, 3)
 		v_motor_z = round(v_z, 3)
 
-		# Set motor velocity accordingly
 		self.motor_velocity = v_motor_x, v_motor_y, v_motor_z
 
 	#--------------------------------------------------------------------------------------------------
-	"""
-	Set and get current motor position
-	"""
+	# Current motor position (get/set); setter waits for motion to complete
 	@property
 	def motor_positions(self):
 		self._current_pos = self.x_mc.motor_position, self.y_mc.motor_position, self.z_mc.motor_position
@@ -340,10 +294,8 @@ class Motor_Control_3D:
 		self.wait_for_motion_complete()
 			
 	#-------------------------------------------------------------------------------------------
-	"""
-	Execute after move command send to motor. Wait till motor stops moving.
-	"""
 	def wait_for_motion_complete(self):
+		"""Block until all motors stop moving (or a 5-min timeout)."""
 		timeout = time.time() + 300
 
 		while True:
@@ -412,26 +364,22 @@ class Motor_Control_3D:
 		return x_al, y_al, z_al
 
 	#-------------------------------------------------------------------------------------------
-	"""
-	Convert probe space dimensions to motor movement in unit of cm 
-	"""
 	def probe_to_motor_LAPD(self, x, y, z):
+		"""Convert probe-space position (cm) to motor movement (cm)."""
 		x = self.probe_in - x
-		
+
 		D = math.sqrt(x**2 + y**2 + z**2)
 		d2 = self.ph/math.sqrt((y/x)**2+1)
 		Ltc = y/x * d2
-		
+
 		motor_x = D - self.probe_in
 		motor_y = -self.ph + d2 + (self.poi + Ltc)*y/x
 		motor_z = z/x * (self.poi+ Ltc)
-		
+
 		return motor_x, motor_y, motor_z
 
-	"""
-	Convert encoder feedback from motor to actual probe position using scipy.minimize
-	"""
 	def motor_to_probe(self, motor_x, motor_y, motor_z):
+		"""Recover probe position from motor encoder feedback via scipy.minimize."""
 		def distance_fun(r1, r2):
 			a = numpy.array(r1)
 			b = numpy.array(r2)

@@ -46,7 +46,7 @@ class scope_data:
 	def __init__(self, ip_addr, save_raw=False):
 
 		self.save_raw = save_raw
-		self.ip_addr = ip_addr    # Default motor resolution is 36000 steps/rev
+		self.ip_addr = ip_addr
 		print('Scope class at', self.ip_addr)
 
 

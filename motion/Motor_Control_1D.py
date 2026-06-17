@@ -23,32 +23,18 @@ import select
 import time
 import logging
 
-#steps_per_turn = 20000
-#encoder_step = 4000
-
 # TODO: 'DL2' should be sent to motor when limit switch is connected properly
 #       Add boolean in init to choose when stop switch is connected or not
 
 #===============================================================================================================================================
 #===============================================================================================================================================
 
-"""
-Motor control class that connects to motor through Socket.
-Functions: send_text, cm_to_steps, steps_to_cm, set_acceleration, set_decceleration, inhibit
-            stop_now
-Properties: steps_per_rev, motor_status, motor_speed, instant_velocity, motor_position
-            set_zero, check_alarm, clear_alarm, reset_motor, enable, disable
-"""
-
 class Motor_Control:
+    """Talks to a single Applied Motion drive over a TCP socket."""
 
     MSIPA_CACHE_FN = 'motor_server_ip_address_cache.tmp'
     MOTOR_SERVER_PORT = 7776
     BUF_SIZE = 1024
-    # server_ip_addr = '10.10.10.10' # for direct ethernet connection to PC
-
-    # - - - - - - - - - - - - - - - - -
-    # To search IP address:
 
     def __init__(self, server_ip_addr = None, cm_per_turn = 0.254, stop_switch_mode=3, msipa_cache_fn = None, verbose = False, name='not named'):
 
@@ -66,8 +52,7 @@ class Motor_Control:
             self.server_ip_addr = server_ip_addr
         else:
             try:
-                # later: save the successfully determined motor server IP address in a file on disk
-                # now: read the previously saved file as a first guess for the motor server IP address:
+                # Read the previously saved IP as a first guess for the server address
                 self.server_ip_addr = None
                 with open(self.msipa_cache_fn, 'r') as f:
                     self.server_ip_addr = f.readline()
@@ -156,8 +141,10 @@ class Motor_Control:
 ########################################################################################################
 
     def send_text(self, text, timeout:int=None, receive=True) -> str:
-        """worker for below - opens a connection to send commands to the motor control server, closes when done"""
-        """ note: timeout is not working - needs some MS specific iocontrol stuff (I think) """
+        """Open a socket, send a command to the motor server, return its reply.
+
+        Note: timeout is currently ignored (needs MS-specific iocontrol).
+        """
         RETRIES = 30
         retry_count = 0
         while retry_count < RETRIES:  # Retries added 17-07-11
@@ -206,12 +193,8 @@ class Motor_Control:
 
 
 ########################################################################################################
-    """
-    Encoder and motor resolution settings (steps/rev)
-
-    """
     def steps_per_rev(self):
-    
+        """Return encoder/motor resolution (steps/rev), reconciling the two if they differ."""
         resp = self.send_text('ER') # Encoder resolution
         enco_step = int(resp[5:])
 
@@ -248,20 +231,9 @@ class Motor_Control:
 
     @property
     def motor_status(self):
-        # print("""
-        # 	# A = An Alarm code is present (use AL command to see code, AR command to clear code)
-        # 	# D = Disabled (the drive is disabled)
-        # 	# E = Drive Fault (drive must be reset by AR command to clear this fault)
-        # 	# F = Motor moving
-        # 	# H = Homing (SH in progress)
-        # 	# J = Jogging (CJ in progress)
-        # 	# M = Motion in progress (Feed & Jog Commands)
-        # 	# P = In position
-        # 	# R = Ready (Drive is enabled and ready)
-        # 	# S = Stopping a motion (ST or SK command executing)
-        # 	# T = Wait Time (WT command executing)
-        # 	# W = Wait Input (WI command executing)
-        # 	""")
+        """Return the drive status string (RS). Letters: A=alarm, D=disabled,
+        E=drive fault, F=motor moving, H=homing, J=jogging, M=motion in progress,
+        P=in position, R=ready, S=stopping, T=wait time, W=wait input."""
         return self.send_text('RS')
 
 #-------------------------------------------------------------------------------------------
@@ -275,9 +247,7 @@ class Motor_Control:
         return step / self.__stepsPerRev * self.cm_per_turn
 
 #-------------------------------------------------------------------------------------------
-    """
-    Get and set motor velocity in units of rev/sec
-    """
+    # Get/set motor velocity in rev/sec
     @property
     def motor_speed(self):
 
@@ -299,16 +269,11 @@ class Motor_Control:
         return rps
 
 #-------------------------------------------------------------------------------------------
-    """
-    Get and set motor position in cm
-    """
-
+    # Get/set motor position in cm
     @property
     def motor_position(self):
-        '''Return current motor position in cm. Note that encoder resolution is different from steps_per_turn.
-            set_motor position: Call to move motor with input in cm, convert to steps and send to motor
-        '''
-        
+        '''Return current motor position in cm (cross-checks encoder vs internal position).'''
+
         RETRIES = 100
         retry_count = 0
 

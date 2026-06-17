@@ -8,19 +8,17 @@ HDF5 position data storage, and position-related metadata.
 TODO: boundary checking functions
 """
 
-import numpy as np
-import h5py
 import os
 import sys
 import json
 import socket
-import sys
 import time
+import configparser
+
 import numpy as np
 import h5py
 from .Motor_Control import Motor_Control_2D, Motor_Control_3D
 from .Motor_Control_1D import Motor_Control
-import configparser
 
 # ============================================================================
 # CONFIGURATION FUNCTIONS
@@ -43,34 +41,29 @@ def load_position_config(config_path):
     pos_config = {}
     for key, value in config.items('position'):
         try:
-            # Skip empty or None values
             if value is None or value.strip() == '':
                 continue
             if ',' in value and not value.startswith('{'):
-                # Handle comma-separated tuples (e.g., x_limits = -40,200)
+                # Comma-separated tuple, e.g. x_limits = -40,200
                 pos_config[key] = tuple(float(x) if '.' in x else int(x) for x in value.split(','))
             elif value.lower() == 'none' or value == 'None':
                 pos_config[key] = None
             elif value.startswith('{') and value.endswith('}'):
-                # Handle JSON-like dictionaries (e.g., xstart = {"P16": -38, "P22": -18})
+                # JSON dict, e.g. xstart = {"P16": -38, "P22": -18}
                 pos_config[key] = json.loads(value)
             elif '.' in value:
                 pos_config[key] = float(value)
             else:
                 pos_config[key] = int(value)
         except Exception:
-            # Handle string values like probe_list = P16,P22,P29,P34,P42
+            # String values, e.g. probe_list = P16,P22,P29,P34,P42
             if ',' in value:
                 pos_config[key] = [item.strip() for item in value.split(',')]
             else:
                 pos_config[key] = value
-    
 
-    if 'probe_list' in pos_config:     # Determine if this is a 45-degree acquisition based on config parameters
-        is_45deg = True
-    else:
-        is_45deg = False
-    
+    # probe_list is only present for 45-degree acquisitions
+    is_45deg = 'probe_list' in pos_config
     return pos_config, is_45deg
 
 # ============================================================================
@@ -245,37 +238,33 @@ def create_all_positions_45deg(pr_ls, xstart, xstop, nx, nshots):
 # ============================================================================
 
 def outer_boundary(x, y, z, config):
-    """Return True if position is within allowed range using config dict."""
+    """Return True if (x, y, z) is within the probe limits (x/y/z_limits)."""
     x_limits = config['x_limits']
     y_limits = config['y_limits']
     z_limits = config['z_limits']
-    return (x_limits[0] <= x <= x_limits[1] and 
-            y_limits[0] <= y <= y_limits[1] and 
+    return (x_limits[0] <= x <= x_limits[1] and
+            y_limits[0] <= y <= y_limits[1] and
             z_limits[0] <= z <= z_limits[1])
 
 def obstacle_boundary(x, y, z, config):
-    """Return True if position is NOT in obstacle using config dict."""
-    # Check large box obstacle (30x6x11 cm box from x=-50 to -20)
-    buffer = 0.2  # Small buffer to ensure paths don't get too close
-    # You may want to make these obstacle parameters configurable as well
-    in_obstacle = ( -60 <= x <= -17 and 
-                    -2.5 <= y <= 5 and 
+    """Return True if (x, y, z) is clear of the hard-coded box obstacle."""
+    in_obstacle = ( -60 <= x <= -17 and
+                    -2.5 <= y <= 5 and
                     -6.5 <= z <= 9)
-    
     return not in_obstacle
 
 def motor_boundary(x, y, z, config):
-    """Return True if position is within allowed range using config dict."""
+    """Return True if (x, y, z) is within the motor limits (xm/ym/zm_limits)."""
     xm_limits = config['xm_limits']
     ym_limits = config['ym_limits']
     zm_limits = config['zm_limits']
-    in_outer_boundary = (xm_limits[0] <= x <= xm_limits[1] and 
-                        ym_limits[0] <= y <= ym_limits[1] and 
+    in_outer_boundary = (xm_limits[0] <= x <= xm_limits[1] and
+                        ym_limits[0] <= y <= ym_limits[1] and
                         zm_limits[0] <= z <= zm_limits[1])
     return in_outer_boundary
 
 def motor_boundary_2D(x, y, z, config):
-    """Return True if position is within allowed range using config dict."""
+    """Return True if (x, y) is within the motor limits (z unconstrained)."""
     xm_limits = config['xm_limits']
     ym_limits = config['ym_limits']
     in_outer_boundary = (xm_limits[0] <= x <= xm_limits[1] and 
@@ -305,19 +294,15 @@ class PositionManager:
         self.num_duplicate_shots = num_duplicate_shots
         self.num_run_repeats = num_run_repeats
         
-        # Load position config and automatically determine is_45deg
         self.pos_config, self.is_45deg = load_position_config(config_path)
-        
-        # Load full config to extract motor IPs
-        import configparser
+
+        # Full config is kept around for the motor IPs
         self.full_config = configparser.ConfigParser()
         self.full_config.read(config_path)
-        
-        # Extract only the necessary position parameters we need throughout the class
+
+        # nz drives the 2D-vs-3D branch throughout the class; normalize 'None' to None
         if self.pos_config:
-            # Handle 'nz' parameter - check if it's None or not in config
             nz_value = self.pos_config.get('nz', None)
-            # Ensure None or string 'None' is converted to Python None
             self.nz = None if (nz_value is None or nz_value == 'None') else nz_value
         else:
             self.nz = None
@@ -442,13 +427,12 @@ class PositionManager:
                     pos_arr[shot_num-1] = (shot_num, positions['x'], positions['y'], positions['z'])
 
     # ============================================================================
-        # MOTOR CONTROL FUNCTIONS
+    # MOTOR CONTROL FUNCTIONS
     # ============================================================================
     def initialize_motor(self):
         """Initialize motor control based on config dict."""
-        # Use the already processed self.nz value
         nz = self.nz
-        
+
         # Get motor IPs directly from the full config
         if 'motor_ips' not in self.full_config:
             print("\nError: No [motor_ips] section found in the configuration file")
@@ -485,8 +469,6 @@ class PositionManager:
                 mc = Motor_Control_2D(x_ip, y_ip)
                 print(f"  - Connected to X motor at {x_ip}")
                 print(f"  - Connected to Y motor at {y_ip}")
-
-                # mc.boundary_checker.add_motor_boundary(lambda x, y, z: motor_boundary_2D(x, y, z, self.config))
             else:
                 print("XYZ drive in use")
                 # Ensure we have the required IPs for x, y, and z motors
@@ -503,10 +485,6 @@ class PositionManager:
                 print(f"  - Connected to X motor at {x_ip}")
                 print(f"  - Connected to Y motor at {y_ip}")
                 print(f"  - Connected to Z motor at {z_ip}")
-
-                # mc.boundary_checker.add_probe_boundary(lambda x, y, z: outer_boundary(x, y, z, config), is_outer_boundary=True)
-                # mc.boundary_checker.add_probe_boundary(lambda x, y, z: obstacle_boundary(x, y, z, config))
-                # mc.boundary_checker.add_motor_boundary(lambda x, y, z: motor_boundary(x, y, z, config))
         except KeyboardInterrupt:
             raise KeyboardInterrupt
         except ConnectionRefusedError as e:

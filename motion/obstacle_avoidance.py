@@ -46,19 +46,16 @@ class BoundaryChecker:
         self.motor_boundaries.append(boundary_func)
 
     def is_position_valid(self, probe_pos, motor_pos=None):
-        """Check if position is valid in both spaces"""
+        """Check if position is valid in probe space (and motor space if given)."""
         x, y, z = probe_pos
-        
-        # First check if position is within valid workspace
+
         if self.outer_boundary and not self.outer_boundary(x, y, z):
             return False
-                
-        # Then check if position is in any obstacle
+
         for obstacle in self.obstacle_boundaries:
             if not obstacle(x, y, z):
                 return False
-                
-        # Check motor space boundaries if motor_pos is provided
+
         if motor_pos is not None:
             mx, my, mz = motor_pos
             for boundary in self.motor_boundaries:

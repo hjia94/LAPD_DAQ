@@ -78,19 +78,14 @@ class TriggerClient:
         for attempt in range(retries):
             s = None
             try:
-                # Create socket
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(5)
-                
-                # Connect
                 s.connect((self.host, self.port))
-                
-                # Send command
+
                 message = f"{command}\n"
                 s.send(message.encode('ascii'))
-                
+
                 if receive:
-                    # Wait for response with select
                     readable, _, _ = select.select([s], [], [], 5.0)
                     if readable:
                         data = s.recv(self.BUF_SIZE)
@@ -167,15 +162,12 @@ class TriggerClient:
         
         for i in range(iterations):
             try:
-                # Send trigger
                 self.send_trigger()
-                
-                # Wait for trigger response
+
                 if not self.wait_for_trigger(timeout=timeout):
                     print(f"\nFailed to receive trigger {i+1}")
                     continue
-                    
-                # Run custom operation if provided
+
                 if operation_func:
                     operation_func(i)
                     
@@ -373,7 +365,7 @@ class TungstenDropper:
         """Destructor - no special processing"""
         pass
 
-def test_dropper(num_drops=10, max_balls=700, timeout=15):  # Fixed: removed 'self' parameter
+def test_dropper(num_drops=10, max_balls=700, timeout=15):
     try:
         print(f"Initializing TungstenDropper...")
         dropper = TungstenDropper(motor_ip=MOTOR_IP, timeout=timeout)
@@ -416,28 +408,24 @@ def test():
     Useful for testing the GPIO trigger system end-to-end.
     """
     
-    # Example custom operation function
     def custom_operation(iteration):
-        """Example operation between triggers - simulates work being done"""
-        time.sleep(0.05)  # Simulate some processing work
-        
-    # Initialize client with configured server settings
+        """Stand-in for real work done between triggers."""
+        time.sleep(0.05)
+
     client = TriggerClient(PI_HOST, PI_PORT)
-    
+
     try:
-        # Test connection to Pi server
         print(f"Connecting to GPIO trigger server at {PI_HOST}:{PI_PORT}")
-        client.get_status()  # Will raise error if server not ready
+        client.get_status()  # Raises if server not ready
         print("✓ Server connection established")
-        
-        # Run trigger loop test with custom operation
+
         print("\nStarting trigger loop test...")
         print("Press Ctrl+C to stop early")
         completed = client.trigger_loop(
             operation_func=custom_operation,
-            iterations=1000,      # Run 1000 trigger cycles
-            delay=0.1,           # 100ms delay between cycles
-            timeout=120          # 2 minute timeout per trigger
+            iterations=1000,
+            delay=0.1,
+            timeout=120,
         )
         print(f"\nTest completed: {completed} iterations successful")
         

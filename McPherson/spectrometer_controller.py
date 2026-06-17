@@ -64,29 +64,25 @@ class spectrometer:
 			print('Initialized Scan Controller "',self.id,'"',sep='')
 
 	def __repr__(self):
-		""" return a printable version: not a useful function """
 		return self.id.decode()
 
 	def __str__(self):
-		""" return a string representation: as useless as __repr__() """
 		return self.__repr__()
 
 	def __bool__(self):
-		""" boolean test if valid - assumes valid if the serial port reports is_open """
+		"""Valid if the serial port is open."""
 		if type(self.sp) != type(None):
 			return self.sp.is_open()
 		return False
 
 	def __enter__(self):
-		""" no special processing after __init__() """
 		return self
 
 	def __exit__(self, exc_type, exc_value, traceback):
-		""" same as __del__() """
 		self.__del__()
 
 	def __del__(self):
-		""" close up """
+		"""Close the serial port."""
 		if type(self.sp) != type(None):
 			self.sp.close()       # close serial port
 			self.sp = None

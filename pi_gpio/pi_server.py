@@ -58,31 +58,26 @@ class TriggerServer:
         self.trig_out_gpio_num = trig_out_gpio_num
         self.trig_in_gpio_num  = trig_in_gpio_num
         self.running = True
-        
-        # Check if GPIO library exists
+
         gpio_lib_path = "./gpio_detect.so" #  WAS "/home/generalpi/pi_gpio/gpio_detect.so"
         if not os.path.exists(gpio_lib_path):
             raise FileNotFoundError(f'compiled "gpio_detect.c" library not found at {gpio_lib_path}')
-            
+
         try:
-            # Load the GPIO C library
             self.gpio_lib = ctypes.CDLL(gpio_lib_path)
         except OSError as e:
             raise RuntimeError(f'Failed to load compiled "gpio_detect.c" library: {str(e)}')
-            
+
         self._setup_gpio_functions()
-        
-        # Initialize GPIO
+
         if self.gpio_lib.initialize_pigpio() < 0:
             raise RuntimeError("Failed to initialize pigpio")
-            
-        # Setup pins
+
         if self.gpio_lib.setup_gpio_output_pin(self.trig_out_gpio_num) < 0:
             raise RuntimeError(f"Failed to setup output GPIO# {self.trig_out_gpio_num}")
         if self.gpio_lib.setup_gpio_pin(self.trig_in_gpio_num) < 0:
             raise RuntimeError(f"Failed to setup input GPIO# {self.trig_in_gpio_num}")
-        
-        # Setup socket
+
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         except socket.error as e:
@@ -229,16 +224,14 @@ class TriggerServer:
         print(f"Delay: {delay}s")
         
         try:
-            # Setup pin for input
             if self.gpio_lib.setup_gpio_pin(gpio_num) < 0:
                 raise RuntimeError(f"Failed to setup input gpio_num {gpio_num}")
             
             success_count = 0
             for i in range(iterations):
                 print(f"\nTest {i+1}/{iterations}:", end=" ", flush=True)
-                
+
                 try:
-                    # Wait for signal
                     if self.gpio_lib.wait_for_gpio_high(gpio_num, int(1000000)):  # 1s timeout
                         success_count += 1
                         print("✓ Signal detected", flush=True)
@@ -280,16 +273,14 @@ class TriggerServer:
         print(f"Delay: {delay}s")
         
         try:
-            # Setup gpio_num for output
             if self.gpio_lib.setup_gpio_output_pin(gpio_num) < 0:
                 raise RuntimeError(f"Failed to setup output gpio_num {gpio_num}")
-            
+
             success_count = 0
             for i in range(iterations):
                 print(f"\nTest {i+1}/{iterations}:", end=" ", flush=True)
-                
+
                 try:
-                    # Send trigger
                     self.gpio_lib.send_gpio_pulse(gpio_num)
                     success_count += 1
                     print("✓ Trigger sent", flush=True)
@@ -388,7 +379,6 @@ if __name__ == '__main__':
     print("Press Ctrl+C to stop.")
         
     try:
-        # Start server
         server.start()
     except KeyboardInterrupt:
         print("\nOperation interrupted by user")
