@@ -2,10 +2,10 @@
 """
 Inspect, validate, and plot HDF5 files written by ``Data_Run_bmotion.py``.
 
-Reading/decoding is delegated to ``lab_scopes.io.hdf5``; this module adds a
-format validator, console summary, and trace plotting on top.
+Reading/decoding is delegated to the in-repo ``scope_io`` package; this module
+adds a format validator, console summary, and trace plotting on top.
 
-Setup (once):  pip install -e "C:/.../lab_scopes[hdf5,plot]"
+Setup (once):  pip install numpy h5py scipy matplotlib
 Run:           python -m read_and_analyze.read_bmotion_data <file.hdf5>
 See doc/README.md for full usage, the SHOW_PLOT/SAVE_PLOT toggles, and the API.
 
@@ -28,7 +28,8 @@ try:
 except ImportError:
     pass
 
-from lab_scopes.io.hdf5 import (
+from scope_io import (
+    WAVEDESC_SIZE as WAVEDESC_BYTES,
     read_hdf5_scope_channel_shots,
     read_hdf5_scope_data,
     read_hdf5_scope_tarr,
@@ -48,7 +49,6 @@ except ImportError:  # fallback when run directly from inside the folder
     )
 
 NON_SCOPE_GROUPS = {"Configuration", "Control"}  # root groups that aren't scopes
-WAVEDESC_BYTES = 346                              # LeCroy header size
 _EXPECTED_POSITION_FIELDS = ("shot_num", "x", "y")
 
 
@@ -91,8 +91,8 @@ def read_channel_descriptions(f, scope_name):
     the description was duplicated as a ``description`` attribute on every
     shot's ``<CH>_data`` dataset, so fall back to the first shot that actually
     holds data (a skipped shot is just a marker group with no ``*_data``).
-    Replaces ``lab_scopes.io.hdf5.read_scope_channel_descriptions``, which
-    hardcodes ``shot_1`` and silently returns nothing when that shot was
+    This is why ``scope_io`` does not provide a channel-description reader:
+    the naive ``shot_1`` lookup silently returns nothing when that shot was
     skipped. Old files can be upgraded in place to the new layout with
     ``python -m read_and_analyze.fix_channel_descriptions``.
     """
@@ -128,7 +128,7 @@ def _sample_shots(shot_nums, n=3):
 
 
 # ======================================================================================
-# Positions  (the one piece lab_scopes does not provide)
+# Positions  (the one piece scope_io does not provide)
 # ======================================================================================
 
 def read_positions(f, mg_name=None):

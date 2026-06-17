@@ -13,8 +13,8 @@ Run it to inspect the effect of each filtering stage on a sample trace:
 The figure overlays the raw trace, the trace after the median filter, and the
 trace after median+gaussian, so the contribution of each stage is visible.
 
-Reading/decoding is delegated to ``lab_scopes.io.hdf5``; position/shot helpers
-are reused from the sibling :mod:`read_and_analyze.read_bmotion_data`.
+Reading/decoding is delegated to the in-repo ``scope_io`` package; position/shot
+helpers are reused from the sibling :mod:`read_and_analyze.read_bmotion_data`.
 
 Setup (once):  python -m pip install scipy
 
@@ -27,7 +27,7 @@ import os
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, median_filter
 
-from lab_scopes.io.hdf5 import (
+from scope_io import (
     read_hdf5_scope_channel_shots, read_hdf5_scope_data, read_hdf5_scope_tarr,
 )
 try:  # works as a package (python -m read_and_analyze.filter_data)

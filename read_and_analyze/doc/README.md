@@ -2,25 +2,24 @@
 
 Tools for inspecting and analyzing the HDF5 files produced by
 **`Data_Run_bmotion.py`** (a probe stepped over an XY grid, repeat shots per
-position). All low-level reading/decoding is delegated to the **`lab_scopes`**
-library (`lab_scopes.io.hdf5`); this package adds validation, filtering, and
-several analysis/plot views on top.
+position). All low-level reading/decoding is delegated to the in-repo
+**`scope_io`** package (`scope_io.hdf5`); this package adds validation,
+filtering, and several analysis/plot views on top. No `lab_scopes` install is
+required.
 
 ---
 
 ## Setup (once)
 
-Install `lab_scopes` into the **same interpreter** you run with, plus `scipy`
-(used by the filtering/analysis modules):
+These tools need only standard scientific packages (no `lab_scopes`):
 
 ```bash
-python -m pip install -e "C:/Users/hjia9/Documents/GitHub/lab_scopes[hdf5,plot]"
-python -m pip install scipy
+python -m pip install numpy h5py scipy matplotlib
 ```
 
-`lab_scopes` is also LAPD_DAQ's optional `scope` dependency, so
-`pip install -e ".[scope]"` from the repo root works too. Verify with
-`python -c "import lab_scopes, h5py, matplotlib, scipy; print('ok')"`.
+`h5py` reads the data, `numpy` decodes/scales it, and `scipy` + `matplotlib`
+drive the filtering and plot views. Verify with
+`python -c "import h5py, numpy, matplotlib, scipy; print('ok')"`.
 
 Run every module **from the LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`.
 
@@ -219,7 +218,7 @@ by kind).
 ```
 
 Voltage = `raw_int16 × vertical_gain − vertical_offset`, gain/offset from the
-per-channel WAVEDESC header (handled by `lab_scopes`).
+per-channel WAVEDESC header (decoded by `scope_io`).
 
 ---
 
@@ -227,9 +226,9 @@ per-channel WAVEDESC header (handled by `lab_scopes`).
 
 | Symptom | Cause / fix |
 |---|---|
-| `No module named 'lab_scopes'` / `'scipy'` | Not installed in the interpreter you ran with. Re-run setup with `python -m pip install ...`. |
-| `No module named 'read_and_analyze'` | Run from the **LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`. |
-| `Install lab-scopes[hdf5] ...` | The `hdf5` extra (h5py) is missing — reinstall with `[hdf5,plot]`. |
+| `No module named 'h5py'` / `'scipy'` / `'matplotlib'` | Not installed in the interpreter you ran with. Re-run setup with `python -m pip install numpy h5py scipy matplotlib`. |
+| `No module named 'read_and_analyze'` / `'scope_io'` | Run from the **LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`. |
+| `Install h5py to use the scope_io HDF5 readers.` | `h5py` is missing — `python -m pip install h5py`. |
 | Plot window never appears | `SHOW_PLOT=False`, `--no-show`, or a headless machine — use `SAVE_PLOT=True` instead. |
 | A shot reports as *skipped* | The acquisition marked it; the validator counts it `PASS` and plotting omits it. |
 | Fluctuation table says *no valid windows* | Signal never exceeded `FLUCT_SIGNAL_FRAC × peak` — lower it, or check the file has plasma signal. |

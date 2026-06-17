@@ -26,8 +26,8 @@ Two scope-like preprocessing knobs apply before detection:
   * HOLDOFF_US -- ignore the record before this time, mimicking trigger holdoff.
 
 Filtering, shot grouping, and trace loading are imported from
-:mod:`read_and_analyze.filter_data`; reading/decoding is delegated to
-``lab_scopes.io.hdf5``.
+:mod:`read_and_analyze.filter_data`; reading/decoding is delegated to the
+in-repo ``scope_io`` package.
 
 There is NO command line; all SmartTrigger knobs live in
 ``smart_trigger_config.py`` (grouped per trigger mode); filtering knobs live in
@@ -44,7 +44,7 @@ import os
 
 import numpy as np
 
-from lab_scopes.io.hdf5 import (
+from scope_io import (
     open_hdf5_readonly, read_hdf5_scope_channel_shots, read_hdf5_scope_tarr,
 )
 try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)

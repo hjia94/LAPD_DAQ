@@ -44,7 +44,7 @@ except ImportError:  # fall back to a no-op pass-through if tqdm isn't installed
     def tqdm(iterable, *args, **kwargs):
         return iterable
 
-from lab_scopes.io.hdf5 import (
+from scope_io import (
     open_hdf5_readonly, read_hdf5_scope_channel_shots, read_hdf5_scope_tarr,
 )
 try:  # works as a package (python -m read_and_analyze.plot_x_line)

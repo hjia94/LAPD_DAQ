@@ -11,7 +11,7 @@ config flag and wrapped so it can NEVER crash or hang the acquisition process.
 
 Design notes (see the matching plan):
   * In-process, ``show=False`` -- saves PNGs only, never opens a blocking window.
-  * The matplotlib / scipy / lab_scopes imports are done lazily *inside* the
+  * The matplotlib / scipy / scope_io imports are done lazily *inside* the
     try, so a minimal acquisition interpreter that lacks the analysis deps
     degrades to a printed warning instead of an ImportError crash.
   * ``show``/``save`` are forced (not inherited from analysis_config, whose
