@@ -340,7 +340,7 @@ class PositionManager:
             xstop = self.pos_config.get('xstop', {})
             nx = self.pos_config.get('nx', 0)
             
-            # Use the num_duplicate_shots passed from multi_scope_acquisition
+            # Use the num_duplicate_shots passed from the acquisition package
             return create_all_positions_45deg(pr_ls, xstart, xstop, nx, self.num_duplicate_shots)
         else:
             if self.nz is None:

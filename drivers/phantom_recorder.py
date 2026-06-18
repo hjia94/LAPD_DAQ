@@ -55,7 +55,7 @@ class PhantomRecorder:
         Path(self.config['save_path']).mkdir(parents=True, exist_ok=True)
         
     def _initialize_hdf5_integration(self):
-        """Initialize HDF5 integration with existing multi_scope_acquisition file."""
+        """Initialize HDF5 integration with an existing acquisition-package HDF5 file."""
         self.hdf5_path = self.config['hdf5_file_path']
         
         # Add camera configuration and data arrays to /Control/FastCam
@@ -282,7 +282,7 @@ def main(num_shots=2, exposure_us=50, fps=5000, resolution=(256, 256),
             f.attrs['creation_time'] = time.ctime()
             f.attrs['description'] = 'Test recording with Phantom camera - simplified configuration'
             
-            # Create Control group (simulating multi_scope_acquisition structure)
+            # Create Control group (simulating the acquisition-package HDF5 structure)
             control_group = f.create_group('/Control')
             control_group.attrs['description'] = 'Control and configuration data'
     else:

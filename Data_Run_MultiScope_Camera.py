@@ -4,7 +4,7 @@ Multi-scope and high-speed camera data acquisition program with parallel arming 
 Run this program to acquire data from multiple scopes and Phantom camera, saving everything in a unified HDF5 file.
 
 This combines the functionality of:
-- multi_scope_acquisition.py for multiple scope data
+- the acquisition package (MultiScopeAcquisition) for multiple scope data
 - phantom_recorder.py for high-speed camera data
 
 Main functions:
