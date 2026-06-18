@@ -139,6 +139,24 @@ def _scope_channel_scaling(f, scope_name, channel_name, shot_number):
     return wavedesc.wd.vertical_gain, wavedesc.wd.vertical_offset, wavedesc.dt, wavedesc.t0
 
 
+def _read_shot_raw(f, scope_name, channel_name, shot_number):
+    """Return one shot's raw int16 ``_data`` array, or ``None`` if unreadable.
+
+    Unreadable means the shot group is missing, marked ``skipped``, or has no
+    ``<channel>_data`` dataset. Never raises -- a bad shot is just ``None`` so
+    the caller can emit a NaN row in its place.
+    """
+    try:
+        shot_group = f[scope_name][f'shot_{shot_number}']
+    except KeyError:
+        return None
+    if shot_group.attrs.get('skipped', False):
+        return None
+    if f'{channel_name}_data' not in shot_group:
+        return None
+    return shot_group[f'{channel_name}_data'][:]
+
+
 def read_hdf5_scope_channel_shots(f, scope_name, channel_name, shot_numbers,
                                   expected_len=None):
     """Read many shots of one channel into a ``(nshot, nsamples)`` float64 array.
@@ -163,46 +181,32 @@ def read_hdf5_scope_channel_shots(f, scope_name, channel_name, shot_numbers,
     """
     shot_numbers = list(shot_numbers)
 
-    # Decode scaling once, from the first readable, non-skipped shot.
+    # One pass: collect raw int16 per shot (None if unreadable) and decode the
+    # channel scaling once, on the first shot that actually yields data. That
+    # same shot fixes the row width when the caller gave no expected_len.
+    raws = []
     gain = offset = dt = t0 = None
-    for s in shot_numbers:
-        try:
-            shot_group = f[scope_name][f'shot_{s}']
-        except KeyError:
-            continue
-        if shot_group.attrs.get('skipped', False):
-            continue
-        if f'{channel_name}_data' not in shot_group:
-            continue
-        try:
-            gain, offset, dt, t0 = _scope_channel_scaling(f, scope_name, channel_name, s)
-        except (KeyError, ValueError):
-            continue
-        break
-    if gain is None:
-        return None, None, None
-
-    # Row width: the given expected_len, else the first shot's sample count.
     nsamples = expected_len
-
-    rows = []
     for s in shot_numbers:
-        row = None
-        try:
-            shot_group = f[scope_name][f'shot_{s}']
-            if not shot_group.attrs.get('skipped', False):
-                raw = shot_group[f'{channel_name}_data'][:]
+        raw = _read_shot_raw(f, scope_name, channel_name, s)
+        if raw is not None and gain is None:
+            try:
+                gain, offset, dt, t0 = _scope_channel_scaling(
+                    f, scope_name, channel_name, s)
+            except (KeyError, ValueError):
+                raw = None          # header unreadable -> treat shot as a gap
+            else:
                 if nsamples is None:
                     nsamples = len(raw)
-                if len(raw) == nsamples:
-                    row = raw.astype(np.float64) * gain - offset
-        except (KeyError, ValueError):
-            row = None
-        rows.append(row)
+        raws.append(raw)
 
-    if nsamples is None:  # nothing readable after all
+    if gain is None:                # nothing readable
         return None, None, None
 
     nan_row = np.full(nsamples, np.nan, dtype=np.float64)
-    stack = np.vstack([r if r is not None else nan_row for r in rows])
+    stack = np.vstack([
+        r.astype(np.float64) * gain - offset if (r is not None and len(r) == nsamples)
+        else nan_row
+        for r in raws
+    ])
     return stack, dt, t0

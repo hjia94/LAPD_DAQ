@@ -88,3 +88,28 @@ def test_read_hdf5_scope_channel_shots_none_when_unreadable(tmp_path):
     with h5py.File(path, "r") as f:
         stack, dt, t0 = read_hdf5_scope_channel_shots(f, "bdotscope", "C1", [1, 2])
     assert stack is None and dt is None and t0 is None
+
+
+def test_channel_shots_width_from_later_shot_when_first_skipped(tmp_path):
+    # With expected_len=None and shot 1 skipped, the row width must come from
+    # the first *readable* shot (2), and the earlier skipped shot is a NaN row.
+    header_bytes = LeCroyWavedesc().generate_test_data(NTimes=8)
+    path = tmp_path / "scope.h5"
+
+    with h5py.File(path, "w") as f:
+        scope = f.create_group("bdotscope")
+        skip = scope.create_group("shot_1")          # skipped, before any data
+        skip.attrs["skipped"] = True
+        shot = scope.create_group("shot_2")
+        shot.create_dataset("C1_data", data=np.arange(8, dtype=np.int16))
+        shot.create_dataset("C1_header", data=np.void(header_bytes))
+
+    with h5py.File(path, "r") as f:
+        stack, dt, t0 = read_hdf5_scope_channel_shots(f, "bdotscope", "C1", [1, 2])
+        single2, _, _ = read_hdf5_scope_data(f, "bdotscope", "C1", 2)
+
+    assert stack.shape == (2, 8)
+    assert np.all(np.isnan(stack[0]))
+    np.testing.assert_array_equal(stack[1], single2)
+    assert dt == pytest.approx(0.001, rel=1e-5)
+    assert t0 == pytest.approx(0.002, rel=1e-5)
