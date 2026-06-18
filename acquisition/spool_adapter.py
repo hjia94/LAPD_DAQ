@@ -29,12 +29,15 @@ WRITER_TAG = "acquisition"
 # --------------------------------------------------------------------------- #
 # Acquire side
 # --------------------------------------------------------------------------- #
-def all_data_to_payload(all_data, shot_num, coordinates):
+def all_data_to_payload(all_data, shot_num, coordinates, missing_scopes=None):
     """Build a ShotPayload from ``all_data`` and a positions mapping.
 
     ``all_data`` is ``{scope_name: (traces, data, headers)}`` as produced by
     ``MultiScopeAcquisition.acquire_shot``; ``coordinates`` is the per-shot
-    position payload (e.g. ``{mg_name: (x, y)}``) or ``None``.
+    position payload (e.g. ``{mg_name: (x, y)}``) or ``None``. ``missing_scopes``
+    maps a scope name to the reason its data is absent for this shot (an
+    arm/read failure); those scopes are recorded as skipped per-scope shot
+    groups by the offload so a partial shot is preserved rather than aborted.
     """
     from spooling import ShotPayload, TracePayload
 
@@ -42,6 +45,7 @@ def all_data_to_payload(all_data, shot_num, coordinates):
         shot_num=shot_num,
         coordinates=coordinates,
         acquisition_time=time.ctime(),
+        missing=dict(missing_scopes or {}),
     )
     for scope_name, (traces, data, headers) in all_data.items():
         scope_traces = []
@@ -92,6 +96,11 @@ def write_shot(hdf5_path, payload, meta):
         hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num)
         _write_positions(f, payload, meta)
 
+    # Per-scope partial: scopes that failed to arm/read/spool for this shot get
+    # their own skipped shot group, so every config scope always has a shot_N
+    # group (data for the good scopes, a skip marker for the missing ones).
+    _write_missing_scopes(hdf5_path, payload)
+
 
 def finalize(hdf5_path, meta, final_shot_num):
     """Write the per-scope shot_count attribute (run finalization).
@@ -135,6 +144,21 @@ def _write_skip(hdf5_path, payload, meta):
     hdf5_writer.mark_shot_skipped_for_scopes(
         hdf5_path, meta["config_scope_names"], payload.shot_num,
         payload.skip_reason,
+    )
+
+
+def _write_missing_scopes(hdf5_path, payload):
+    """Mark each scope in ``payload.missing`` as skipped for this shot.
+
+    A per-scope partial skip: the good scopes' real data is already written for
+    this shot, so each missing scope gets its own ``skipped`` group with its own
+    reason, skipping any that already exist (idempotent across offload retries).
+    Delegates to :func:`hdf5_writer.mark_shot_skipped_for_scopes` so the skip
+    marker schema lives in one place.
+    """
+    hdf5_writer.mark_shot_skipped_for_scopes(
+        hdf5_path, list(payload.missing), payload.shot_num,
+        payload.missing, skip_if_exists=True,
     )
 
 

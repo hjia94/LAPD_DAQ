@@ -30,7 +30,7 @@ import os
 import pickle
 import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -89,6 +89,13 @@ class ShotPayload:
     scope data (its structure is interpreted by the path adapter, e.g.
     ``{mg_name: (x, y)}`` for the bmotion path); ``None`` for stationary runs.
     A skipped shot carries no traces and sets ``skipped`` + ``skip_reason``.
+
+    ``missing`` maps a scope name to the reason its data is absent for THIS shot
+    (a per-scope arm/read/spool failure). The shot is otherwise a normal data
+    shot -- the good scopes are in ``traces`` -- but the offload records each
+    missing scope as its own ``skipped`` shot group so a single misbehaving
+    scope yields a partial shot rather than aborting the run. Distinct from
+    ``skipped``, which marks the WHOLE shot as not taken.
     """
 
     shot_num: int
@@ -97,6 +104,7 @@ class ShotPayload:
     acquisition_time: Optional[str] = None
     skipped: bool = False
     skip_reason: str = ""
+    missing: Dict[str, str] = field(default_factory=dict)
 
 
 def _shot_dirname(shot_num: int) -> str:
@@ -170,6 +178,48 @@ def _write_scope_files(tmp_dir, scope_name, traces):
     return scope_meta
 
 
+def _remove_scope_files(tmp_dir, scope_name):
+    """Delete any ``<scope>__*`` files a failed write left half-written.
+
+    A scope whose write raised must leave no partial bytes in the shot dir, so
+    the published shot contains only complete scopes plus a ``missing`` record
+    for the failed ones.
+    """
+    prefix = scope_name + _NAME_SEP
+    try:
+        for name in os.listdir(tmp_dir):
+            if name.startswith(prefix):
+                try:
+                    os.remove(os.path.join(tmp_dir, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _collect_scope_write(sidecar, tmp_dir, scope_name, produce_meta):
+    """Run/await one scope's write and fold the outcome into ``sidecar``.
+
+    ``produce_meta`` is a zero-arg callable returning the scope_meta list (it
+    either does the serial write or reads a finished future). On success the
+    scope's metadata is recorded under ``sidecar["scopes"]``. A per-scope
+    failure that is NOT a disk-full error is tolerated: the scope's partial
+    files are removed and it is recorded under ``sidecar["missing"]`` so the
+    offload marks it skipped for this shot. A disk-full error is re-raised so
+    the caller's disk-full retry/backpressure handling still fires -- a full
+    spool disk is a storage fault for the whole run, not one bad scope.
+    """
+    try:
+        sidecar["scopes"][scope_name] = produce_meta()
+    except Exception as exc:  # noqa: BLE001 - any scope fault is tolerated
+        # A full spool disk is a storage fault for the whole run, not one bad
+        # scope: re-raise so the caller's disk-full retry/backpressure fires.
+        if isinstance(exc, OSError) and is_disk_full_error(exc):
+            raise
+        _remove_scope_files(tmp_dir, scope_name)
+        sidecar["missing"][scope_name] = f"spool write failed: {exc}"
+
+
 def write_shot(spool_dir: str, payload: ShotPayload, parallel: bool = False) -> None:
     """Write one shot to the spool and publish it with a ``.done`` marker.
 
@@ -198,27 +248,34 @@ def write_shot(spool_dir: str, payload: ShotPayload, parallel: bool = False) -> 
         "coordinates": payload.coordinates,
         "skipped": payload.skipped,
         "skip_reason": payload.skip_reason,
+        "missing": dict(payload.missing),
         "scopes": {},
     }
 
     if not payload.skipped:
         scope_items = list(payload.traces.items())
         if parallel and len(scope_items) > 1:
-            # One worker per scope, writing disjoint <scope>__* files. Collect
-            # results after the workers join, then store them in the original
-            # scope order so the sidecar matches the serial path exactly.
+            # One worker per scope, writing disjoint <scope>__* files. Wait for
+            # EVERY worker before inspecting any result, so no thread is still
+            # touching tmp_dir when we react to a failure; then collect in the
+            # original scope order so the sidecar matches the serial path.
             with ThreadPoolExecutor(max_workers=len(scope_items)) as executor:
-                futures = {
-                    executor.submit(_write_scope_files, tmp_dir, scope_name, traces): scope_name
+                future_by_scope = {
+                    scope_name: executor.submit(
+                        _write_scope_files, tmp_dir, scope_name, traces)
                     for scope_name, traces in scope_items
                 }
-                meta_by_scope = {futures[f]: f.result() for f in futures}
+                wait(future_by_scope.values())
             for scope_name, _traces in scope_items:
-                sidecar["scopes"][scope_name] = meta_by_scope[scope_name]
+                _collect_scope_write(
+                    sidecar, tmp_dir, scope_name,
+                    future_by_scope[scope_name].result)
         else:
             for scope_name, traces in scope_items:
-                sidecar["scopes"][scope_name] = _write_scope_files(
-                    tmp_dir, scope_name, traces)
+                _collect_scope_write(
+                    sidecar, tmp_dir, scope_name,
+                    lambda sn=scope_name, tr=traces: _write_scope_files(
+                        tmp_dir, sn, tr))
 
     with open(os.path.join(tmp_dir, _SHOT_META), "wb") as f:
         pickle.dump(sidecar, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -317,6 +374,7 @@ def read_shot(spool_dir: str, shot_num: int) -> ShotPayload:
         acquisition_time=sidecar.get("acquisition_time"),
         skipped=sidecar.get("skipped", False),
         skip_reason=sidecar.get("skip_reason", ""),
+        missing=dict(sidecar.get("missing", {})),
     )
 
     if not payload.skipped:

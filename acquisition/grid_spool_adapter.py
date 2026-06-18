@@ -51,6 +51,10 @@ def write_shot(hdf5_path, payload, meta):
         hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num)
         _write_positions(f, payload, meta)
 
+    # Per-scope partial: scopes that failed for this shot get a skipped group so
+    # every config scope always has a shot_N group (data or skip marker).
+    spool_adapter._write_missing_scopes(hdf5_path, payload)
+
 
 def finalize(hdf5_path, meta, final_shot_num):
     """Write the per-scope shot_count attribute and overwrite the description.

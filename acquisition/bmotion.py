@@ -402,10 +402,17 @@ class _SpoolShotSink:
 
         self.msa.arm_scopes_for_trigger(self.active_scopes, verbose=False)
         all_data = self.msa.acquire_shot_dispatch(self.active_scopes, shot_num, verbose=False)
+        missing = self.msa.last_missing_scopes
         if not all_data:
-            raise RuntimeError(f"No valid data acquired at shot {shot_num}")
+            # Every scope failed to arm/read -> a fully-missing shot. Raise so the
+            # caller records it as skipped and the circuit-breaker can count it;
+            # the run continues rather than aborting on one bad shot.
+            raise RuntimeError(
+                _format_missing_reason(missing)
+                or f"No valid data acquired at shot {shot_num}")
         coords = read_bmotion_positions(self.run_manager, record_keys)
-        payload = spool_adapter.all_data_to_payload(all_data, shot_num, coords)
+        payload = spool_adapter.all_data_to_payload(
+            all_data, shot_num, coords, missing_scopes=missing)
         spool_format.write_shot_with_disk_full_retry(
             self.spool_dir, payload, parallel=self.msa.parallel_spool_write,
             pause_seconds=self.pause_seconds, max_retries=self.max_retries,
@@ -418,6 +425,14 @@ class _SpoolShotSink:
         coords = read_bmotion_positions(self.run_manager, record_keys)
         payload = spool_adapter.skipped_payload(shot_num, reason, coords)
         spool_format.write_shot(self.spool_dir, payload)
+
+
+def _format_missing_reason(missing):
+    """Human-readable summary of a {scope: reason} missing map, or ''."""
+    if not missing:
+        return ""
+    return "all scopes missing: " + "; ".join(
+        f"{name} ({reason})" for name, reason in missing.items())
 
 
 def _safe_mark_skipped(sink, shot_num, reason, record_keys):
@@ -434,6 +449,36 @@ def _safe_mark_skipped(sink, shot_num, reason, record_keys):
         tqdm.write(f"Warning: could not record skip for shot {shot_num}: {e}")
 
 
+class _RunAborted(RuntimeError):
+    """The circuit-breaker tripped: too many fully-skipped shots in a row.
+
+    Carries the abort reason so the driver can finalize the HDF5 with
+    ``terminated_early=True`` instead of leaving the run looking complete.
+    """
+
+
+def _note_shot_outcome(run_state, full_skip):
+    """Update the consecutive-full-skip counter and trip the breaker if exceeded.
+
+    A *fully-skipped* shot (no scope produced data) increments the counter; any
+    shot with data resets it. When the counter reaches
+    ``run_state["max_consecutive_skips"]`` (>0) a :class:`_RunAborted` is raised
+    so the run stops cleanly rather than spooling thousands of empty shots from a
+    dead master/trigger. A None/absent run_state (legacy callers) is a no-op.
+    """
+    if run_state is None:
+        return
+    if not full_skip:
+        run_state["consecutive_skips"] = 0
+        return
+    run_state["consecutive_skips"] = run_state.get("consecutive_skips", 0) + 1
+    count = run_state["consecutive_skips"]
+    limit = run_state.get("max_consecutive_skips", 0)
+    if config_module.consecutive_skip_breaker_tripped(count, limit):
+        raise _RunAborted(
+            config_module.consecutive_skip_abort_message(count, limit))
+
+
 def _take_shots_at_position(
     msa,
     active_scopes,
@@ -445,25 +490,32 @@ def _take_shots_at_position(
     pbar,
     estimator=None,
     sink=None,
+    run_state=None,
 ):
     """Acquire nshots at the current position, recording positions only for
     the motion groups in record_keys. Advances `pbar` once per shot and
     returns the next shot_num.
 
     The actual per-shot write is delegated to `sink`; when None, a legacy
-    HDF5 sink is used (writes straight to `hdf5_path`)."""
+    HDF5 sink is used (writes straight to `hdf5_path`). A shot whose every scope
+    failed (raised) is counted by the circuit-breaker via ``run_state``; a shot
+    with any data resets it. The breaker raising :class:`_RunAborted` unwinds to
+    the driver, which finalizes the run early."""
     if sink is None:
         sink = _Hdf5ShotSink(msa, active_scopes, hdf5_path, run_manager)
 
     for n in range(nshots):
+        full_skip = False
         try:
             sink.take_shot(shot_num, record_keys)
         except (ValueError, RuntimeError) as e:
             tqdm.write(f'Skipping shot {shot_num} - {str(e)}')
             _safe_mark_skipped(sink, shot_num, str(e), record_keys)
+            full_skip = True
         except Exception as e:
             tqdm.write(f'Motion failed for shot {shot_num} - {str(e)}')
             _safe_mark_skipped(sink, shot_num, f"Motion failed: {str(e)}", record_keys)
+            full_skip = True
         finally:
             shot_num += 1
             # tqdm tracks per-shot rate on the bar itself; we only overlay the
@@ -474,6 +526,12 @@ def _take_shots_at_position(
                 if postfix:
                     pbar.set_postfix_str(postfix)
             pbar.update(1)
+            # Track the next-shot number so the driver can report the count
+            # actually emitted even if the breaker aborts the run below.
+            if run_state is not None:
+                run_state["last_shot_num"] = shot_num
+        # Outside the finally so a breaker trip propagates (not masked by it).
+        _note_shot_outcome(run_state, full_skip)
     return shot_num
 
 
@@ -631,7 +689,7 @@ def _run_interleaved(msa, active_scopes, hdf5_path, run_manager, ml_order, nshot
 
             shot_num = _take_shots_at_position(
                 msa, active_scopes, hdf5_path, run_manager, record_keys, shot_num, nshots, pbar,
-                estimator=estimator, sink=sink,
+                estimator=estimator, sink=sink, run_state=run_state,
             )
         estimator.finish_line()  # close the final line
     return shot_num
@@ -680,7 +738,7 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
 
                 shot_num = _take_shots_at_position(
                     msa, active_scopes, hdf5_path, run_manager, [mg_key], shot_num, nshots, pbar,
-                    estimator=estimator, sink=sink,
+                    estimator=estimator, sink=sink, run_state=run_state,
                 )
         estimator.finish_line()  # close the final line
     return shot_num
@@ -772,8 +830,14 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
     if description_path is None:
         description_path = config_module.resolve_description_path_from_config(config_path)
 
+    from .config import get_max_consecutive_skips
     last_shot_num = 0
-    run_state = {"terminated_early": False, "abort_reason": None}
+    run_state = {
+        "terminated_early": False,
+        "abort_reason": None,
+        "consecutive_skips": 0,
+        "max_consecutive_skips": get_max_consecutive_skips(config),
+    }
     with MultiScopeAcquisition(hdf5_path, config, raw_config_text,
                                description_path=description_path) as msa:
         try:
@@ -827,10 +891,18 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                     move_opts=move_opts, run_state=run_state,
                 )
 
+        except _RunAborted as err:
+            # Circuit-breaker tripped (dead master/trigger): stop cleanly,
+            # finalize with the shots already spooled rather than aborting hard.
+            print(f'\n______Run stopped: {err}______', '  at', time.ctime())
+            run_state["terminated_early"] = True
+            run_state["abort_reason"] = str(err)
+            last_shot_num = run_state.get("last_shot_num", last_shot_num)
         except KeyboardInterrupt as err:
             print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
             run_state["terminated_early"] = True
             run_state["abort_reason"] = "KeyboardInterrupt (Ctrl-C)"
+            last_shot_num = run_state.get("last_shot_num", last_shot_num)
             raise RuntimeError() from err
         finally:
             run_manager.terminate()

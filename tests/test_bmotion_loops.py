@@ -225,6 +225,82 @@ class BmotionLoopTests(unittest.TestCase):
             self.assertEqual(int(arr_a["shot_num"][0]), 1)
             self.assertEqual(int(arr_a["shot_num"][1]), 2)
 
+    # ----- circuit-breaker (consecutive full skips) ---------------------- #
+    def test_circuit_breaker_trips_after_consecutive_full_skips(self):
+        nshots = 10
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
+        bmotion_module.configure_bmotion_hdf5_group(
+            hdf5_path, nshots, 1, toml_path, self.rm, ["a"],
+            ml_order={"a": "forward"}, execution_order="interleaved",
+        )
+
+        # Every shot fully fails (RuntimeError) -> each is a full skip.
+        def always_fail(msa, scopes, shot_num, verbose=True):
+            raise RuntimeError("master dead")
+
+        run_state = {
+            "terminated_early": False, "abort_reason": None,
+            "consecutive_skips": 0, "max_consecutive_skips": 3,
+        }
+        _orig_single = bmotion_module.single_shot_acquisition
+        bmotion_module.single_shot_acquisition = always_fail
+        try:
+            with bmotion_module.tqdm(total=nshots) as pbar:
+                with self.assertRaises(bmotion_module._RunAborted):
+                    bmotion_module._take_shots_at_position(
+                        StubMSA({"FakeScope": "127.0.0.1"}), {}, hdf5_path,
+                        self.rm, ["a"], shot_num=1, nshots=nshots, pbar=pbar,
+                        run_state=run_state,
+                    )
+        finally:
+            bmotion_module.single_shot_acquisition = _orig_single
+
+        # Tripped exactly at the limit, not after running all nshots.
+        self.assertEqual(run_state["consecutive_skips"], 3)
+        # last_shot_num is the NEXT shot number (3 emitted -> 4), so the driver
+        # reports final = last_shot_num - 1 = 3 shots spooled.
+        self.assertEqual(run_state["last_shot_num"], 4)
+
+    def test_circuit_breaker_resets_on_a_good_shot(self):
+        nshots = 6
+        hdf5_path = make_temp_hdf5_with_scopes(["FakeScope"], tc=self)
+        toml_path = make_toml_file(tc=self)
+        bmotion_module.configure_bmotion_hdf5_group(
+            hdf5_path, nshots, 1, toml_path, self.rm, ["a"],
+            ml_order={"a": "forward"}, execution_order="interleaved",
+        )
+
+        # Fail, fail, succeed, fail, fail, fail: the good shot resets the count,
+        # so with a limit of 3 the breaker only trips on the final run of 3.
+        outcomes = iter([False, False, True, False, False, False])
+
+        def scripted(msa, scopes, shot_num, verbose=True):
+            if not next(outcomes):
+                raise RuntimeError("transient")
+
+        run_state = {
+            "terminated_early": False, "abort_reason": None,
+            "consecutive_skips": 0, "max_consecutive_skips": 3,
+        }
+        _orig_single = bmotion_module.single_shot_acquisition
+        bmotion_module.single_shot_acquisition = scripted
+        try:
+            with bmotion_module.tqdm(total=nshots) as pbar:
+                with self.assertRaises(bmotion_module._RunAborted):
+                    bmotion_module._take_shots_at_position(
+                        StubMSA({"FakeScope": "127.0.0.1"}), {}, hdf5_path,
+                        self.rm, ["a"], shot_num=1, nshots=nshots, pbar=pbar,
+                        run_state=run_state,
+                    )
+        finally:
+            bmotion_module.single_shot_acquisition = _orig_single
+
+        # The good shot (shot 3) reset the counter; breaker trips on shots 4-6.
+        self.assertEqual(run_state["consecutive_skips"], 3)
+        # Shots 1-6 all ran (6th increments next-shot to 7) before the trip.
+        self.assertEqual(run_state["last_shot_num"], 7)
+
     # ----- _build_setup_array validation --------------------------------- #
     @unittest.skip(
         "Product gap, not test drift: commit aa00bc6 removed the rectangular-"
@@ -300,6 +376,11 @@ class _FakeMSA:
     def acquire_shot_dispatch(self, active_scopes, shot_num, verbose=True):
         # The spool sink reads through the dispatcher; mirror acquire_shot.
         return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+
+    @property
+    def last_missing_scopes(self):
+        # This fake always returns full data, so no scope is ever missing.
+        return {}
 
 
 class SpoolSinkTests(unittest.TestCase):
@@ -387,7 +468,7 @@ class TerminalMotorFailureTests(unittest.TestCase):
 
         def spy_take(msa, active_scopes, hdf5_path, run_manager,
                      record_keys, shot_num, nshots_, pbar, estimator=None,
-                     sink=None):
+                     sink=None, run_state=None):
             shot_calls.append(shot_num)
             return shot_num + nshots_
 
