@@ -80,17 +80,24 @@ def _make_all_data(seq=False):
     return {"lpscope": (traces, data, headers)}
 
 
-def _make_meta(scope_name="lpscope", hdf5_path=None):
+def _make_meta(scope_name="lpscope", hdf5_path=None, total_shots=None):
     """The slim run-info bundle the offload reads (no skeleton material).
 
     Channel descriptions are no longer part of it: they are scope-group attrs
     written by the acquire process at init (see write_scope_metadata).
+
+    ``total_shots`` (when given) is the planned shot count finalize pads the
+    appended positions_array back to; omitted in tests that don't assert the
+    padded layout (the reader tolerates a tight array).
     """
-    return {
+    meta = {
         "writer": "acquisition",
         "hdf5_path": hdf5_path,
         "config_scope_names": [scope_name],
     }
+    if total_shots is not None:
+        meta["total_shots"] = total_shots
+    return meta
 
 
 def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
@@ -433,15 +440,22 @@ class OffloadEquivalenceTests(unittest.TestCase):
         self.direct_h5 = _temp_path(self, "direct.hdf5")
 
     def _build_direct(self, all_data_by_shot):
-        """Reproduce the in-process path output for the same inputs."""
-        _build_bmotion_skeleton(self.direct_h5, total_shots=len(all_data_by_shot))
+        """Reproduce the in-process path output for the same inputs.
+
+        positions_array is now append-only (see record_bmotion_positions), then
+        padded to total_shots at finalize -- mirror that here so the reference
+        file matches the offloaded one's canonical layout.
+        """
+        total = len(all_data_by_shot)
+        _build_bmotion_skeleton(self.direct_h5, total_shots=total)
         for shot_num, all_data in all_data_by_shot.items():
             hdf5_writer.write_shot_data(self.direct_h5, all_data, shot_num)
             with h5py.File(self.direct_h5, "a") as f:
                 ds = f["Control/Positions/MG_A/positions_array"]
-                ds[shot_num - 1] = (shot_num, float(shot_num), 2.0)
-        hdf5_writer.record_shot_count(self.direct_h5, ["lpscope"],
-                                      len(all_data_by_shot))
+                ds.resize((len(ds) + 1,))
+                ds[-1] = (shot_num, float(shot_num), 2.0)
+        hdf5_writer.record_shot_count(self.direct_h5, ["lpscope"], total)
+        spool_adapter._pad_positions_to_total(self.direct_h5, total)
 
     def test_offload_matches_direct_writer(self):
         shots = {1: _make_all_data(False), 2: _make_all_data(False)}
@@ -451,7 +465,7 @@ class OffloadEquivalenceTests(unittest.TestCase):
 
         # Spool + offload path: acquire creates the skeleton, offload fills it.
         _build_bmotion_skeleton(self.off_h5, total_shots=2)
-        meta = _make_meta(hdf5_path=self.off_h5)
+        meta = _make_meta(hdf5_path=self.off_h5, total_shots=2)
         spool_format.write_run_metadata(self.spool, meta)
         for shot_num, all_data in shots.items():
             payload = spool_adapter.all_data_to_payload(
@@ -847,7 +861,10 @@ def _build_grid_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
         ds.attrs["ypos"] = np.unique(setup['y'])
         if nz is not None:
             ds.attrs["zpos"] = np.unique(setup['z'])
-        pos.create_dataset("positions_array", shape=(total_shots,), dtype=dtype)
+        # Append-only during offload (matches the live grid skeleton); finalize
+        # pads to total_shots. Empty + chunked so it can be resized per shot.
+        pos.create_dataset("positions_array", shape=(0,), maxshape=(None,),
+                           dtype=dtype, chunks=True)
 
 
 class GridOffloadTests(unittest.TestCase):
@@ -867,6 +884,7 @@ class GridOffloadTests(unittest.TestCase):
             "hdf5_path": self.off_h5,
             "config_scope_names": ["lpscope"],
             "nz": nz,
+            "total_shots": 2,
         })
         for shot in (1, 2):
             payload = self.grid_spool_adapter.all_data_to_payload(

@@ -123,8 +123,12 @@ class BmotionLoopTests(unittest.TestCase):
                 self.assertEqual(len(setup.attrs["xpos"]), ml_size)
                 self.assertEqual(len(setup.attrs["ypos"]), 1)
 
+                # positions_array is now created empty + resizable; the offload
+                # appends one row per recorded shot and finalize pads it back to
+                # (total_shots,). At skeleton time it is empty.
                 ds = f[f"Control/Positions/{name}/positions_array"]
-                self.assertEqual(ds.shape, (total_shots,))
+                self.assertEqual(ds.shape, (0,))
+                self.assertEqual(ds.maxshape, (None,))
                 self.assertEqual(ds.dtype.names, ("shot_num", "x", "y"))
 
     def test_configure_hdf5_defaults_execution_order_to_interleaved(self):

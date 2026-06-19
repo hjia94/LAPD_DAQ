@@ -87,9 +87,11 @@ def _write_positions(f, payload, meta):
     if ds_path not in f:
         spool_adapter._warn_missing_positions_ds(ds_path, payload.shot_num)
         return
-    pos_arr = f[ds_path]
+    # Append-only (see spool_adapter.append_position_row): finalize pads to
+    # total_shots with zero-fill afterwards.
     shot_num = payload.shot_num
     if meta.get("nz") is None:
-        pos_arr[shot_num - 1] = (shot_num, coords["x"], coords["y"])
+        row = (shot_num, coords["x"], coords["y"])
     else:
-        pos_arr[shot_num - 1] = (shot_num, coords["x"], coords["y"], coords["z"])
+        row = (shot_num, coords["x"], coords["y"], coords["z"])
+    spool_adapter.append_position_row(f[ds_path], row)

@@ -148,7 +148,13 @@ def write_bmotion_position_groups(
     ``prepared`` list from :func:`collect_bmotion_position_setup`) so it is
     usable both in-process (with a live RunManager) and from the offload process
     (reconstructing from spooled metadata).
+
+    ``total_shots`` is retained for signature stability but no longer sizes
+    ``positions_array`` (now append-only); the planned count is applied at
+    offload finalize from run metadata, not here.
     """
+    from . import spool_adapter
+
     with h5py.File(hdf5_path, 'a') as f:
         ctl_grp = f.require_group('Control')
         pos_grp = ctl_grp.require_group('Positions')
@@ -172,9 +178,12 @@ def write_bmotion_position_groups(
             setup_ds.attrs['xpos'] = xpos
             setup_ds.attrs['ypos'] = ypos
 
-            mg_group.create_dataset(
-                'positions_array', shape=(total_shots,), dtype=_POSITION_DTYPE,
-            )
+            # Append-only during the run: created empty and grown one row per
+            # recorded shot. The offload's finalize pads this back to
+            # (total_shots,) with zero-fill, so the FINAL on-disk layout is
+            # unchanged. total_shots is used only at that finalize step (carried
+            # in run metadata), not to size the dataset here.
+            spool_adapter.create_positions_array(mg_group, _POSITION_DTYPE)
 
 
 def build_bmotion_selection_blob(selected_mg_keys, ml_order, execution_order):
@@ -327,15 +336,15 @@ def record_bmotion_positions(
     rm: bmotion.actors.RunManager,
     mg_keys,
 ) -> None:
+    from . import spool_adapter
 
     coords = read_bmotion_positions(rm, mg_keys)
     with h5py.File(hdf5_path, 'a') as f:
         for mg_name, (x, y) in coords.items():
-            # Access the positions_array for this specific motion group directly under Control/Positions
-            dataset = f[f"Control/Positions/{mg_name}/positions_array"]
-
-            # Record position for this shot using structured array format (shot_num is 1-based, array is 0-based)
-            dataset[shotnum - 1] = (shotnum, x, y)
+            # Append-only, matching the spooled offload's _write_positions so both
+            # write paths produce the same layout (see spool_adapter.append_position_row).
+            spool_adapter.append_position_row(
+                f[f"Control/Positions/{mg_name}/positions_array"], (shotnum, x, y))
 
 
 class _Hdf5ShotSink:

@@ -176,9 +176,19 @@ def _position_for_shot(positions, shot_num):
         arr = info.get("positions_array")
         if arr is None:
             continue
-        idx = shot_num - 1  # array is 0-based: index = shot_num - 1
+        # The row carries its own shot_num, so locate it by field rather than
+        # assuming it sits at index shot_num-1. Fast path: a finalized (padded)
+        # file does have the row at shot_num-1, so probe there first -- O(1) and
+        # avoids an O(n) scan per call in plotting loops. Fall back to a field
+        # scan only for an append-tight/gapped file (unfinalized/early-stopped),
+        # where positional indexing would return the wrong row after a skip.
+        idx = shot_num - 1
         if 0 <= idx < len(arr) and int(arr["shot_num"][idx]) == shot_num:
             return float(arr["x"][idx]), float(arr["y"][idx])
+        match = np.nonzero(arr["shot_num"] == shot_num)[0]
+        if match.size:
+            i = int(match[0])
+            return float(arr["x"][i]), float(arr["y"][i])
     return None
 
 

@@ -832,7 +832,9 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
             print("done")
 
             if pos_manager is not None:
-                pos_manager.initialize_position_hdf5()
+                # append_mode: the offload owns the per-shot positions_array
+                # write (append per recorded shot) and pads to total at finalize.
+                pos_manager.initialize_position_hdf5(append_mode=True)
                 mc = pos_manager.initialize_motor()
                 if mc is None:
                     print("\n[!] Warning: Failed to initialize motor controller; "
@@ -855,6 +857,9 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                 "config_scope_names": list(active_scopes.keys()),
                 "description_path": description_path,
                 "nz": pos_manager.nz if pos_manager is not None else None,
+                # Planned shot count: finalize pads the appended positions_array
+                # back to this length with zero-fill for shots that never recorded.
+                "total_shots": total_shots,
             })
             print(f"Wrote run metadata to spool: {spool_dir}")
 
