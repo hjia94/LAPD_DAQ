@@ -296,6 +296,10 @@ def write_shot(spool_dir: str, payload: ShotPayload, parallel: bool = False) -> 
 DISK_FULL_PAUSE_SECONDS = 30.0
 DISK_FULL_MAX_RETRIES = 3
 
+# Windows error code for "There is not enough space on the disk" (the winerror on
+# the OSError; the POSIX equivalent is errno.ENOSPC).
+_WIN_ERROR_DISK_FULL = 112
+
 
 def is_disk_full_error(exc: BaseException) -> bool:
     """True if ``exc`` is an out-of-space failure (POSIX ENOSPC / Windows 112).
@@ -307,7 +311,7 @@ def is_disk_full_error(exc: BaseException) -> bool:
         return False
     if exc.errno == errno.ENOSPC:
         return True
-    return getattr(exc, "winerror", None) == 112
+    return getattr(exc, "winerror", None) == _WIN_ERROR_DISK_FULL
 
 
 def write_shot_with_disk_full_retry(
@@ -544,7 +548,11 @@ def prune_superseded(spool_root: str, keep_days: float = 7.0) -> List[str]:
             if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
                 shutil.rmtree(path)
                 removed.append(path)
-        except OSError:
+        except OSError as e:
+            # Best-effort: keep going, but surface the skip so a folder that
+            # repeatedly can't be removed (retention cleanup silently failing,
+            # disk slowly filling with stale .superseded-* rotations) is visible.
+            print(f"Warning: could not prune superseded spool {path!r}: {e}")
             continue
     return removed
 

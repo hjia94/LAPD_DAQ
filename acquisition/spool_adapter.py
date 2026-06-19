@@ -51,6 +51,12 @@ def all_data_to_payload(all_data, shot_num, coordinates, missing_scopes=None):
         scope_traces = []
         for tr in traces:
             if tr not in data:
+                # The scope listed this channel but returned no samples for it.
+                # Warn rather than absorb silently: this is the channel-data-loss
+                # class the lab_scopes v0.3.2 pin addressed, so a recurrence here
+                # should be visible instead of quietly dropping the channel.
+                print(f"Warning: {scope_name} channel {tr} listed but no data "
+                      f"returned for shot {shot_num}; channel dropped.")
                 continue
             scope_traces.append(
                 TracePayload(
