@@ -162,6 +162,21 @@ def _write_missing_scopes(hdf5_path, payload):
     )
 
 
+def _warn_missing_positions_ds(ds_path, shot_num):
+    """Warn that a coordinate could not be recorded for lack of its dataset.
+
+    Reaching this means the payload carried a coordinate to write but its
+    positions dataset does not exist in the HDF5 -- a motion-group name mismatch
+    between run setup and the per-shot payload, or a skeleton that was never
+    built. Shared by both path adapters so the message can't drift. We warn and
+    skip rather than abort: losing one coordinate row loudly beats aborting an
+    otherwise-good offload, and the operator can act on the warning.
+    """
+    print(f"Warning: positions dataset {ds_path!r} missing; "
+          f"coordinate for shot {shot_num} not recorded "
+          f"(motion-group name mismatch or skeleton not built).")
+
+
 def _write_positions(f, payload, meta):
     """Write per-motion-group positions into open HDF5 ``f``.
 
@@ -174,6 +189,7 @@ def _write_positions(f, payload, meta):
     for mg_name, xy in coords.items():
         ds_path = f"Control/Positions/{mg_name}/positions_array"
         if ds_path not in f:
+            _warn_missing_positions_ds(ds_path, payload.shot_num)
             continue
         ds = f[ds_path]
         ds[payload.shot_num - 1] = (payload.shot_num, xy[0], xy[1])

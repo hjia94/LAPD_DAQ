@@ -85,6 +85,7 @@ def _write_positions(f, payload, meta):
         return
     ds_path = "/Control/Positions/positions_array"
     if ds_path not in f:
+        spool_adapter._warn_missing_positions_ds(ds_path, payload.shot_num)
         return
     pos_arr = f[ds_path]
     shot_num = payload.shot_num
