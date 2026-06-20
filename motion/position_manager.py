@@ -20,6 +20,27 @@ import h5py
 from .Motor_Control import Motor_Control_2D, Motor_Control_3D
 from .Motor_Control_1D import Motor_Control
 
+# Chunk for the append-only positions_array (see acquisition.spool_adapter for
+# the matching offload writer); 1024 rows ~16 KB keeps per-shot appends in-chunk.
+_POSITIONS_CHUNK = (1024,)
+
+
+def _create_positions_array(group, dtype, planned_len, append_mode):
+    """Create ``positions_array`` under ``group`` in the right mode.
+
+    ``append_mode`` True (spooled path): empty + resizable, grown one row per
+    recorded shot by the offload, padded to the planned size at finalize.
+    False (legacy in-process path): pre-sized to ``planned_len`` and written by
+    index via :meth:`PositionManager.update_position_hdf5`. One helper so the two
+    create sites (45-degree and regular) don't each carry the branch.
+    """
+    if append_mode:
+        group.create_dataset('positions_array', shape=(0,), maxshape=(None,),
+                             dtype=dtype, chunks=_POSITIONS_CHUNK)
+    else:
+        group.create_dataset('positions_array', shape=(planned_len,), dtype=dtype)
+
+
 # ============================================================================
 # CONFIGURATION FUNCTIONS
 # ============================================================================
@@ -348,8 +369,20 @@ class PositionManager:
             else:
                 return get_positions_xyz(pos_params)
     
-    def initialize_position_hdf5(self):
-        """Initialize HDF5 position structure and return positions"""
+    def initialize_position_hdf5(self, append_mode=False):
+        """Initialize HDF5 position structure and return positions.
+
+        ``append_mode`` controls how ``positions_array`` (the RECORDED per-shot
+        positions, distinct from the pre-filled ``positions_setup_array``) is
+        created:
+
+        * ``False`` (default, legacy in-process path): pre-sized to the planned
+          position count and written by index via :meth:`update_position_hdf5`.
+        * ``True`` (spooled grid path): created empty and resizable, grown one
+          row per recorded shot by the offload; the offload's finalize pads it
+          back to the planned size with zero-fill, so the final layout matches
+          the legacy one. Use this whenever the offload owns the per-shot write.
+        """
         if self.is_45deg:
             positions, xpos = self.get_positions()
             dtype = {'P16': [('shot_num', '>u4'), ('x', '>f4')],
@@ -385,10 +418,9 @@ class PositionManager:
                                                           dtype=dtype[probe])
                         setup_ds.attrs['xpos'] = xpos[probe]
                         
-                        # Create array for actual positions
-                        probe_grp.create_dataset('positions_array', 
-                                               shape=(len(positions[probe]),), 
-                                               dtype=dtype[probe])
+                        # Create array for actual recorded positions
+                        _create_positions_array(
+                            probe_grp, dtype[probe], len(positions[probe]), append_mode)
                 else:
                     # Create positions setup array with metadata
                     pos_ds = pos_grp.create_dataset('positions_setup_array', data=positions, dtype=dtype)
@@ -398,8 +430,8 @@ class PositionManager:
                         if self.nz is not None:
                             pos_ds.attrs['zpos'] = zpos
                     
-                    # Create positions array for actual positions
-                    pos_grp.create_dataset('positions_array', shape=(len(positions),), dtype=dtype)
+                    # Create positions array for actual recorded positions
+                    _create_positions_array(pos_grp, dtype, len(positions), append_mode)
 
         return positions
     

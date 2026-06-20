@@ -80,17 +80,24 @@ def _make_all_data(seq=False):
     return {"lpscope": (traces, data, headers)}
 
 
-def _make_meta(scope_name="lpscope", hdf5_path=None):
+def _make_meta(scope_name="lpscope", hdf5_path=None, total_shots=None):
     """The slim run-info bundle the offload reads (no skeleton material).
 
     Channel descriptions are no longer part of it: they are scope-group attrs
     written by the acquire process at init (see write_scope_metadata).
+
+    ``total_shots`` (when given) is the planned shot count finalize pads the
+    appended positions_array back to; omitted in tests that don't assert the
+    padded layout (the reader tolerates a tight array).
     """
-    return {
+    meta = {
         "writer": "acquisition",
         "hdf5_path": hdf5_path,
         "config_scope_names": [scope_name],
     }
+    if total_shots is not None:
+        meta["total_shots"] = total_shots
+    return meta
 
 
 def _build_bmotion_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
@@ -268,6 +275,105 @@ class ParallelSpoolWriteTests(unittest.TestCase):
                     self.assertIn(f"{ch}_header", f[f"{scope_name}/shot_1"])
 
 
+class WriteToleranceTests(unittest.TestCase):
+    """A single scope failing to spool must not abort the shot.
+
+    The good scope's data is published; the failed scope is recorded in the
+    sidecar's ``missing`` map (and, on offload, gets a per-scope skipped shot
+    group). Disk-full is the carve-out: it must still propagate so the disk-full
+    retry/backpressure handling fires instead of being swallowed as one bad
+    scope.
+    """
+
+    def setUp(self):
+        self.spool = _temp_spool_dir(self, "spool_tol_")
+
+    def _fail_one_scope(self, bad_scope, exc):
+        """Patch _write_scope_files so only ``bad_scope`` raises ``exc``."""
+        real = spool_format._write_scope_files
+
+        def fake(tmp_dir, scope_name, traces):
+            if scope_name == bad_scope:
+                raise exc
+            return real(tmp_dir, scope_name, traces)
+
+        return mock.patch.object(spool_format, "_write_scope_files", fake)
+
+    def _run(self, parallel):
+        all_data = _make_two_scope_all_data(False)
+        payload = spool_adapter.all_data_to_payload(all_data, 1, None)
+        with self._fail_one_scope("xrayscope", RuntimeError("scope read died")):
+            spool_format.write_shot(self.spool, payload, parallel=parallel)
+
+        # Shot still published.
+        self.assertEqual(spool_format.iter_ready_shots(self.spool), [1])
+        got = spool_format.read_shot(self.spool, 1)
+        # Good scope's data is intact; bad scope is absent from traces ...
+        self.assertEqual(set(got.traces), {"lpscope"})
+        np.testing.assert_array_equal(
+            got.traces["lpscope"][0].data, all_data["lpscope"][1]["C1"])
+        # ... and recorded as missing with a reason.
+        self.assertIn("xrayscope", got.missing)
+        self.assertIn("scope read died", got.missing["xrayscope"])
+        # No partial files left for the failed scope.
+        shot_dir = os.path.join(self.spool, "shot_000001")
+        leftover = [n for n in os.listdir(shot_dir) if n.startswith("xrayscope__")]
+        self.assertEqual(leftover, [])
+
+    def test_serial_one_scope_failure_is_tolerated(self):
+        self._run(parallel=False)
+
+    def test_parallel_one_scope_failure_is_tolerated(self):
+        self._run(parallel=True)
+
+    def test_disk_full_still_propagates(self):
+        """Disk-full is a storage fault, not a bad scope: it must NOT be swallowed."""
+        all_data = _make_two_scope_all_data(False)
+        payload = spool_adapter.all_data_to_payload(all_data, 1, None)
+        enospc = OSError(errno.ENOSPC, "No space left on device")
+        with self._fail_one_scope("xrayscope", enospc):
+            with self.assertRaises(OSError) as ctx:
+                spool_format.write_shot(self.spool, payload, parallel=False)
+        self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+        # Not published (the disk-full retry wrapper owns the retry/abort).
+        self.assertEqual(spool_format.iter_ready_shots(self.spool), [])
+
+    def test_missing_scope_offloads_to_skipped_group(self):
+        """End-to-end: a missing scope becomes a skipped shot group in the HDF5."""
+        off_h5 = _temp_path(self, "tolerance_offload.hdf5")
+        all_data = _make_two_scope_all_data(False)
+        ta = np.linspace(0, 1e-3, 128, dtype=np.float64)
+        hdf5_writer.write_experiment_metadata(
+            off_h5, description="tol run", source_code={"unit": "test"},
+            raw_config_text="[experiment]\n", config=None,
+            scope_names=["lpscope", "xrayscope"])
+        for sname, ip in (("lpscope", "127.0.0.1"), ("xrayscope", "127.0.0.2")):
+            hdf5_writer.write_scope_metadata(
+                off_h5, scope_name=sname, description=sname, ip_address=ip,
+                scope_type="LECROY,TEST,0,0", channel_descriptions={"C1": "x"})
+            hdf5_writer.write_time_array(off_h5, sname, ta, 0)
+
+        meta = {
+            "writer": "acquisition",
+            "hdf5_path": off_h5,
+            "config_scope_names": ["lpscope", "xrayscope"],
+        }
+        spool_format.write_run_metadata(self.spool, meta)
+        payload = spool_adapter.all_data_to_payload(all_data, 1, None)
+        with self._fail_one_scope("xrayscope", RuntimeError("boom")):
+            spool_format.write_shot(self.spool, payload)
+        spool_format.write_run_complete(self.spool, 1)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
+
+        with h5py.File(off_h5, "r") as f:
+            # Good scope has real data.
+            self.assertIn("C1_data", f["lpscope/shot_1"])
+            # Missing scope has a skipped marker, not data.
+            xray_shot = f["xrayscope/shot_1"]
+            self.assertTrue(xray_shot.attrs["skipped"])
+            self.assertNotIn("C1_data", xray_shot)
+
+
 class ChannelDescriptionCaseTests(unittest.TestCase):
     """The [channels] keys come back from ConfigParser lowercased (its default
     optionxform), while trace names come from the scope uppercase ("C1"); the
@@ -334,15 +440,22 @@ class OffloadEquivalenceTests(unittest.TestCase):
         self.direct_h5 = _temp_path(self, "direct.hdf5")
 
     def _build_direct(self, all_data_by_shot):
-        """Reproduce the in-process path output for the same inputs."""
-        _build_bmotion_skeleton(self.direct_h5, total_shots=len(all_data_by_shot))
+        """Reproduce the in-process path output for the same inputs.
+
+        positions_array is now append-only (see record_bmotion_positions), then
+        padded to total_shots at finalize -- mirror that here so the reference
+        file matches the offloaded one's canonical layout.
+        """
+        total = len(all_data_by_shot)
+        _build_bmotion_skeleton(self.direct_h5, total_shots=total)
         for shot_num, all_data in all_data_by_shot.items():
             hdf5_writer.write_shot_data(self.direct_h5, all_data, shot_num)
             with h5py.File(self.direct_h5, "a") as f:
                 ds = f["Control/Positions/MG_A/positions_array"]
-                ds[shot_num - 1] = (shot_num, float(shot_num), 2.0)
-        hdf5_writer.record_shot_count(self.direct_h5, ["lpscope"],
-                                      len(all_data_by_shot))
+                ds.resize((len(ds) + 1,))
+                ds[-1] = (shot_num, float(shot_num), 2.0)
+        hdf5_writer.record_shot_count(self.direct_h5, ["lpscope"], total)
+        spool_adapter._pad_positions_to_total(self.direct_h5, total)
 
     def test_offload_matches_direct_writer(self):
         shots = {1: _make_all_data(False), 2: _make_all_data(False)}
@@ -352,7 +465,7 @@ class OffloadEquivalenceTests(unittest.TestCase):
 
         # Spool + offload path: acquire creates the skeleton, offload fills it.
         _build_bmotion_skeleton(self.off_h5, total_shots=2)
-        meta = _make_meta(hdf5_path=self.off_h5)
+        meta = _make_meta(hdf5_path=self.off_h5, total_shots=2)
         spool_format.write_run_metadata(self.spool, meta)
         for shot_num, all_data in shots.items():
             payload = spool_adapter.all_data_to_payload(
@@ -748,7 +861,10 @@ def _build_grid_skeleton(hdf5_path, scope_name="lpscope", n_samples=128,
         ds.attrs["ypos"] = np.unique(setup['y'])
         if nz is not None:
             ds.attrs["zpos"] = np.unique(setup['z'])
-        pos.create_dataset("positions_array", shape=(total_shots,), dtype=dtype)
+        # Append-only during offload (matches the live grid skeleton); finalize
+        # pads to total_shots. Empty + chunked so it can be resized per shot.
+        pos.create_dataset("positions_array", shape=(0,), maxshape=(None,),
+                           dtype=dtype, chunks=True)
 
 
 class GridOffloadTests(unittest.TestCase):
@@ -768,6 +884,7 @@ class GridOffloadTests(unittest.TestCase):
             "hdf5_path": self.off_h5,
             "config_scope_names": ["lpscope"],
             "nz": nz,
+            "total_shots": 2,
         })
         for shot in (1, 2):
             payload = self.grid_spool_adapter.all_data_to_payload(

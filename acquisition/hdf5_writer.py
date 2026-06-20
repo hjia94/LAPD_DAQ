@@ -307,14 +307,28 @@ def _write_shot_data_into(f, all_data, shot_num, overwrite=False):
             header_ds.attrs['description'] = f'Binary header data for {tr}'
 
 
-def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason):
-    """Record a skipped shot under each scope group with a human-readable reason."""
+def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason,
+                                 skip_if_exists=False):
+    """Record a skipped shot under each scope group with a human-readable reason.
+
+    ``reason`` is either one string applied to every scope (whole-shot skip) or a
+    ``{scope_name: reason}`` map for per-scope partial skips, where each missing
+    scope carries its own reason (e.g. one timed out arming, another errored on
+    read). When ``skip_if_exists`` is true a scope whose ``shot_N`` group already
+    exists is left untouched -- idempotent across offload retries, and lets a
+    partial-shot skip be written alongside the good scopes' real data without
+    clobbering it. Scope names absent from the file are silently ignored.
+    """
+    per_scope = isinstance(reason, dict)
+    shot_name = f'shot_{shot_num}'
     with h5py.File(save_path, 'a') as f:
         for scope_name in scope_names:
-            scope_group = f[scope_name]
-            shot_group = scope_group.create_group(f'shot_{shot_num}')
+            if scope_name not in f or (skip_if_exists and shot_name in f[scope_name]):
+                continue
+            shot_group = f[scope_name].create_group(shot_name)
             shot_group.attrs['skipped'] = True
-            shot_group.attrs['skip_reason'] = str(reason)
+            shot_group.attrs['skip_reason'] = str(
+                reason[scope_name] if per_scope else reason)
             shot_group.attrs['acquisition_time'] = time.ctime()
 
 

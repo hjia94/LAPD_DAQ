@@ -248,6 +248,44 @@ def get_disk_full_pause_opts(config):
     return pause, retries
 
 
+#: Default consecutive fully-skipped shots before the run aborts. A fully-skipped
+#: shot is one where NO scope produced data (master failed to arm, or every scope
+#: failed). A persistent run of these means the trigger/master is dead, so the run
+#: stops cleanly rather than spooling thousands of empty shots overnight. 0 = off.
+DEFAULT_MAX_CONSECUTIVE_SKIPS = 10
+
+
+def get_max_consecutive_skips(config):
+    """Return the consecutive fully-skipped-shot limit before aborting a run.
+
+    Optional ``[acquisition] max_consecutive_skips`` (default 10). A single shot
+    with any data resets the counter; the limit only trips when the run produces
+    that many fully-empty shots in a row, which indicates a dead master/trigger
+    rather than isolated bad shots. Set to 0 to disable the circuit-breaker.
+    """
+    if 'acquisition' not in config:
+        return DEFAULT_MAX_CONSECUTIVE_SKIPS
+    return config.getint('acquisition', 'max_consecutive_skips',
+                         fallback=DEFAULT_MAX_CONSECUTIVE_SKIPS)
+
+
+def consecutive_skip_breaker_tripped(consecutive_skips, limit):
+    """Return True when the consecutive fully-skipped-shot brake should fire.
+
+    One definition shared by both acquisition drivers (the grid loop in
+    :mod:`scope_runner` and the bmotion loop in :mod:`bmotion`) so the trip
+    condition (limit enabled AND count reached) can't drift between paths. A
+    ``limit`` of 0 disables the brake.
+    """
+    return bool(limit) and consecutive_skips >= limit
+
+
+def consecutive_skip_abort_message(consecutive_skips, limit):
+    """Human-readable reason the consecutive-skip brake stopped the run."""
+    return (f"{consecutive_skips} consecutive fully-skipped shots "
+            f"(limit {limit}) -- check the master scope / trigger")
+
+
 def get_auto_plot_enabled(config):
     """Return whether to auto-plot the line profile after a run finishes.
 

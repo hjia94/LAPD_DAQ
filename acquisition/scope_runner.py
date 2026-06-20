@@ -22,7 +22,7 @@ Layered like this:
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import numpy as np
 from tqdm import tqdm
@@ -202,6 +202,13 @@ class MultiScopeAcquisition:
         # so it prints at most once per run.
         self._sync_warned = False
 
+        # Per-scope missing records ({name: reason}) for partial-shot tolerance.
+        # _pending_arm_failures is staged by arm_scopes_for_trigger and folded
+        # into the next dispatch; _last_missing_scopes holds the merged result of
+        # the most recent dispatch for the sink to read.
+        self._pending_arm_failures = {}
+        self._last_missing_scopes = {}
+
         if 'scope_ips' in config:
             self.scope_ips = dict(config.items('scope_ips'))
         else:
@@ -375,10 +382,15 @@ class MultiScopeAcquisition:
         else:
             raise ValueError(f"Invalid active_scopes value for {name}: {mode}")
 
-    def acquire_shot(self, active_scopes, shot_num, verbose=True):
-        """Acquire data from all active scopes for one shot (sequential)."""
+    def acquire_shot(self, active_scopes, shot_num, verbose=True, failed_out=None):
+        """Acquire data from all active scopes for one shot (sequential).
+
+        A scope that errors or returns no data is dropped from ``all_data`` and,
+        if ``failed_out`` is provided, recorded there as ``{name: reason}`` so the
+        caller can mark it missing-for-this-shot rather than losing it silently.
+        ``KeyboardInterrupt`` still aborts the run.
+        """
         all_data = {}
-        failed_scopes = []
 
         for name in active_scopes:
             try:
@@ -391,70 +403,112 @@ class MultiScopeAcquisition:
                     all_data[name] = (traces, data, headers)
                 else:
                     print(f"Warning: No valid data from {name} for shot {shot_num}")
-                    failed_scopes.append(name)
+                    if failed_out is not None:
+                        failed_out[name] = "no valid data acquired"
 
             except KeyboardInterrupt:
                 print(f"\nScope acquisition interrupted for {name}")
                 raise
             except Exception as e:
                 print(f"Error acquiring from {name}: {e}")
-                failed_scopes.append(name)
+                if failed_out is not None:
+                    failed_out[name] = f"read failed: {e}"
         if verbose:
             print("done")
         return all_data
 
-    def acquire_shot_parallel(self, active_scopes, shot_num, verbose=True):
+    def acquire_shot_parallel(self, active_scopes, shot_num, verbose=True,
+                              failed_out=None):
         """Acquire data from all active scopes for one shot, reading scopes in
         parallel threads.
 
         Each scope owns its own TCP/VICP socket, and the waveform read is
         blocking socket I/O that releases the GIL, so threads overlap the
         transfers. Contract matches `acquire_shot`: returns the same
-        {name: (traces, data, headers)} dict, skips scopes that error or return
-        no data, and lets KeyboardInterrupt propagate to abort the run.
+        {name: (traces, data, headers)} dict, drops scopes that error or return
+        no data (recording them in ``failed_out`` if given), and lets
+        KeyboardInterrupt propagate to abort the run.
+
+        All workers are awaited before any result is inspected, and results are
+        collected in ``active_scopes`` order, so a per-scope failure surfaces
+        deterministically and no thread is still reading when we react.
         """
         if len(active_scopes) <= 1:
             # Nothing to overlap; avoid thread/executor overhead.
-            return self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+            return self.acquire_shot(active_scopes, shot_num, verbose=verbose,
+                                     failed_out=failed_out)
 
         if verbose:
             print(f"Acquiring data from {len(active_scopes)} scopes in parallel...", end='')
 
         all_data = {}
-        failed_scopes = []
 
         with ThreadPoolExecutor(max_workers=len(active_scopes)) as executor:
-            futures = {
-                executor.submit(self._read_one_scope, name, mode): name
+            future_by_scope = {
+                name: executor.submit(self._read_one_scope, name, mode)
                 for name, mode in active_scopes.items()
             }
-            for future in futures:
-                name = futures[future]
-                try:
-                    traces, data, headers = future.result()
-                    if traces:
-                        all_data[name] = (traces, data, headers)
-                    else:
-                        print(f"Warning: No valid data from {name} for shot {shot_num}")
-                        failed_scopes.append(name)
-                except KeyboardInterrupt:
-                    print(f"\nScope acquisition interrupted for {name}")
-                    raise
-                except Exception as e:
-                    print(f"Error acquiring from {name}: {e}")
-                    failed_scopes.append(name)
+            wait(future_by_scope.values())
+
+        for name in active_scopes:
+            try:
+                traces, data, headers = future_by_scope[name].result()
+                if traces:
+                    all_data[name] = (traces, data, headers)
+                else:
+                    print(f"Warning: No valid data from {name} for shot {shot_num}")
+                    if failed_out is not None:
+                        failed_out[name] = "no valid data acquired"
+            except KeyboardInterrupt:
+                print(f"\nScope acquisition interrupted for {name}")
+                raise
+            except Exception as e:
+                print(f"Error acquiring from {name}: {e}")
+                if failed_out is not None:
+                    failed_out[name] = f"read failed: {e}"
         if verbose:
             print("done")
         return all_data
 
     def acquire_shot_dispatch(self, active_scopes, shot_num, verbose=True):
-        """Read all scopes for one shot, parallel or sequential per config."""
+        """Read all scopes for one shot, parallel or sequential per config.
+
+        Scopes that fail to arm or read are not lost: they are accumulated in
+        ``self.last_missing_scopes`` ({name: reason}) for this shot, so the caller
+        can record each as a per-scope skipped shot group (a partial shot) rather
+        than aborting the run. Any failures recorded by a preceding arm step
+        (``set_arm_failures``) are merged in and then cleared. Read this via
+        :meth:`last_missing_scopes` immediately after the call.
+        """
+        missing = dict(self._pending_arm_failures)
+        self._pending_arm_failures = {}
         if self.parallel_scope_read:
-            all_data = self.acquire_shot_parallel(active_scopes, shot_num, verbose=verbose)
+            all_data = self.acquire_shot_parallel(
+                active_scopes, shot_num, verbose=verbose, failed_out=missing)
         else:
-            all_data = self.acquire_shot(active_scopes, shot_num, verbose=verbose)
+            all_data = self.acquire_shot(
+                active_scopes, shot_num, verbose=verbose, failed_out=missing)
+        # A scope that produced data despite a transient arm hiccup is not missing.
+        for name in all_data:
+            missing.pop(name, None)
+        self._last_missing_scopes = missing
         self._warn_if_trigger_timestamps_desynced(all_data, active_scopes)
         return all_data
+
+    @property
+    def last_missing_scopes(self):
+        """Per-scope failures ({name: reason}) from the most recent dispatch."""
+        return dict(self._last_missing_scopes)
+
+    def set_arm_failures(self, failures):
+        """Record arm-stage per-scope failures to fold into the next dispatch.
+
+        ``arm_scopes_for_trigger`` calls this so a scope that timed out arming is
+        carried into the same shot's ``last_missing_scopes`` as a read failure
+        would be -- one unified missing-scope record regardless of which stage
+        dropped the scope.
+        """
+        self._pending_arm_failures = dict(failures or {})
 
     def _warn_if_trigger_timestamps_desynced(self, all_data, active_scopes):
         """Advisory-only: warn ONCE if scopes' trigger timestamps disagree.
@@ -549,6 +603,22 @@ class MultiScopeAcquisition:
         cached = self._arm_channels.get(name)
         self._arm_channels[name] = self.scopes[name].arm_master_single(channel=cached)
 
+    def _disarm_scope(self, name):
+        """Force a scope back to STOP and drop its cached arm channel.
+
+        Called when a slave times out / fails to arm. STOP stops it listening for
+        the master's edge, so a late-arming laggard cannot latch the NEXT edge and
+        masquerade as this shot's (or the next shot's) data. Dropping the cached
+        reference channel forces a fresh CLEAR_SWEEPS arm next shot. Best-effort:
+        a scope whose link is already broken cannot be disarmed, and that must not
+        itself abort the run.
+        """
+        self._arm_channels.pop(name, None)
+        try:
+            self.scopes[name].set_trigger_mode("STOP")
+        except Exception as e:  # noqa: BLE001 - disarm is best-effort
+            print(f"Warning: could not disarm timed-out scope {name}: {e}")
+
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
         """Arm all scopes for trigger, master armed LAST.
 
@@ -565,39 +635,80 @@ class MultiScopeAcquisition:
         (via its INR status register, _arm_slave) before the master is armed, and
         the master is armed with a strict SIN check (_arm_master) so it cannot
         fire before that confirmation. Slaves may still be armed concurrently
-        (parallel_scope_arm) to minimise skew; we join all slave arms -- which
-        also surfaces a not-ready slave as a raised error -- before arming the
-        master. Each scope owns its own transport with no shared state, so the
-        threaded arm is safe; arm errors propagate (we do NOT swallow them) so a
-        scope that fails to arm or confirm ready aborts the shot.
+        (parallel_scope_arm) to minimise skew; we wait for all slave arms before
+        arming the master. Each scope owns its own transport with no shared state,
+        so the threaded arm is safe.
+
+        Tolerance: a slave that fails to arm or does not confirm trigger-ready
+        within ``slave_ready_timeout`` is NOT fatal. It is force-STOPped (so a
+        late edge can't desync it) and recorded as missing for this shot via
+        :meth:`set_arm_failures`; the master is then armed over the slaves that
+        did confirm, the shot proceeds with those, and the laggard's data is
+        skipped. The MASTER is different: if it can't arm there is no
+        synchronized trigger at all, so :class:`_MasterArmError` is raised and the
+        caller records the whole shot as skipped.
         """
         if verbose:
             print("Arming scopes for trigger... ", end='')
 
         master = self._master_scope(active_scopes)
         slaves = [name for name in active_scopes if name != master]
+        failed_arm = {}
 
         # Arm all slaves first and confirm each is trigger-ready before the
-        # master goes. A slave that fails to confirm raises here and aborts.
+        # master goes. A slave that fails is dropped (recorded + disarmed), not
+        # fatal; the master arms over whichever slaves confirmed.
         if slaves:
             if self.parallel_scope_arm and len(slaves) > 1:
                 with ThreadPoolExecutor(max_workers=len(slaves)) as executor:
-                    futures = {
-                        executor.submit(self._arm_slave, name): name for name in slaves
+                    future_by_slave = {
+                        name: executor.submit(self._arm_slave, name)
+                        for name in slaves
                     }
-                    for future in futures:
-                        future.result()  # surface (re-raise) any per-scope arm failure
+                    wait(future_by_slave.values())
+                for name in slaves:
+                    try:
+                        future_by_slave[name].result()
+                    except Exception as e:  # noqa: BLE001 - tolerate one slave
+                        failed_arm[name] = f"arm failed: {e}"
             else:
                 for name in slaves:
-                    self._arm_slave(name)
+                    try:
+                        self._arm_slave(name)
+                    except Exception as e:  # noqa: BLE001 - tolerate one slave
+                        failed_arm[name] = f"arm failed: {e}"
+
+        # Disarm every slave that failed so a late edge can't desync it, and
+        # stage the failures so the next dispatch records them as missing.
+        for name in failed_arm:
+            self._disarm_scope(name)
+        self.set_arm_failures(failed_arm)
 
         # Master last: its trigger-out drives the slaves, so no slave can fire
-        # until every slave is already armed+ready and the master goes live.
+        # until every confirmed slave is armed and the master goes live. A master
+        # that cannot arm means no synchronized trigger -> full-shot skip.
         if master is not None:
-            self._arm_master(master)
+            try:
+                self._arm_master(master)
+            except Exception as e:
+                self._disarm_scope(master)
+                raise _MasterArmError(
+                    f"Master scope {master} failed to arm: {e}") from e
 
         if verbose:
-            print(f"armed (master={master})")
+            armed = [n for n in active_scopes if n not in failed_arm]
+            note = f" (dropped: {sorted(failed_arm)})" if failed_arm else ""
+            print(f"armed (master={master}; armed={armed}){note}")
+
+
+class _MasterArmError(RuntimeError):
+    """The master scope could not be armed -> no synchronized trigger this shot.
+
+    Distinct from a slave arm failure (which is tolerated): without the master
+    there is no trigger edge for any scope, so the whole shot is skipped. Callers
+    catch this and record the shot as skipped, then continue (the run-loop
+    circuit-breaker stops a run whose master is persistently dead).
+    """
 
 
 def _lecroy_scope_class():
@@ -721,7 +832,9 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
             print("done")
 
             if pos_manager is not None:
-                pos_manager.initialize_position_hdf5()
+                # append_mode: the offload owns the per-shot positions_array
+                # write (append per recorded shot) and pads to total at finalize.
+                pos_manager.initialize_position_hdf5(append_mode=True)
                 mc = pos_manager.initialize_motor()
                 if mc is None:
                     print("\n[!] Warning: Failed to initialize motor controller; "
@@ -744,11 +857,18 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                 "config_scope_names": list(active_scopes.keys()),
                 "description_path": description_path,
                 "nz": pos_manager.nz if pos_manager is not None else None,
+                # Planned shot count: finalize pads the appended positions_array
+                # back to this length with zero-fill for shots that never recorded.
+                "total_shots": total_shots,
             })
             print(f"Wrote run metadata to spool: {spool_dir}")
 
-            from .config import get_disk_full_pause_opts
+            from .config import (get_disk_full_pause_opts, get_max_consecutive_skips,
+                                 consecutive_skip_breaker_tripped,
+                                 consecutive_skip_abort_message)
             pause_seconds, max_retries = get_disk_full_pause_opts(config)
+            max_consecutive_skips = get_max_consecutive_skips(config)
+            consecutive_skips = 0
 
             with tqdm(total=total_shots, desc="Shots", unit="shot") as pbar:
                 for n in range(total_shots):
@@ -771,17 +891,32 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                             pbar.update(1)
                             continue
 
-                    msa.arm_scopes_for_trigger(active_scopes, verbose=False)
-                    all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=False)
+                    full_skip_reason = None
+                    try:
+                        msa.arm_scopes_for_trigger(active_scopes, verbose=False)
+                        all_data = msa.acquire_shot_dispatch(active_scopes, shot_num, verbose=False)
+                    except _MasterArmError as e:
+                        all_data = {}
+                        full_skip_reason = str(e)
+                    missing = msa.last_missing_scopes
                     if not all_data:
-                        tqdm.write(f"Skipping shot {shot_num} - no valid data")
+                        reason = full_skip_reason or "No valid data acquired"
+                        tqdm.write(f"Skipping shot {shot_num} - {reason}")
                         spool_format.write_shot(
                             spool_dir,
-                            grid_spool_adapter.skipped_payload(
-                                shot_num, "No valid data acquired", coords),
+                            grid_spool_adapter.skipped_payload(shot_num, reason, coords),
                         )
                         pbar.update(1)
+                        # Circuit-breaker: a run of fully-empty shots means a dead
+                        # master/trigger; stop cleanly rather than spooling empties.
+                        consecutive_skips += 1
+                        if consecutive_skip_breaker_tripped(
+                                consecutive_skips, max_consecutive_skips):
+                            tqdm.write("Stopping run: " + consecutive_skip_abort_message(
+                                consecutive_skips, max_consecutive_skips))
+                            break
                         continue
+                    consecutive_skips = 0
 
                     if pos_manager is not None and mc is not None:
                         if pos_manager.nz is None:
@@ -791,7 +926,8 @@ def run_acquisition_spooled(spool_dir, hdf5_path, config_path):
                             xpos, ypos, zpos = mc.probe_positions
                             coords = {'x': xpos, 'y': ypos, 'z': zpos}
 
-                    payload = grid_spool_adapter.all_data_to_payload(all_data, shot_num, coords)
+                    payload = grid_spool_adapter.all_data_to_payload(
+                        all_data, shot_num, coords, missing_scopes=missing)
                     spool_format.write_shot_with_disk_full_retry(
                         spool_dir, payload, parallel=msa.parallel_spool_write,
                         pause_seconds=pause_seconds, max_retries=max_retries,
