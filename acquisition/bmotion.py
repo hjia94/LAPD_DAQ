@@ -755,6 +755,24 @@ def _run_sequential(msa, active_scopes, hdf5_path, run_manager, ml_order, nshots
     return shot_num
 
 
+def _run_config_error_hint(err):
+    """Pick the most actionable fix hint for a RunManager construction failure.
+
+    The library's signature failure -- ``'NoneType' object has no attribute
+    'terminated'`` -- means a motion group's *drive* (or transform) config was
+    rejected and silently left unbuilt, so point the user straight at that
+    table; otherwise fall back to a general structure hint.
+    """
+    msg = str(err)
+    if isinstance(err, AttributeError) and "terminated" in msg:
+        return ("A motion group's drive (or transform) could not be built from "
+                "its config. Check each motion group's [...drive...] table "
+                "(name, axes, and per-axis ip/units) and its [...transform...] "
+                "against the example TOML.")
+    return ("Check the [run] / [motion_group] / [...drive...] structure against "
+            "the example TOML.")
+
+
 def _load_bmotion_run_manager(toml_path):
     """Build the bapsf_motion RunManager from ``toml_path``, failing loudly.
 
@@ -804,18 +822,24 @@ def _load_bmotion_run_manager(toml_path):
             hint="Fix the TOML syntax at the reported position.",
         )
 
-    # Build the manager. The library validates structure and may raise
-    # TypeError/ValueError for a malformed (but syntactically valid) config;
-    # translate those into a typed TOML error too.
+    # Build the manager. The library is fragile on a malformed (but
+    # syntactically valid) config: besides raising TypeError/ValueError for a
+    # bad run/motion-group structure, it *swallows* a failed drive/transform
+    # build (leaving the component None) and then dereferences it -- surfacing as
+    # ``AttributeError: 'NoneType' object has no attribute 'terminated'`` from
+    # deep inside MotionGroup._spawn_drive. We therefore translate ANY exception
+    # from construction into a typed TOML error so the user always learns it was
+    # the TOML at fault, with a tailored hint for the drive/transform case.
     try:
         run_manager = bmotion.actors.RunManager(toml_text, auto_run=True)
-    except (TypeError, ValueError) as e:
+    except Exception as e:
         raise TomlConfigError(
-            f"bmotion_config.toml is not a valid run configuration: {e}",
+            f"bmotion_config.toml is not a valid run configuration: "
+            f"{type(e).__name__}: {e}",
             file_path=toml_path,
-            hint="Check the [run] / [motion_group] structure against the "
-                 "example TOML.",
-        )
+            section="motion_group",
+            hint=_run_config_error_hint(e),
+        ) from e
 
     # The library leaves mgs empty (after logging an error) when the TOML has no
     # valid [motion_group] tables; convert that swallowed failure into an
