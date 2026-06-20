@@ -425,6 +425,85 @@ Future EPICS-related PV fields may be added to the INI config during migration,
 but EPICS-native `.db`, `.dbd`, `.template`, `.substitutions`, and `st.cmd`
 files should eventually own hardware control configuration.
 
+## bmotion TOML Reference
+
+`Data_Run_bmotion.py` reads a **second** file, `bmotion_config.toml`, that
+describes the probe-drive *hardware* (the INI's `[bmotion]` section only selects
+which of these groups to run today). This TOML is parsed by `bapsf_motion`'s
+`RunManager`. If it is missing a required table or field, the run aborts at
+startup with a `DATA RUN DID NOT START -- configuration error` message naming
+`bmotion_config.toml`; the notes below say what must be present so that does not
+happen.
+
+A motion group only loads if **every** part below is present and valid. A
+missing/empty `drive` or `transform` is the usual cause of the
+`'NoneType' object has no attribute 'terminated'` failure: the library silently
+discards the half-built component and then dereferences it.
+
+Required structure (one `[run]`, at least one motion group under it):
+
+```toml
+[run]
+name = "my data run"            # required: a name for the run
+
+# One motion group. The table name under [run] (here "mg") is arbitrary; add
+# more (e.g. [run.mg2]) for multiple drives. The INI [bmotion] motion_groups
+# key selects groups by the drive name below.
+[run.mg]
+name = "P32"                    # required: motion-group name
+
+# --- Drive: the physical stage and its motor axes -----------------------------
+[run.mg.drive]
+name = "XY-drive"              # required: drive name (used by [bmotion] selection)
+
+# One [...axes.N] table per motor axis. Each axis requires ALL of these keys:
+[run.mg.drive.axes.0]
+name = "x"                     # axis label (the run expects axes named x and y)
+ip = "192.168.0.70"            # motor controller IP
+units = "cm"                   # motion-space units
+units_per_rev = 0.508          # distance per motor revolution
+
+[run.mg.drive.axes.1]
+name = "y"
+ip = "192.168.0.80"
+units = "cm"
+units_per_rev = 0.508
+
+# --- Transform: motion-space <-> drive-space mapping --------------------------
+[run.mg.transform]
+type = "identity"              # required: transform type (e.g. "identity")
+
+# --- Motion builder: the grid of positions to visit --------------------------
+[run.mg.motion_builder]
+
+# One [...space.N] per axis, in the same order as the drive axes. The DAQ
+# requires exactly two axes labelled x and y (a rectangular grid).
+[run.mg.motion_builder.space.0]
+label = "x"
+range = [-30, 30]              # min, max in motion-space units
+num = 13                       # number of points along this axis
+
+[run.mg.motion_builder.space.1]
+label = "y"
+range = [-30, 30]
+num = 13
+```
+
+Checklist for "what must be included":
+
+- **`[run]`** with a `name`, and **at least one motion-group table** under it
+  (no motion groups → `no valid motion groups were defined`).
+- **`[...drive]`** with a `name` and an **`axes`** table; each
+  **`[...drive.axes.N]`** must have `name`, `ip`, `units`, and `units_per_rev`
+  (any missing axis key → the drive is discarded → `NoneType ... terminated`).
+- **`[...transform]`** with a `type`.
+- **`[...motion_builder]`** with one **`[...space.N]`** per axis, each having
+  `label`, `range`, and `num`.
+- The DAQ's HDF5 layout expects exactly **two axes labelled `x` and `y`** on a
+  rectangular grid; other layouts are rejected later with a clear message.
+- Each drive `name` must be **unique** across motion groups (the INI `[bmotion]`
+  selection resolves groups by drive name).
+
 ## HDF5 Output
 
 The new writer keeps the root-level scope layout compatible with old analysis
