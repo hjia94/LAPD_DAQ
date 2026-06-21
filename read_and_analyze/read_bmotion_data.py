@@ -28,6 +28,15 @@ try:
 except ImportError:
     pass
 
+# Allow running directly (e.g. the IDE "Run" button, ``python read_bmotion_data.py``
+# from inside this folder) as well as ``python -m read_and_analyze.read_bmotion_data``
+# from the repo root. The root-level ``scope_io``/``acquisition`` packages are only
+# importable when the repo root is on sys.path; ``-m`` adds it but a direct script run
+# does not, so put it there ourselves before importing them.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from scope_io import (
     WAVEDESC_SIZE as WAVEDESC_BYTES,
     read_hdf5_scope_channel_shots,

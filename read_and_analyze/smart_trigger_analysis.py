@@ -44,6 +44,15 @@ import os
 
 import numpy as np
 
+# Allow running directly (IDE "Run" button / from inside this folder) as well as
+# ``python -m read_and_analyze.<module>`` from the repo root: the root-level
+# ``scope_io``/``acquisition`` packages need the repo root on sys.path, which ``-m``
+# adds but a direct script run does not, so put it there ourselves.
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from scope_io import (
     open_hdf5_readonly, read_hdf5_scope_channel_shots, read_hdf5_scope_tarr,
 )

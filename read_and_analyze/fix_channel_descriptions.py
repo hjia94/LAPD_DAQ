@@ -28,6 +28,14 @@ try:  # match acquisition.hdf5_writer: register blosc2 so old files open cleanly
 except ImportError:
     pass
 
+# Allow running directly (IDE "Run" button / from inside this folder) as well as
+# ``python -m read_and_analyze.<module>`` from the repo root: the root-level
+# ``acquisition``/``read_and_analyze`` packages need the repo root on sys.path,
+# which ``-m`` adds but a direct script run does not, so put it there ourselves.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from acquisition.config import get_channel_descriptions
 from acquisition.hdf5_writer import (
     CHANNEL_DESCRIPTION_SUFFIX,
