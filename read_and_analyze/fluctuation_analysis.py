@@ -12,8 +12,8 @@ the position's peak). The two relative terms are summed into a score; the
 lowest-score window wins for each (scope, channel, position).
 
 Filtering, shot grouping, and trace loading are imported from
-:mod:`read_and_analyze.filter_data`; reading/decoding is delegated to
-``lab_scopes.io.hdf5``.
+:mod:`read_and_analyze.filter_data`; reading/decoding is delegated to the
+in-repo ``scope_io`` package.
 
 There is NO command line; all knobs are the constants below (filtering knobs
 live in ``filter_data``). Run with:
@@ -32,7 +32,16 @@ import os
 
 import numpy as np
 
-from lab_scopes.io.hdf5 import read_hdf5_scope_tarr
+# Allow running directly (IDE "Run" button / from inside this folder) as well as
+# ``python -m read_and_analyze.<module>`` from the repo root: the root-level
+# ``scope_io``/``acquisition`` packages need the repo root on sys.path, which ``-m``
+# adds but a direct script run does not, so put it there ourselves.
+import sys
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from scope_io import read_hdf5_scope_tarr
 try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
     from read_and_analyze.read_bmotion_data import (
         read_positions, _scope_groups, _shot_numbers, _channel_names,
