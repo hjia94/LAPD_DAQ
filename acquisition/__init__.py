@@ -1,8 +1,8 @@
 """Acquisition engines used by the Data_Run_*.py entry-point scripts.
 
 This package re-exports the public surface that callers previously imported
-from the top-level `multi_scope_acquisition` and `acquisition_bmotion` modules,
-so callers only need to know about the `acquisition` package.
+from the standalone acquisition modules (now retired to ``legacy/``), so
+callers only need to know about the `acquisition` package.
 """
 
 from .bmotion_config import BmotionSelection, resolve_bmotion_selection

@@ -78,6 +78,19 @@ The new `lapd_daq` framework stores planned positions under
 `/Control/Positions/positions_setup_array` and achieved positions under
 `/Control/Positions/positions_array`.
 
+### Note on "legacy" naming
+
+The motor objects in this package are operational, not retired. Two unrelated
+things use the word "legacy" and should not be confused:
+
+- The top-level `legacy/` folder (`multi_scope_acquisition.py`,
+  `Acquire_Scope_Data_2D.py`) is reference/storage only -- it is not imported
+  by any operational code and the system runs without it.
+- `lapd_daq/devices/legacy_motion.py` (`LegacyMotorAdapter`) is **live** code.
+  "Legacy" here means it adapts the established motor controllers in *this*
+  `motion` package for the new `lapd_daq` framework; it has nothing to do with
+  the `legacy/` folder. Do not delete it in a sweep that removes `legacy/`.
+
 ## Utility Functions
 
 Common helpers remain available for legacy scripts and exploratory checks:

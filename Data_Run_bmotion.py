@@ -29,7 +29,9 @@ from acquisition import run_acquisition_bmotion_spooled
 from acquisition.config import (
     get_storage_paths,
     load_experiment_config,
+    validate_bmotion_ini,
 )
+from acquisition.config_errors import ConfigError
 from acquisition.logging_utils import close_log_file_handlers
 from acquisition.run_paths import resolve_run_paths
 from acquisition.run_resume import (
@@ -82,6 +84,23 @@ def launch_offload(spool_dir, config_path):
 
 
 #===============================================================================================================================================
+# Config-error reporting
+#===============================================================================================================================================
+
+def report_config_error(err):
+    """Print a clear, boxed message for an INI/TOML configuration error.
+
+    The boxed message already names the file and location; the exception's own
+    ``edit_instruction`` adds the file-specific "what to do next" line, so this
+    reporter doesn't need to know which subclass it was handed.
+    """
+    print()
+    print(err.format_for_terminal())
+    if err.edit_instruction:
+        print(err.edit_instruction)
+
+
+#===============================================================================================================================================
 # Main Data Run sequence
 #===============================================================================================================================================
 def main():
@@ -93,14 +112,20 @@ def main():
     # variable. resolve_run_paths keys identity on the name (globbing <name>_*),
     # so a run started before midnight and continued the next day still targets
     # the same HDF5 file + spool subfolder instead of silently starting a new pair.
-    config, _ = load_experiment_config(config_path)
-    spool_root, _ = get_storage_paths(config)
-    # Spooled-only: without a spool_dir there is nothing to run, so fail loudly.
-    if not spool_root:
-        print('ERROR: no [storage] spool_dir configured. Non-spooled mode was '
-              'removed; set a spool_dir in experiment_config.ini.')
+    #
+    # Load + validate the INI and prepare paths *before* launching the offload or
+    # touching hardware. A mistake in experiment_config.ini is caught here and
+    # reported below as an IniConfigError, so nothing is started against a broken
+    # config and the user sees exactly which file/key is wrong.
+    try:
+        config, _ = load_experiment_config(config_path, required=True)
+        validate_bmotion_ini(config, config_path)
+        spool_root, _ = get_storage_paths(config)
+        paths = resolve_run_paths(config, base_path, spool_root=spool_root)
+    except ConfigError as e:
+        report_config_error(e)
         sys.exit(1)
-    paths = resolve_run_paths(config, base_path, spool_root=spool_root)
+
     hdf5_path = paths.hdf5_path
 
     # Prompt (ask) and apply (do) are separated so this stays flat: a fresh run
@@ -130,6 +155,10 @@ def main():
 
     except KeyboardInterrupt:
         print('\n______Halted due to Ctrl-C______', '  at', time.ctime())
+    except ConfigError as e:
+        # A bad bmotion_config.toml surfaces here (the INI was already validated
+        # above). Report it the same clean way -- the run never actually started.
+        report_config_error(e)
     except Exception as e:
         import traceback
         print(f'\n______Halted due to error: {str(e)}______', '  at', time.ctime())

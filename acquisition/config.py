@@ -8,6 +8,8 @@ the resulting HDF5 file.
 import configparser
 import os
 
+from .config_errors import IniConfigError, MISSING_FILE_HINT
+
 
 DESCRIPTION_FILENAME = "description.txt"
 
@@ -62,8 +64,17 @@ def resolve_description_path_from_config(config_path):
     return resolve_description_path(os.path.dirname(os.path.abspath(config_path)))
 
 
-def load_experiment_config(config_path='experiment_config.ini'):
+def load_experiment_config(config_path='experiment_config.ini', required=False):
     """Load experiment configuration from config file.
+
+    By default this stays tolerant of a *missing* file (returns an empty config
+    on defaults, never raises) so the many callers that relied on that contract
+    are unaffected. Pass ``required=True`` (the bmotion entry point does) to turn
+    a missing/unreadable file into an explicit :class:`IniConfigError` instead.
+
+    A *malformed* file (bad section header, duplicate key, line with no ``=``)
+    always raises :class:`IniConfigError` -- it used to raise a raw
+    ``configparser`` error, so this only makes the existing failure clearer.
 
     Returns:
         tuple: (config, raw_config_text)
@@ -75,16 +86,42 @@ def load_experiment_config(config_path='experiment_config.ini'):
     # lapd_daq.config.load_run_config.
     config = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
 
-    # Read the raw config text
+    # Read the raw config text (kept verbatim for HDF5 storage). A missing or
+    # unreadable file is a hard error only when the caller asked for it
+    # (required=True); otherwise preserve the historical tolerant behavior.
     raw_config_text = ""
     try:
         with open(config_path, 'r') as f:
             raw_config_text = f.read()
-    except Exception as e:
+    except FileNotFoundError:
+        if required:
+            raise IniConfigError(
+                "experiment_config.ini was not found.",
+                file_path=config_path,
+                hint=MISSING_FILE_HINT,
+            )
+        print(f"Warning: Could not read raw config file: {config_path} not found")
+    except OSError as e:
+        if required:
+            raise IniConfigError(
+                f"experiment_config.ini could not be read: {e}",
+                file_path=config_path,
+            )
         print(f"Warning: Could not read raw config file: {e}")
 
-    # Parse the config
-    config.read(config_path)
+    # Parse the config. configparser raises precise, line-numbered errors for a
+    # missing section header, a duplicate section/key, or a line with no '=';
+    # translate them into an IniConfigError that carries that location so the
+    # entry script can point the user straight at the typo.
+    try:
+        config.read_string(raw_config_text, source=config_path)
+    except configparser.Error as e:
+        raise IniConfigError(
+            str(e).replace("\n", " "),
+            file_path=config_path,
+            line=getattr(e, "lineno", None),
+            section=getattr(e, "section", None),
+        )
 
     # Set defaults if sections don't exist
     if 'experiment' not in config:
@@ -101,6 +138,57 @@ def load_experiment_config(config_path='experiment_config.ini'):
     return config, raw_config_text
 
 
+def validate_bmotion_ini(config, config_path=None):
+    """Check that ``experiment_config.ini`` has what a bmotion run requires.
+
+    The parser is permissive (it adds empty default sections), so a syntactically
+    valid file can still be missing the pieces the run actually needs. This
+    pre-flight check fails loudly -- with the exact missing section/key -- before
+    the run launches the offload or builds the TOML's RunManager, so the user
+    learns about an INI mistake immediately rather than mid-startup.
+
+    Required: ``[storage] spool_dir`` (spooled-only pipeline) and
+    ``[experiment] name`` (the HDF5 filename is derived from it). The optional
+    ``[bmotion]`` section is validated only for *known* keys having sane values;
+    its absence is fine (defaults to all groups, forward, interleaved).
+
+    Raises :class:`acquisition.config_errors.IniConfigError` on the first
+    problem found.
+    """
+    spool_dir, _ = get_storage_paths(config)
+    if not spool_dir:
+        raise IniConfigError(
+            "no spool directory configured; the spooled pipeline cannot run "
+            "without one.",
+            file_path=config_path,
+            section="storage",
+            key="spool_dir",
+            hint="Add a [storage] section with 'spool_dir = <fast local path>'.",
+        )
+
+    if not _raw_experiment_name(config):
+        raise IniConfigError(
+            "no experiment name configured; the HDF5 filename is derived from "
+            "it.",
+            file_path=config_path,
+            section="experiment",
+            key="name",
+            hint="Add a [experiment] section with 'name = <experiment name>'.",
+        )
+
+
+def _raw_experiment_name(config):
+    """Return the configured experiment name (``name`` or ``exp_name``), or "".
+
+    Shared by :func:`get_experiment_name` (which applies the 'experiment'
+    default) and :func:`validate_bmotion_ini` (which needs to distinguish an
+    unset name from the default), so the two read the same keys one way.
+    """
+    name = (config.get('experiment', 'name', fallback=None)
+            or config.get('experiment', 'exp_name', fallback=None))
+    return (name or "").strip()
+
+
 def get_experiment_name(config):
     """Return the experiment name from [experiment] name (or exp_name).
 
@@ -108,9 +196,7 @@ def get_experiment_name(config):
     lives in the config file and the HDF5 filename is derived from it after
     parsing. Falls back to 'experiment' if unset.
     """
-    name = (config.get('experiment', 'name', fallback=None)
-            or config.get('experiment', 'exp_name', fallback=None))
-    return (name or 'experiment').strip()
+    return _raw_experiment_name(config) or 'experiment'
 
 
 def get_channel_descriptions(config):
@@ -246,6 +332,44 @@ def get_disk_full_pause_opts(config):
         pause = config.getfloat('storage', 'disk_full_pause_seconds', fallback=pause)
         retries = config.getint('storage', 'disk_full_max_retries', fallback=retries)
     return pause, retries
+
+
+#: Default consecutive fully-skipped shots before the run aborts. A fully-skipped
+#: shot is one where NO scope produced data (master failed to arm, or every scope
+#: failed). A persistent run of these means the trigger/master is dead, so the run
+#: stops cleanly rather than spooling thousands of empty shots overnight. 0 = off.
+DEFAULT_MAX_CONSECUTIVE_SKIPS = 10
+
+
+def get_max_consecutive_skips(config):
+    """Return the consecutive fully-skipped-shot limit before aborting a run.
+
+    Optional ``[acquisition] max_consecutive_skips`` (default 10). A single shot
+    with any data resets the counter; the limit only trips when the run produces
+    that many fully-empty shots in a row, which indicates a dead master/trigger
+    rather than isolated bad shots. Set to 0 to disable the circuit-breaker.
+    """
+    if 'acquisition' not in config:
+        return DEFAULT_MAX_CONSECUTIVE_SKIPS
+    return config.getint('acquisition', 'max_consecutive_skips',
+                         fallback=DEFAULT_MAX_CONSECUTIVE_SKIPS)
+
+
+def consecutive_skip_breaker_tripped(consecutive_skips, limit):
+    """Return True when the consecutive fully-skipped-shot brake should fire.
+
+    One definition shared by both acquisition drivers (the grid loop in
+    :mod:`scope_runner` and the bmotion loop in :mod:`bmotion`) so the trip
+    condition (limit enabled AND count reached) can't drift between paths. A
+    ``limit`` of 0 disables the brake.
+    """
+    return bool(limit) and consecutive_skips >= limit
+
+
+def consecutive_skip_abort_message(consecutive_skips, limit):
+    """Human-readable reason the consecutive-skip brake stopped the run."""
+    return (f"{consecutive_skips} consecutive fully-skipped shots "
+            f"(limit {limit}) -- check the master scope / trigger")
 
 
 def get_auto_plot_enabled(config):

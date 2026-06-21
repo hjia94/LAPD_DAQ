@@ -173,6 +173,8 @@ def _make_msa(scopes, parallel_read=True, parallel_arm=True):
     msa.parallel_spool_write = True
     msa.slave_ready_timeout = 5.0
     msa._sync_warned = False
+    msa._pending_arm_failures = {}
+    msa._last_missing_scopes = {}
     return msa
 
 
@@ -220,6 +222,21 @@ class ParallelReadCorrectnessTest(unittest.TestCase):
         self.assertIn("A", out)
         self.assertNotIn("B", out)
 
+    def test_failing_scope_recorded_as_missing(self):
+        """A read failure must surface in last_missing_scopes (partial-shot)."""
+        scopes = {
+            "A": FakeScope(["C1"]),
+            "B": FakeScope(["C2"], raise_exc=RuntimeError("boom")),
+        }
+        active = {"A": 0, "B": 0}
+        msa = _make_msa(scopes)
+        out = msa.acquire_shot_dispatch(active, 1, verbose=False)
+        self.assertEqual(set(out), {"A"})
+        self.assertIn("B", msa.last_missing_scopes)
+        self.assertIn("boom", msa.last_missing_scopes["B"])
+        # The good scope is NOT marked missing.
+        self.assertNotIn("A", msa.last_missing_scopes)
+
     def test_keyboardinterrupt_propagates(self):
         scopes = {
             "A": FakeScope(["C1"]),
@@ -242,16 +259,16 @@ class ParallelReadCorrectnessTest(unittest.TestCase):
 class DispatchRoutingTest(unittest.TestCase):
     def test_dispatch_uses_parallel_when_flag_true(self):
         msa = _make_msa({"A": FakeScope(["C1"])}, parallel_read=True)
-        with mock.patch.object(msa, "acquire_shot_parallel") as par, \
-             mock.patch.object(msa, "acquire_shot") as seq:
+        with mock.patch.object(msa, "acquire_shot_parallel", return_value={}) as par, \
+             mock.patch.object(msa, "acquire_shot", return_value={}) as seq:
             msa.acquire_shot_dispatch({"A": 0}, 1, verbose=False)
             par.assert_called_once()
             seq.assert_not_called()
 
     def test_dispatch_uses_sequential_when_flag_false(self):
         msa = _make_msa({"A": FakeScope(["C1"])}, parallel_read=False)
-        with mock.patch.object(msa, "acquire_shot_parallel") as par, \
-             mock.patch.object(msa, "acquire_shot") as seq:
+        with mock.patch.object(msa, "acquire_shot_parallel", return_value={}) as par, \
+             mock.patch.object(msa, "acquire_shot", return_value={}) as seq:
             msa.acquire_shot_dispatch({"A": 0}, 1, verbose=False)
             seq.assert_called_once()
             par.assert_not_called()
@@ -315,29 +332,42 @@ class ParallelArmTest(unittest.TestCase):
                                   ("B", "start"), ("B", "end"),
                                   ("C", "start"), ("C", "end")])
 
-    def test_arm_error_propagates(self):
-        # A failed slave arm must abort the shot, not be silently swallowed.
-        # B and C are slaves (A would be master as last? no -- C is last). Make a
-        # non-master scope raise so the error surfaces from the slave arm join.
+    def test_failed_slave_arm_is_tolerated_and_recorded(self):
+        # A failed slave arm must NOT abort: the slave is dropped (recorded as a
+        # pending arm failure for the next dispatch) and the master still arms.
         scopes = {
             "A": FakeScope(["C1"], arm_raise=RuntimeError("arm failed")),
             "B": FakeScope(["C2"]),
             "C": FakeScope(["C3"]),  # master
         }
         msa = _make_msa(scopes, parallel_arm=True)
-        with self.assertRaises(RuntimeError):
-            msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
+        msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)  # no raise
+        self.assertIn("A", msa._pending_arm_failures)
+        self.assertIn("arm failed", msa._pending_arm_failures["A"])
+        # The dropped slave's cached arm channel is cleared so it re-arms fresh.
+        self.assertNotIn("A", msa._arm_channels)
 
-    def test_slave_not_ready_aborts_shot(self):
-        # A slave whose INR never reports trigger-ready must abort the shot
-        # (raise) so the master is never armed against an unready slave.
+    def test_not_ready_slave_is_tolerated_and_recorded(self):
+        # A slave whose INR never reports trigger-ready is dropped (disarmed +
+        # recorded), not fatal; the master still arms over the ready scopes.
         scopes = {
             "A": FakeScope(["C1"], ready=False),  # slave never becomes ready
             "B": FakeScope(["C2"]),  # master (last)
         }
         msa = _make_msa(scopes, parallel_arm=False)
         msa.slave_ready_timeout = 0.05  # keep the test fast
-        with self.assertRaises(RuntimeError):
+        msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)  # no raise
+        self.assertIn("A", msa._pending_arm_failures)
+
+    def test_failed_master_arm_raises_master_arm_error(self):
+        # The master is different: if it cannot arm there is no synchronized
+        # trigger, so the whole shot must be aborted (the caller skips it).
+        scopes = {
+            "A": FakeScope(["C1"]),  # slave, fine
+            "B": FakeScope(["C2"], arm_raise=RuntimeError("master dead")),  # master
+        }
+        msa = _make_msa(scopes, parallel_arm=False)
+        with self.assertRaises(scope_runner._MasterArmError):
             msa.arm_scopes_for_trigger(list(scopes.keys()), verbose=False)
 
     def test_master_not_gated_by_its_own_readiness(self):

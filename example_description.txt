@@ -73,9 +73,18 @@ parallel_spool_write: write each scope's spool files concurrently. Good on an
 
 slave_ready_timeout: seconds (float) to wait for each SLAVE scope to report,
   via its INR register, that its trigger is armed BEFORE the master is armed
-  (a slave not yet ready would miss the master's edge and desync the run). If
-  the wait expires the shot is recorded as skipped rather than captured
-  desynced. Only matters with 2+ scopes; default 5.0.
+  (a slave not yet ready would miss the master's edge and desync the run). A
+  slave that does not report ready within this window is DROPPED for that shot
+  (disarmed, its data recorded as missing) and the run continues with the
+  scopes that did arm -- one bad scope no longer aborts the shot. Only matters
+  with 2+ scopes; default 5.0.
+
+max_consecutive_skips: integer safety brake. A shot where NO scope produced
+  data (the master failed to arm, or every scope failed) is a "fully-skipped"
+  shot. If this many fully-skipped shots occur in a row the run stops cleanly
+  and the HDF5 is finalized with the shots taken so far -- this catches a dead
+  master/trigger before it spools thousands of empty shots overnight. Any shot
+  with data resets the count. Default 10; set 0 to disable the brake.
 
 
 [nshots]
