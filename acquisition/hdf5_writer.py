@@ -158,25 +158,12 @@ def write_description(save_path, description):
         f.attrs['description'] = description
 
 
-# Suffix for the per-channel description attributes written on a scope group
-# (e.g. ``C1_description``). Single source of truth for the layout so the
-# writer, the reader, and the old-file retrofit tool agree on one convention;
-# the plain ``description`` scope attr (the scope's own free-text label) is NOT
-# a channel description and is excluded by :func:`channel_descriptions_from_attrs`.
-CHANNEL_DESCRIPTION_SUFFIX = '_description'
-
-
-def channel_descriptions_from_attrs(attrs):
-    """Read ``{channel: text}`` from a scope group's ``<CH>_description`` attrs.
-
-    Inverse of the per-channel writes in :func:`write_scope_metadata`. Skips the
-    scope's own ``description`` attr (the bare suffix with no channel prefix).
-    """
-    return {
-        name[:-len(CHANNEL_DESCRIPTION_SUFFIX)]: attrs[name]
-        for name in attrs
-        if name.endswith(CHANNEL_DESCRIPTION_SUFFIX) and name != 'description'
-    }
+# The canonical channel-description layout (the ``<CH>_description`` suffix and
+# its inverse parser) lives in ``scope_io`` -- the public, dependency-light read
+# package -- so the writer here and every reader agree on one convention. The
+# writer only needs the suffix to name the attrs it writes; readers import the
+# parser straight from scope_io.
+from scope_io import CHANNEL_DESCRIPTION_SUFFIX
 
 
 def write_scope_metadata(save_path, scope_name, description, ip_address, scope_type,

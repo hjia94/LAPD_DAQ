@@ -39,12 +39,12 @@ if _REPO_ROOT not in sys.path:
 
 from scope_io import (
     WAVEDESC_SIZE as WAVEDESC_BYTES,
+    read_hdf5_scope_channel_descriptions,
     read_hdf5_scope_channel_shots,
     read_hdf5_scope_data,
     read_hdf5_scope_tarr,
+    scope_shot_numbers as _shot_numbers,
 )
-
-from acquisition.hdf5_writer import channel_descriptions_from_attrs
 
 # User-changeable knobs live in analysis_config.py (single source of truth);
 # imported here under the historical names so the rest of the module is unchanged.
@@ -72,18 +72,6 @@ def _scope_groups(f):
             and any(k.startswith("shot_") for k in g.keys())]
 
 
-def _shot_numbers(scope_group):
-    """Return sorted shot numbers present in a scope group."""
-    nums = []
-    for k in scope_group.keys():
-        if k.startswith("shot_"):
-            try:
-                nums.append(int(k.split("_", 1)[1]))
-            except ValueError:
-                pass
-    return sorted(nums)
-
-
 def _channel_names(scope_group, shot_num):
     """Channel names (e.g. ['C1','C2']) recorded for a given shot."""
     shot = scope_group.get(f"shot_{shot_num}")
@@ -95,32 +83,14 @@ def _channel_names(scope_group, shot_num):
 def read_channel_descriptions(f, scope_name):
     """Return ``{channel: description}`` for a scope, handling both layouts.
 
-    New files (canonical): the acquire process writes one ``<CH>_description``
-    attribute per displayed channel on the scope group at init time. Old files:
-    the description was duplicated as a ``description`` attribute on every
-    shot's ``<CH>_data`` dataset, so fall back to the first shot that actually
-    holds data (a skipped shot is just a marker group with no ``*_data``).
-    This is why ``scope_io`` does not provide a channel-description reader:
-    the naive ``shot_1`` lookup silently returns nothing when that shot was
-    skipped. Old files can be upgraded in place to the new layout with
+    Thin wrapper over the canonical reader in ``scope_io`` (the public read
+    package): new files store one ``<CH>_description`` attr per channel on the
+    scope group; old files fall back to the first populated shot's ``<CH>_data``
+    ``description`` attr (skipping the naive ``shot_1`` lookup that misses a
+    skipped first shot). Old files can be upgraded in place with
     ``python -m read_and_analyze.fix_channel_descriptions``.
     """
-    if scope_name not in f:
-        return {}
-    scope_group = f[scope_name]
-
-    descriptions = channel_descriptions_from_attrs(scope_group.attrs)
-    if descriptions:
-        return descriptions
-
-    for shot_num in _shot_numbers(scope_group):
-        shot = scope_group[f"shot_{shot_num}"]
-        for ch in _channel_names(scope_group, shot_num):
-            descriptions[ch] = shot[f"{ch}_data"].attrs.get(
-                "description", "No description available")
-        if descriptions:
-            break
-    return descriptions
+    return read_hdf5_scope_channel_descriptions(f, scope_name)
 
 
 def _sample_shots(shot_nums, n=3):

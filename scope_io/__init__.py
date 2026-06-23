@@ -6,17 +6,25 @@ Re-exports the HDF5 reader helpers so callers can do
 """
 
 from .hdf5 import (
+    CHANNEL_DESCRIPTION_SUFFIX,
+    channel_descriptions_from_attrs,
     open_hdf5_readonly,
+    read_hdf5_scope_channel_descriptions,
     read_hdf5_scope_channel_shots,
     read_hdf5_scope_data,
     read_hdf5_scope_tarr,
+    scope_shot_numbers,
 )
 from .wavedesc import WAVEDESC_SIZE
 
 __all__ = [
+    "CHANNEL_DESCRIPTION_SUFFIX",
     "WAVEDESC_SIZE",
+    "channel_descriptions_from_attrs",
     "open_hdf5_readonly",
+    "read_hdf5_scope_channel_descriptions",
     "read_hdf5_scope_channel_shots",
     "read_hdf5_scope_data",
     "read_hdf5_scope_tarr",
+    "scope_shot_numbers",
 ]

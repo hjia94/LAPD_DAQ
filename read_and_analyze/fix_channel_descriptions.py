@@ -37,11 +37,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from acquisition.config import get_channel_descriptions
-from acquisition.hdf5_writer import (
-    CHANNEL_DESCRIPTION_SUFFIX,
-    channel_descriptions_from_attrs,
-    scope_channel_descriptions,
-)
+from acquisition.hdf5_writer import scope_channel_descriptions
+from scope_io import CHANNEL_DESCRIPTION_SUFFIX, channel_descriptions_from_attrs
 from read_and_analyze.read_bmotion_data import _channel_names, _shot_numbers
 
 

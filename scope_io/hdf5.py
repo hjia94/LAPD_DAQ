@@ -63,6 +63,82 @@ def open_hdf5_readonly(path):
         return h5py.File(path, "r")
 
 
+# Suffix for the per-channel description attributes written on a scope group
+# (e.g. ``C1_description``). Single source of truth for the layout so the
+# writer (``acquisition.hdf5_writer``), the readers here, and the old-file
+# retrofit tool all agree on one convention; the plain ``description`` scope
+# attr (the scope's own free-text label) is NOT a channel description and is
+# excluded by :func:`channel_descriptions_from_attrs`.
+CHANNEL_DESCRIPTION_SUFFIX = '_description'
+
+
+def channel_descriptions_from_attrs(attrs):
+    """Read ``{channel: text}`` from a scope group's ``<CH>_description`` attrs.
+
+    Inverse of the per-channel writes the acquire process makes at scope init.
+    Skips the scope's own ``description`` attr (the bare suffix with no channel
+    prefix). Pure attribute parsing -- no HDF5 reads beyond ``attrs``.
+    """
+    return {
+        name[:-len(CHANNEL_DESCRIPTION_SUFFIX)]: attrs[name]
+        for name in attrs
+        if name.endswith(CHANNEL_DESCRIPTION_SUFFIX) and name != 'description'
+    }
+
+
+def scope_shot_numbers(scope_group):
+    """Sorted shot numbers present in a scope group (e.g. ``shot_3`` -> 3).
+
+    Public so callers that already walk scope groups (e.g. read_and_analyze)
+    share this one definition rather than re-deriving the ``shot_<n>`` parse.
+    """
+    nums = []
+    for k in scope_group.keys():
+        if k.startswith('shot_'):
+            try:
+                nums.append(int(k.split('_', 1)[1]))
+            except ValueError:
+                pass
+    return sorted(nums)
+
+
+def read_hdf5_scope_channel_descriptions(f, scope_name):
+    """Return ``{channel: description}`` for a scope, handling both file layouts.
+
+    New files (canonical): the acquire process writes one ``<CH>_description``
+    attribute per displayed channel on the scope group at init time, so the
+    descriptions are read straight from the scope-group attrs -- present even
+    if the run died on shot 1. Old files: the description was duplicated as a
+    ``description`` attribute on every shot's ``<CH>_data`` dataset, so fall
+    back to the first shot that actually holds data (a skipped shot is a marker
+    group with no ``*_data``). The naive ``shot_1`` lookup that some older
+    readers used silently returns nothing when shot 1 was skipped; scanning for
+    the first populated shot avoids that.
+
+    Returns ``{}`` if the scope group is absent. Old files can be upgraded in
+    place to the new layout with
+    ``python -m read_and_analyze.fix_channel_descriptions``.
+    """
+    if scope_name not in f:
+        return {}
+    scope_group = f[scope_name]
+
+    descriptions = channel_descriptions_from_attrs(scope_group.attrs)
+    if descriptions:
+        return descriptions
+
+    for shot_num in scope_shot_numbers(scope_group):
+        shot = scope_group[f'shot_{shot_num}']
+        descriptions.update({
+            key[:-len('_data')]: shot[key].attrs.get(
+                'description', 'No description available')
+            for key in shot.keys() if key.endswith('_data')
+        })
+        if descriptions:
+            break
+    return descriptions
+
+
 def read_hdf5_scope_tarr(f, scope_name):
     """Return the time array for a scope group from an open HDF5 file.
 
