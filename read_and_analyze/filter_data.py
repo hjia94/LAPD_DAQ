@@ -41,13 +41,13 @@ from scope_io import (
 )
 try:  # works as a package (python -m read_and_analyze.filter_data)
     from read_and_analyze.read_bmotion_data import (
-        read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
-        resolve_data_file,
+        read_positions, build_positions_index,
+        _scope_groups, _shot_numbers, _channel_names, resolve_data_file,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
-        read_positions, _position_for_shot, _scope_groups, _shot_numbers, _channel_names,
-        resolve_data_file,
+        read_positions, build_positions_index,
+        _scope_groups, _shot_numbers, _channel_names, resolve_data_file,
     )
 
 # --------------------------------------------------------------------------------------
@@ -112,6 +112,38 @@ def load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma):
             for row in raw if not np.isnan(row).all()]
 
 
+class FilteredTraceCache:
+    """Memoize :func:`load_filtered_traces` over one analysis pass.
+
+    The fluctuation pipeline reads + filters the *same* (scope, channel,
+    position) repeat-shot stack several times per run -- once to pick the quiet
+    window, again to build the spatial profile, again to plot -- each call
+    re-reading from HDF5 and re-running the median/Gaussian filters. Wrapping the
+    open file plus the two filter knobs in this object and caching on
+    ``(scope, ch, shots)`` collapses those to a single read+filter per position.
+
+    Holds only ``f``, ``med_size``, ``gauss_sigma`` and its result dict (not any
+    enclosing scope), so it can be discarded with the ``with h5py.File(...)``
+    block that owns ``f``. Construct one per pass; do not retain it past the file.
+    """
+
+    def __init__(self, f, med_size, gauss_sigma):
+        self.f = f
+        self.med_size = med_size
+        self.gauss_sigma = gauss_sigma
+        self._cache = {}
+
+    def get(self, scope, ch, shots, tarr):
+        """Cached ``load_filtered_traces`` for one (scope, ch, position)."""
+        key = (scope, ch, tuple(shots))
+        rows = self._cache.get(key)
+        if rows is None:
+            rows = load_filtered_traces(
+                self.f, scope, ch, shots, tarr, self.med_size, self.gauss_sigma)
+            self._cache[key] = rows
+        return rows
+
+
 # ======================================================================================
 # Grouping
 # ======================================================================================
@@ -123,12 +155,13 @@ def _shots_by_position(f, scope, positions):
     repeat shots at the same nominal position group together.
     """
     sg = f[scope]
+    pos_index = build_positions_index(positions)  # O(1) per-shot lookups below
     groups = {}
     for s in _shot_numbers(sg):
         shot = sg.get(f"shot_{s}")
         if shot is not None and shot.attrs.get("skipped", False):
             continue
-        pos = _position_for_shot(positions, s)
+        pos = pos_index.get(s)
         if pos is None:
             continue
         key = (round(pos[0] / _POS_TOL) * _POS_TOL, round(pos[1] / _POS_TOL) * _POS_TOL)

@@ -212,8 +212,9 @@ def _position_shotnums(positions, npos, nshot, mismatch):
 
     Fast path (``mismatch`` False): shots are contiguous in setup order, so
     position ``i`` owns shots ``i*nshot + 1 .. i*nshot + nshot``. Fallback path
-    (``mismatch`` True): group recorded shots back to positions via
-    ``_position_for_shot`` against the planned (x, y) -- robust to skipped shots.
+    (``mismatch`` True): assign each recorded shot to its nearest planned (x, y)
+    by minimum squared distance (vectorized over all shots at once) -- robust to
+    skipped shots.
     """
     if not mismatch:
         for i in range(npos):
@@ -225,18 +226,22 @@ def _position_shotnums(positions, npos, nshot, mismatch):
     # each recorded shot to the nearest planned position.
     info = next(iter(positions.values()))
     setup = info["setup_array"]
-    planned = list(zip(setup["x"].astype(float), setup["y"].astype(float)))
+    planned = np.column_stack((np.asarray(setup["x"], dtype=float),
+                               np.asarray(setup["y"], dtype=float)))  # (npos, 2)
     rec = info.get("positions_array")
     buckets = {i: [] for i in range(npos)}
     if rec is not None:
-        sn = rec["shot_num"]
-        for j in range(len(rec)):
-            s = int(sn[j])
-            if s == 0:
-                continue
-            x, y = float(rec["x"][j]), float(rec["y"][j])
-            # nearest planned position
-            i = int(np.argmin([(x - px) ** 2 + (y - py) ** 2 for px, py in planned]))
+        sn = np.asarray(rec["shot_num"])
+        valid = sn != 0  # skip unset/padding rows
+        shots = sn[valid].astype(int)
+        rx = np.asarray(rec["x"], dtype=float)[valid]
+        ry = np.asarray(rec["y"], dtype=float)[valid]
+        # Nearest planned position for every recorded shot at once: squared
+        # distance from each (rx, ry) to all planned points via broadcasting,
+        # then argmin along the planned axis. Replaces the per-shot Python scan.
+        d2 = (rx[:, None] - planned[:, 0]) ** 2 + (ry[:, None] - planned[:, 1]) ** 2
+        nearest = np.argmin(d2, axis=1)
+        for s, i in zip(shots.tolist(), nearest.tolist()):
             buckets[i].append(s)
     for i in range(npos):
         yield i, buckets[i]

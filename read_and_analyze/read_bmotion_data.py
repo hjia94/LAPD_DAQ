@@ -147,8 +147,39 @@ def read_positions(f, mg_name=None):
     return {name: _one(pos_grp[name]) for name in pos_grp.keys()}
 
 
+def build_positions_index(positions):
+    """Flatten every motion group's recorded shots into ``{shot_num: (x, y)}``.
+
+    Build this ONCE and look shots up against it (O(1) per shot) instead of
+    calling :func:`_position_for_shot` per shot in a loop -- that helper does an
+    O(n) field scan per call on unfinalized/gapped files, making a per-shot loop
+    O(n^2). Shot 0 (an unset/padding row) is skipped; earlier motion groups win
+    on the rare duplicate shot_num, matching ``_position_for_shot``'s first-match
+    order. Returns ``{}`` for files with no position data.
+    """
+    index = {}
+    if not positions:
+        return index
+    for info in positions.values():
+        arr = info.get("positions_array")
+        if arr is None:
+            continue
+        shot_nums = np.asarray(arr["shot_num"])
+        xs = np.asarray(arr["x"], dtype=float)
+        ys = np.asarray(arr["y"], dtype=float)
+        for sn, x, y in zip(shot_nums.tolist(), xs.tolist(), ys.tolist()):
+            if sn and sn not in index:  # skip shot 0 (unset); keep first match
+                index[sn] = (x, y)
+    return index
+
+
 def _position_for_shot(positions, shot_num):
-    """Return (x, y) recorded for a shot, searching all motion groups. None if absent."""
+    """Return (x, y) recorded for a shot, searching all motion groups. None if absent.
+
+    Convenience for one-off lookups. In a loop over many shots, build a
+    :func:`build_positions_index` once and index it directly instead -- this
+    helper rebuilds nothing but still does an O(n) field scan on gapped files.
+    """
     if not positions:
         return None
     for info in positions.values():
@@ -158,9 +189,9 @@ def _position_for_shot(positions, shot_num):
         # The row carries its own shot_num, so locate it by field rather than
         # assuming it sits at index shot_num-1. Fast path: a finalized (padded)
         # file does have the row at shot_num-1, so probe there first -- O(1) and
-        # avoids an O(n) scan per call in plotting loops. Fall back to a field
-        # scan only for an append-tight/gapped file (unfinalized/early-stopped),
-        # where positional indexing would return the wrong row after a skip.
+        # avoids an O(n) scan per call. Fall back to a field scan only for an
+        # append-tight/gapped file (unfinalized/early-stopped), where positional
+        # indexing would return the wrong row after a skip.
         idx = shot_num - 1
         if 0 <= idx < len(arr) and int(arr["shot_num"][idx]) == shot_num:
             return float(arr["x"][idx]), float(arr["y"][idx])

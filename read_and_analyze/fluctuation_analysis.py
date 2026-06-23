@@ -48,7 +48,7 @@ try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
         resolve_data_file,
     )
     from read_and_analyze.filter_data import (
-        _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
+        _filter_trace, _as_list, _shots_by_position, FilteredTraceCache,
     )
     from read_and_analyze.analysis_config import (
         MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
@@ -61,7 +61,7 @@ except ImportError:  # fallback when run directly from inside the folder
         resolve_data_file,
     )
     from filter_data import (
-        _filter_trace, _as_list, _shots_by_position, load_filtered_traces,
+        _filter_trace, _as_list, _shots_by_position, FilteredTraceCache,
     )
     from analysis_config import (
         MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
@@ -112,30 +112,34 @@ def find_quiet_window(path, scope=None, channels=None, window_us=None,
             shot_nums = _shot_numbers(sg)
             chans = channels if channels else _channel_names(sg, shot_nums[0])
 
+            # One cache per scope: each position's filtered stack is read+filtered
+            # once and reused by the window search and the gradient/profile pass.
+            cache = FilteredTraceCache(f, med_size, gauss_sigma)
+
             scope_records = []
             for ch in chans:
                 for (x, y), shots in sorted(by_pos.items()):
                     rec = _best_window_for_position(
-                        f, sc, ch, x, y, shots, tarr, w, med_size, gauss_sigma, signal_frac)
+                        cache, sc, ch, x, y, shots, tarr, w, signal_frac)
                     if rec is not None:
                         scope_records.append(rec)
 
             # Add the spatial-gradient term, evaluated at ONE fixed reference window
             # (this scope's quietest), so |(dV/dx)/V| is comparable across positions.
-            _add_gradient_term(f, sc, scope_records, by_pos, tarr,
-                               med_size, gauss_sigma)
+            _add_gradient_term(cache, sc, scope_records, by_pos, tarr)
             records.extend(scope_records)
 
     records.sort(key=lambda r: r["score"])
     return records
 
 
-def _add_gradient_term(f, scope, recs, by_pos, tarr, med_size, gauss_sigma):
+def _add_gradient_term(cache, scope, recs, by_pos, tarr):
     """Augment each record's score with 1/|(dV/dx)/V|, biasing toward windows on
     a steep *fractional* spatial gradient. Profiles are built at a single fixed
     reference window (the scope's quietest by ``cv_shots``) so the gradient is
     comparable across positions. Records are modified in place; ``grad_x`` stores
-    the normalized gradient |(dV/dx)/V| (1/mm)."""
+    the normalized gradient |(dV/dx)/V| (1/mm). ``cache`` is a
+    :class:`FilteredTraceCache` shared with the window search."""
     if not recs:
         return
     ref = min(recs, key=lambda r: r["cv_shots"])
@@ -148,8 +152,8 @@ def _add_gradient_term(f, scope, recs, by_pos, tarr, med_size, gauss_sigma):
         prof = []
         for r in cr:
             key = (round(r["x"] / _POS_TOL) * _POS_TOL, round(r["y"] / _POS_TOL) * _POS_TOL)
-            prof.append(_profile_value(f, scope, ch, by_pos.get(key, []), tarr,
-                                       i0, i1, med_size, gauss_sigma))
+            prof.append(_profile_value(cache, scope, ch, by_pos.get(key, []), tarr,
+                                       i0, i1))
         prof = np.array([np.nan if v is None else v for v in prof], dtype=float)
         # Local dV/dx via finite differences (handles non-uniform x spacing),
         # normalized by the local V -> fractional gradient |(dV/dx)/V| (1/mm).
@@ -162,10 +166,15 @@ def _add_gradient_term(f, scope, recs, by_pos, tarr, med_size, gauss_sigma):
             r["score"] = r["cv_shots"] + inv_grad
 
 
-def _best_window_for_position(f, scope, ch, x, y, shots, tarr, w, med_size, gauss_sigma, signal_frac):
-    """Slide a length-``w`` window over one position's shots; return the best record."""
+def _best_window_for_position(cache, scope, ch, x, y, shots, tarr, w, signal_frac):
+    """Slide a length-``w`` window over one position's shots; return the best record.
+
+    ``cache`` is a :class:`FilteredTraceCache` owning the open file and filter
+    knobs, so this position's filtered stack is read+filtered once and shared
+    with the gradient/profile pass.
+    """
     # Stack the repeat-shot traces (filtered along time), dropping length mismatches.
-    rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
+    rows = cache.get(scope, ch, shots, tarr)
     if len(rows) < 2:  # need >= 2 shots to measure shot-to-shot scatter
         return None
 
@@ -215,10 +224,11 @@ def _cv_curve(traces, mean_trace, tarr, w):
     return starts, t_centers, cv
 
 
-def _cv_curve_for_position(f, scope, ch, shots, tarr, w, med_size, gauss_sigma):
+def _cv_curve_for_position(cache, scope, ch, shots, tarr, w):
     """Return (window-center times, cv_shots per window) for one position, or
-    (None, None) if it has too few usable shots."""
-    rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
+    (None, None) if it has too few usable shots. ``cache`` is a
+    :class:`FilteredTraceCache`."""
+    rows = cache.get(scope, ch, shots, tarr)
     if len(rows) < 2:
         return None, None
     traces = np.vstack(rows)
@@ -226,10 +236,11 @@ def _cv_curve_for_position(f, scope, ch, shots, tarr, w, med_size, gauss_sigma):
     return t_centers, cv
 
 
-def _profile_value(f, scope, ch, shots, tarr, i0, i1, med_size, gauss_sigma):
+def _profile_value(cache, scope, ch, shots, tarr, i0, i1):
     """Mean filtered signal over the fixed sample window [i0:i1], averaged across
-    a position's repeat shots. Returns None if no usable shots."""
-    rows = load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma)
+    a position's repeat shots. Returns None if no usable shots. ``cache`` is a
+    :class:`FilteredTraceCache`."""
+    rows = cache.get(scope, ch, shots, tarr)
     if not rows:
         return None
     vals = [float(vf[i0:i1].mean()) for vf in rows]
@@ -314,6 +325,8 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
             tarr = read_hdf5_scope_tarr(f, sc)
             dt = float(tarr[1] - tarr[0])
             w = max(2, math.ceil(WINDOW_US * 1e-6 / dt))
+            # Reuse one filtered stack per position across all three panels below.
+            cache = FilteredTraceCache(f, med_size, gauss_sigma)
             best = min(recs, key=lambda r: r["score"])
             i0 = int(np.searchsorted(tarr, best["t_start"]))
             i1 = int(np.searchsorted(tarr, best["t_end"], side="right"))
@@ -336,7 +349,7 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
             wkey = (round(worst["x"] / _POS_TOL) * _POS_TOL,
                     round(worst["y"] / _POS_TOL) * _POS_TOL)
             t_centers, cv_t = _cv_curve_for_position(
-                f, sc, worst["channel"], by_pos.get(wkey, []), tarr, w, med_size, gauss_sigma)
+                cache, sc, worst["channel"], by_pos.get(wkey, []), tarr, w)
             if cv_t is not None:
                 ax_cvt.plot(t_centers * 1e3, cv_t, lw=0.8)
                 kmin = int(np.nanargmin(cv_t))
@@ -358,8 +371,8 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
                 for r in cr:
                     key = (round(r["x"] / _POS_TOL) * _POS_TOL,
                            round(r["y"] / _POS_TOL) * _POS_TOL)
-                    v = _profile_value(f, sc, ch, by_pos.get(key, []), tarr,
-                                       i0, i1, med_size, gauss_sigma)
+                    v = _profile_value(cache, sc, ch, by_pos.get(key, []), tarr,
+                                       i0, i1)
                     if v is not None:
                         xs.append(r["x"])
                         vals.append(v)
@@ -377,8 +390,7 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
             # --- bottom: best (lowest-score) position, repeat shots + shaded window ---
             key = (round(best["x"] / _POS_TOL) * _POS_TOL,
                    round(best["y"] / _POS_TOL) * _POS_TOL)
-            for vf in load_filtered_traces(f, sc, best["channel"], by_pos.get(key, []),
-                                           tarr, med_size, gauss_sigma):
+            for vf in cache.get(sc, best["channel"], by_pos.get(key, []), tarr):
                 ax_trace.plot(tarr * 1e3, vf, lw=0.7, alpha=0.7)
             ax_trace.axvspan(best["t_start"] * 1e3, best["t_end"] * 1e3,
                              color="orange", alpha=0.3, label="chosen window")
