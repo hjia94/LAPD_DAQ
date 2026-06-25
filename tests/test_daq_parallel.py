@@ -173,6 +173,10 @@ def _make_msa(scopes, parallel_read=True, parallel_arm=True):
     msa.parallel_spool_write = True
     msa.slave_ready_timeout = 5.0
     msa._sync_warned = False
+    # Averaging-mode attributes the dispatch/read path now reads; these tests
+    # exercise the SINGLE path, so default to off.
+    msa.is_averaging_run = False
+    msa.averaging_timeout = 120.0
     msa._pending_arm_failures = {}
     msa._last_missing_scopes = {}
     return msa
@@ -431,6 +435,46 @@ class SyncTimestampWarningTest(unittest.TestCase):
         out, msa = self._run_dispatch_with_stamps({"A": 100.0, "B": 100.001})
         self.assertNotIn("[sync warning]", out)
         self.assertTrue(msa._sync_warned)
+
+
+class _AveragingScope(FakeScope):
+    """FakeScope with a wait_for_max_sweeps for the averaging-mode read path."""
+
+    def __init__(self, traces, timed_out=False, n=10, **kw):
+        super().__init__(traces, **kw)
+        self._timed_out = timed_out
+        self._n = n
+        self.wait_calls = 0
+
+    def wait_for_max_sweeps(self, aux_text="", timeout=100):
+        self.wait_calls += 1
+        return self._timed_out, self._n
+
+
+class AveragingReadTest(unittest.TestCase):
+    """acquire_averaged_from_scope: self-arming NORMAL-mode averaged read."""
+
+    def test_reads_all_traces_after_average_completes(self):
+        scope = _AveragingScope(["C1", "C2"])
+        traces, data, headers = scope_runner.acquire_averaged_from_scope(
+            scope, "avg", ("C1", "C2"), timeout=5.0)
+        self.assertEqual(scope.wait_calls, 1)  # self-armed via the wait
+        self.assertEqual(traces, ["C1", "C2"])
+        self.assertEqual(set(data), {"C1", "C2"})
+
+    def test_timeout_raises(self):
+        scope = _AveragingScope(["C1"], timed_out=True, n=3)
+        with self.assertRaises(RuntimeError) as cm:
+            scope_runner.acquire_averaged_from_scope(
+                scope, "avg", ("C1",), timeout=5.0)
+        self.assertIn("3", str(cm.exception))  # reports sweeps reached
+
+    def test_dispatch_routes_mode_2_to_averaging_read(self):
+        scope = _AveragingScope(["C1"])
+        msa = _make_msa({"avg": scope})
+        out = msa.acquire_shot_dispatch({"avg": 2}, 1, verbose=False)
+        self.assertIn("avg", out)
+        self.assertEqual(scope.wait_calls, 1)
 
 
 if __name__ == "__main__":

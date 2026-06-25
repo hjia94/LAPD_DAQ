@@ -138,6 +138,13 @@ def load_experiment_config(config_path='experiment_config.ini', required=False):
     return config, raw_config_text
 
 
+# Per-shot acquisition contracts selectable via [acquisition] acquisition_mode.
+#   single    -- master/slave synchronized SINGLE-shot (default).
+#   averaging -- every scope runs NORMAL mode; one shot is an on-scope N-sweep
+#                average read via wait_for_max_sweeps (no master/slave arming).
+_VALID_ACQUISITION_MODES = frozenset({'single', 'averaging'})
+
+
 def validate_bmotion_ini(config, config_path=None):
     """Check that ``experiment_config.ini`` has what a bmotion run requires.
 
@@ -174,6 +181,21 @@ def validate_bmotion_ini(config, config_path=None):
             section="experiment",
             key="name",
             hint="Add a [experiment] section with 'name = <experiment name>'.",
+        )
+
+    # [acquisition] acquisition_mode selects the per-shot contract. It is
+    # optional (defaults to 'single'); validate it here so a typo like
+    # 'averageing' fails loudly instead of silently running the SINGLE path.
+    mode = config.get('acquisition', 'acquisition_mode', fallback='single')
+    if mode.strip().lower() not in _VALID_ACQUISITION_MODES:
+        raise IniConfigError(
+            f"unknown acquisition_mode '{mode.strip()}'; "
+            f"expected one of {sorted(_VALID_ACQUISITION_MODES)}.",
+            file_path=config_path,
+            section="acquisition",
+            key="acquisition_mode",
+            hint="Use 'single' (master/slave SINGLE-shot) or 'averaging' "
+                 "(NORMAL-mode on-scope averaging).",
         )
 
 

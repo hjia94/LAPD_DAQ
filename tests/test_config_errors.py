@@ -111,6 +111,26 @@ class IniValidateTests(unittest.TestCase):
         cfg = self._cfg("[storage]\nspool_dir = D:/spool\n[experiment]\nname = run1\n")
         config.validate_bmotion_ini(cfg)  # must not raise
 
+    _BASE = "[storage]\nspool_dir = D:/spool\n[experiment]\nname = run1\n"
+
+    def test_unknown_acquisition_mode_raises(self):
+        cfg = self._cfg(self._BASE + "[acquisition]\nacquisition_mode = averageing\n")
+        with self.assertRaises(IniConfigError) as cm:
+            config.validate_bmotion_ini(cfg)
+        self.assertEqual(cm.exception.key, "acquisition_mode")
+
+    def test_averaging_mode_passes(self):
+        cfg = self._cfg(self._BASE + "[acquisition]\nacquisition_mode = averaging\n")
+        config.validate_bmotion_ini(cfg)  # must not raise
+
+    def test_acquisition_mode_is_case_insensitive(self):
+        cfg = self._cfg(self._BASE + "[acquisition]\nacquisition_mode = Averaging\n")
+        config.validate_bmotion_ini(cfg)  # must not raise
+
+    def test_absent_acquisition_mode_defaults_to_single(self):
+        # No [acquisition] section at all -> defaults to 'single', no error.
+        config.validate_bmotion_ini(self._cfg(self._BASE))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -411,6 +411,8 @@ class _SpoolShotSink:
         from spooling import spool_format
         from . import spool_adapter
 
+        # arm_scopes_for_trigger is a no-op in averaging mode (scopes self-arm
+        # inside wait_for_max_sweeps); the gate lives in that method.
         self.msa.arm_scopes_for_trigger(self.active_scopes, verbose=False)
         all_data = self.msa.acquire_shot_dispatch(self.active_scopes, shot_num, verbose=False)
         missing = self.msa.last_missing_scopes
@@ -969,6 +971,13 @@ def run_acquisition_bmotion_spooled(spool_dir, hdf5_path, toml_path, config_path
                 raise RuntimeError(
                     "No valid data found from any scope. Aborting acquisition."
                 )
+
+            if msa.is_averaging_run:
+                print(f"ACQUISITION mode: averaging "
+                      f"(NORMAL on-scope average, no master/slave; "
+                      f"timeout {msa.averaging_timeout:g} s/shot)")
+            else:
+                print("ACQUISITION mode: single (master/slave SINGLE-shot)")
 
             configure_bmotion_hdf5_group(
                 hdf5_path, total_shots, len(ml_order), toml_path, run_manager,

@@ -87,6 +87,24 @@ def init_acquire_from_scope(scope, scope_name):
     return is_sequence, time_array, traces
 
 
+def _read_displayed_traces(scope, traces):
+    """Read every displayed trace once as raw int16. Returns (active, data, headers).
+
+    A completed sweep means all channels of that sweep are ready, so this is a
+    flat read with no per-trace polling. Shared by the real-time SINGLE read and
+    the NORMAL averaging read, which differ only in the wait that precedes it.
+    """
+    data = {}
+    headers = {}
+    active_traces = []
+
+    for tr in traces:
+        data[tr], headers[tr] = scope.acquire(tr, raw=True)
+        active_traces.append(tr)
+
+    return active_traces, data, headers
+
+
 def acquire_from_scope(scope, scope_name, traces, ref_channel=None):
     """Acquire data from a single scope with optimized speed (int16/raw).
 
@@ -94,8 +112,7 @@ def acquire_from_scope(scope, scope_name, traces, ref_channel=None):
       4. check the scope is STOPped and a fresh sweep landed
          (wait_for_fresh_acquisition: TRIG_MODE STOP hint -> sweep-counter
          confirm on ``ref_channel`` cleared at arm time);
-      5. if so, data exists -> read every displayed trace (one completed sweep
-         means all channels of that sweep are ready, so no per-trace polling);
+      5. if so, data exists -> read every displayed trace;
       otherwise raise so the shot is recorded as having no valid data.
 
     ``traces`` is the displayed-trace tuple captured at init time
@@ -103,18 +120,10 @@ def acquire_from_scope(scope, scope_name, traces, ref_channel=None):
     """
     from lapd_daq.devices.lab_scopes import wait_for_fresh_acquisition
 
-    data = {}
-    headers = {}
-    active_traces = []
-
     # Step 4: check STOP + fresh-sweep. Step 5: raises if no fresh data exists.
     wait_for_fresh_acquisition(scope, ref_channel)
 
-    for tr in traces:
-        data[tr], headers[tr] = scope.acquire(tr, raw=True)
-        active_traces.append(tr)
-
-    return active_traces, data, headers
+    return _read_displayed_traces(scope, traces)
 
 
 def acquire_from_scope_sequence(scope, scope_name, traces, ref_channel=None):
@@ -138,6 +147,30 @@ def acquire_from_scope_sequence(scope, scope_name, traces, ref_channel=None):
         active_traces.append(tr)
 
     return active_traces, data, headers
+
+
+def acquire_averaged_from_scope(scope, scope_name, traces, timeout=120.0):
+    """Acquire one on-scope-averaged result from a NORMAL-mode scope.
+
+    Unlike the SINGLE path (which relies on arm_scopes_for_trigger having armed
+    the scope), an averaging scope is self-armed by ``wait_for_max_sweeps``: it
+    sets NORM, CLEAR_SWEEPS, polls the WAVEDESC ``sweeps_per_acq`` counter until
+    it reaches the scope's AverageSweeps count, then STOPs. After it returns,
+    every displayed trace holds the completed average, read with the same raw
+    int16 loop as the SINGLE path.
+
+    Raises so the shot is recorded as missing (partial-shot tolerance) if the
+    average does not complete within ``timeout``.
+
+    ``traces`` is the displayed-trace tuple captured at init time
+    (see init_acquire_from_scope).
+    """
+    timed_out, n = scope.wait_for_max_sweeps(timeout=timeout)
+    if timed_out:
+        raise RuntimeError(
+            f"{scope_name}: averaging timed out at {n} sweeps")
+
+    return _read_displayed_traces(scope, traces)
 
 
 # =============================================================================
@@ -196,6 +229,17 @@ class MultiScopeAcquisition:
         # miss the master's edge and desync the run; we abort the shot instead.
         self.slave_ready_timeout = config.getfloat(
             'acquisition', 'slave_ready_timeout', fallback=5.0)
+
+        # Per-shot acquisition contract. 'single' (default) is the master/slave
+        # synchronized SINGLE-shot path. 'averaging' runs every scope in NORMAL
+        # mode and reads one on-scope N-sweep average per shot via
+        # wait_for_max_sweeps -- no master/slave arming (the wait self-arms).
+        # averaging_timeout is the per-shot ceiling passed to wait_for_max_sweeps.
+        self.is_averaging_run = config.get(
+            'acquisition', 'acquisition_mode', fallback='single'
+        ).strip().lower() == 'averaging'
+        self.averaging_timeout = config.getfloat(
+            'acquisition', 'averaging_timeout', fallback=120.0)
 
         # One-time cross-scope trigger-timestamp sanity warning (advisory only;
         # see _warn_if_trigger_timestamps_desynced). Flipped True after it fires
@@ -334,7 +378,23 @@ class MultiScopeAcquisition:
                 # Optimize scope settings for faster acquisition
                 scope.scope.chunk_size = 4 * 1024 * 1024  # 4MB transfer chunk
 
-                scope.set_trigger_mode('SINGLE')
+                if not self.is_averaging_run:
+                    scope.set_trigger_mode('SINGLE')
+                else:
+                    # Averaging run: leave the scope in its manually configured
+                    # NORMAL + AverageSweeps state. wait_for_max_sweeps self-arms
+                    # each shot, so forcing SINGLE here would fight it. Warn if
+                    # the operator forgot to configure averaging (NSweeps==1 would
+                    # silently degrade to a single sweep).
+                    try:
+                        nsweeps, _ach = scope.max_averaging_count()
+                        if nsweeps <= 1:
+                            print(f"\nWarning: {name} is in averaging mode but "
+                                  f"AverageSweeps={nsweeps}; each shot will be a "
+                                  f"single sweep. Configure averaging on the scope.")
+                    except Exception as e:  # noqa: BLE001 - advisory only
+                        print(f"\nWarning: could not read averaging count for "
+                              f"{name}: {e}")
 
                 is_sequence, time_array, traces = init_acquire_from_scope(scope, name)
 
@@ -344,7 +404,10 @@ class MultiScopeAcquisition:
                     self._save_scope_metadata(name, traces)
                     self.warn_missing_channel_descriptions(name, traces)
 
-                    active_scopes[name] = is_sequence
+                    # Tag the per-scope mode that flows through _read_one_scope:
+                    # 2 == averaging (NORMAL on-scope average), else the detected
+                    # 0 (real-time) / 1 (sequence) SINGLE-shot value.
+                    active_scopes[name] = 2 if self.is_averaging_run else is_sequence
                     print(f"Successfully initialized {name}")
                 else:
                     print(f"Warning: Could not initialize {name} - no valid data returned")
@@ -379,6 +442,9 @@ class MultiScopeAcquisition:
             return acquire_from_scope(scope, name, traces, ref_channel)
         elif mode == 1:
             return acquire_from_scope_sequence(scope, name, traces, ref_channel)
+        elif mode == 2:
+            return acquire_averaged_from_scope(
+                scope, name, traces, timeout=self.averaging_timeout)
         else:
             raise ValueError(f"Invalid active_scopes value for {name}: {mode}")
 
@@ -520,8 +586,12 @@ class MultiScopeAcquisition:
         authoritative because each scope's real-time clock may not be
         synchronized, so it never raises and never writes to the log file.
         Fires at most once per run and is fully swallowed on any error.
+
+        Skipped entirely in averaging mode: there is no master and the scopes
+        free-run their own NORMAL averages, so trigger-timestamp disagreement is
+        expected, not a desync symptom.
         """
-        if self._sync_warned or len(all_data) < 2:
+        if self._sync_warned or self.is_averaging_run or len(all_data) < 2:
             return
         try:
             from lab_scopes.lecroy import wavedesc_trigger_timestamp
@@ -647,7 +717,15 @@ class MultiScopeAcquisition:
         skipped. The MASTER is different: if it can't arm there is no
         synchronized trigger at all, so :class:`_MasterArmError` is raised and the
         caller records the whole shot as skipped.
+
+        Averaging mode has no master/slave: each scope self-arms inside
+        ``wait_for_max_sweeps`` (which sets NORM + CLEAR_SWEEPS itself), so this
+        SINGLE arming is a no-op. Gating here -- the one point every acquisition
+        path funnels through -- keeps that contract in one place.
         """
+        if self.is_averaging_run:
+            return
+
         if verbose:
             print("Arming scopes for trigger... ", end='')
 

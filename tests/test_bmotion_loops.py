@@ -367,6 +367,8 @@ class _FakeMSA:
         self.acquired = []
         # Spool sink reads this when calling spool_format.write_shot(parallel=...).
         self.parallel_spool_write = False
+        # Sink gates arming on this; this fake exercises the SINGLE path.
+        self.is_averaging_run = False
 
     def arm_scopes_for_trigger(self, active_scopes, verbose=True):
         self.armed += 1
