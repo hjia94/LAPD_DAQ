@@ -9,6 +9,42 @@ required.
 
 ---
 
+## Read data in Python
+
+**The three things you usually want, and the helper that returns each:**
+
+| What | `scope_io` helper (open `f` with `h5py.File(path, "r")`) | Returns |
+|---|---|---|
+| Channel voltage for one shot | `read_hdf5_scope_data(f, scope, "C1", shot)` | `(volts, dt, t0)` |
+| Many shots of one channel | `read_hdf5_scope_channel_shots(f, scope, "C1", shots)` | 2D volts (header decoded once) |
+| Time base for a scope | `read_hdf5_scope_tarr(f, scope)` | `(samples,)` seconds |
+| Probe `(x, y)` per shot | `f["Control/Positions/<motion_group>/positions_array"]` | structured `(shot_num, x, y)` |
+
+The helpers decode the per-trace WAVEDESC and apply
+`volts = raw_int16 × vertical_gain − vertical_offset` for you, so you never touch
+the header directly:
+
+```python
+import h5py
+from scope_io import (
+    read_hdf5_scope_data, read_hdf5_scope_tarr, read_hdf5_scope_channel_shots,
+)
+
+with h5py.File(r"D:\data\LAPD\my_run.hdf5", "r") as f:
+    tarr = read_hdf5_scope_tarr(f, "bdotscope")          # seconds
+    volts, dt, t0 = read_hdf5_scope_data(f, "bdotscope", "C1", shot_number=1)
+    pos = f["Control/Positions/probe1/positions_array"][:]   # (shot_num, x, y)
+```
+
+`read_hdf5_scope_data` raises on a *skipped* shot — catch `ValueError`, or use
+`read_hdf5_scope_channel_shots`, which fills missing/skipped shots with `NaN`
+rows. Source: [`scope_io/hdf5.py`](../../scope_io/hdf5.py); the raw 346-byte
+WAVEDESC parser is [`scope_io/wavedesc.py`](../../scope_io/wavedesc.py)
+(`LeCroyWavedesc`). For the full on-disk layout, see the
+[HDF5 Output section of the main README](../../README.md#hdf5-output).
+
+---
+
 ## Setup (once)
 
 These tools need only standard scientific packages (no `lab_scopes`):
@@ -199,6 +235,13 @@ by kind).
 
 ## Expected HDF5 layout (reference)
 
+The [main README's HDF5 Output section](../../README.md#hdf5-output) is the
+canonical layout reference. Quick recap of what the validator and analysis
+modules rely on:
+
+<details>
+<summary>File layout</summary>
+
 ```
 /                                 attrs: description, creation_time, source_code
 ├── Configuration/
@@ -219,6 +262,8 @@ by kind).
 
 Voltage = `raw_int16 × vertical_gain − vertical_offset`, gain/offset from the
 per-channel WAVEDESC header (decoded by `scope_io`).
+
+</details>
 
 ---
 
