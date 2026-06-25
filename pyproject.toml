@@ -81,5 +81,7 @@ include = [
     "lapd_daq*",
     "motion*",
     "pi_gpio*",
+    "read_and_analyze*",
     "scope_io*",
+    "spooling*",
 ]
