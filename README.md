@@ -6,18 +6,22 @@ Ethernet motor controllers, Phantom cameras, Raspberry Pi triggers, and
 
 ## Current Status
 
+`Data_Run_*.py` is the production path for routine runs. It uses the **spooled
+pipeline**: the acquire process spools each shot to a fast disk and a separate
+`Offload_Run.py` drains the spool into the HDF5 file. This is the path the
+hardware PC runs and the main integration target.
+
 ```text
-  `Data_Run_**.py` — the production path for routine runs. They use the
-  spooled pipeline: the acquire process spools each shot to a fast disk and a
-  separate `Offload_Run.py` drains the spool into the HDF5 file. This is the path
-  the hardware PC runs and the main integration target.
+  Data_Run_*.py  ──spool each shot──▶  fast disk  ──drain──▶  run.hdf5
+   (acquire)                                       (Offload_Run.py)
 ```
 
-- `Data_Run_bmotion.py` uses bapsf_motion library for motor communication and control.
-- 45-degree probe acquisition is not migrated; `Data_Run_45deg.py` exits early
-  with an unsupported message.
-- Automated tests run on mock devices and real hardware tests exist.
-- EPICS is the planned future control backend.
+| Area | Status |
+|---|---|
+| `Data_Run_bmotion.py` | Uses the `bapsf_motion` library for motor communication and control |
+| 45-degree probe | Not migrated; `Data_Run_45deg.py` exits early with an unsupported message |
+| Testing | Automated tests run on mock devices; real-hardware tests also exist |
+| Control backend | EPICS is the planned future backend (see [migration path](#epics-migration-path)) |
 
 ## Install
 
@@ -43,20 +47,14 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-Optional hardware extras
-```
-REM LeCroy scope control (lab_scopes + PyVISA)
-python -m pip install -e ".[scope]"
+Optional extras (install only what you need):
 
-REM bapsf_motion workflows (bapsf-motion + xarray)
-python -m pip install -e ".[bmotion]"
-
-REM both at once
-python -m pip install -e ".[scope,bmotion]"
-
-REM Jupyter for the notebooks/ examples
-python -m pip install -e ".[dev]"
-```
+| Extra | Adds | Command |
+|---|---|---|
+| `scope` | LeCroy scope control (`lab_scopes` + PyVISA) | `pip install -e ".[scope]"` |
+| `bmotion` | `bapsf_motion` workflows (`bapsf-motion` + xarray) | `pip install -e ".[bmotion]"` |
+| `dev` | Jupyter for the `notebooks/` examples | `pip install -e ".[dev]"` |
+| both | scope + bmotion at once | `pip install -e ".[scope,bmotion]"` |
 
 The `camera` extra is intentionally empty because the Phantom camera SDK and
 Python bindings are hardware-PC specific. Install those according to the camera
@@ -65,97 +63,163 @@ PC setup notes before using camera mode.
 
 ## Configuration Reference
 
-The repo still uses INI-style experiment configs for immediate usability.
-Internally, `lapd_daq.config.load_run_config()` converts the INI file to typed
-Python config objects.
+Below are sections to be included in experiment_config.ini
 
-Important sections:
+### 🔴 Required (validated at startup and the run aborts if missing)
 
-- `[storage]`: `spool_dir` (fast disk for per-shot spool) and `hdf5_dir` —
-  required by the spooled `Data_Run*.py` path. Optional `disk_full_pause_seconds`
-  / `disk_full_max_retries` tune the pause+retry when the spool disk fills.
-- `[acquisition]`: per-shot tuning for the spooled path.
-- `[nshots]`: `num_duplicate_shots`, `num_run_repeats`
-- `[experiment]`: experiment `name` (used to build the HDF5 filename). The
-  run description lives in a separate `description.txt` next to the config,
-  written into the HDF5 `description` attribute at run start and overwritten at
-  run end.
-- `[scopes]`: scope display names and descriptions
-- `[channels]`: channel descriptions using `ScopeName_C1` keys
-- `[scope_ips]`: direct scope IPs
-- `[analysis]`: `auto_plot` — post-run line-profile PNG plotting (default on).
-- `[position]` / `[motor_ips]`: XY/XYZ grid parameters and motor IPs for grid mode
-- `[camera_config]`: Phantom camera settings, used only in camera/dropper modes
-- `[raspberry_pi]`: Raspberry Pi trigger settings for dropper mode
-- `[bmotion]`: motion-group/direction/recovery settings for the bmotion script
+| Section | Key | Purpose |
+|---|---|---|
+| `[storage]` | `spool_dir` | Fast local disk for the per-shot spool — the spooled pipeline cannot run without it |
+| `[experiment]` | `name` | Used to build the HDF5 filename; the run aborts if absent |
+
+> A scope run won't capture anything useful without scope sections
+> (`[scopes]` / `[scope_ips]` and usually `[channels]`), but these aren't
+> validated at startup — they're "optional" only in the sense that the run will
+> launch without them.
+
+### 🟢 Optional (mode-specific or defaulted)
+
+| Section | Purpose / key keys |
+|---|---|
+| `[storage]` | `hdf5_dir`, plus `disk_full_pause_seconds` / `disk_full_max_retries` to tune the pause+retry when the spool disk fills |
+| `[acquisition]` | Per-shot tuning for the spooled path |
+| `[nshots]` | `num_duplicate_shots`, `num_run_repeats` |
+| `[experiment]` | Run description lives in a separate `description.txt` next to the config (written to the HDF5 `description` attr at run start, overwritten at run end) |
+| `[scopes]` | Scope display names and descriptions |
+| `[channels]` | Channel descriptions, keyed `ScopeName_C1` |
+| `[scope_ips]` | Direct scope IPs |
+| `[analysis]` | `auto_plot` — post-run line-profile PNG plotting (default on) |
+| `[position]` / `[motor_ips]` | XY/XYZ grid parameters and motor IPs (grid mode) |
+| `[camera_config]` | Phantom camera settings (camera/dropper modes only) |
+| `[raspberry_pi]` | Raspberry Pi trigger settings (dropper mode) |
+| `[bmotion]` | Motion-group / direction / recovery settings for the bmotion script |
+
+See example_description.txt for full description of configurations.
 
 ## HDF5 Output
 
-The new writer keeps the root-level scope layout compatible with old analysis
-readers:
+`Data_Run_bmotion.py`  writes one HDF5 file per run.
+
+**If you want:**
+
+| What | HDF5 path | Shape / dtype |
+| --- | --- | --- |
+| Channel waveform (shot `N`, trace `C1`) | `/<ScopeName>/shot_<N>/C1_data` | `(samples,)` raw `int16` |
+| Per-trace WAVEDESC header (gain/offset) | `/<ScopeName>/shot_<N>/C1_header` | 346-byte opaque (`np.void`) |
+| Time base for all that scope's traces | `/<ScopeName>/time_array` | `(samples,)` `float64`, seconds |
+| Probe position per shot | `/Control/Positions/<motion_group>/positions_array` | structured `(shot_num, x, y)` |
+
+A trace's voltage is `vertical_gain * C1_data - vertical_offset`, where gain and
+offset come from the `C1_header` (LeCroy WAVEDESC) sibling dataset; sample `i`
+occurs at `time_array[i]`. The `positions_array` row whose `shot_num == N` gives
+the `(x, y)` the probe was at for `/<ScopeName>/shot_N/`.
+
+### Reading voltage data
+
+Reader scripts that decode the WAVEDESC, apply the gain/offset, and returning volts directly:
+
+- In-repo: [scope_io/hdf5.py](scope_io/hdf5.py) — `read_hdf5_scope_data(f,
+  scope, channel, shot)` → `(volts, dt, t0)`, `read_hdf5_scope_tarr(f, scope)`
+  → time array, and `read_hdf5_scope_channel_shots(...)` to read many shots
+  while decoding the header once. These are re-exported from `scope_io` and
+  used by the `read_and_analyze/` plotting tools (e.g.
+  [read_and_analyze/read_bmotion_data.py](read_and_analyze/read_bmotion_data.py)).
+- `lab_scopes`: `lab_scopes.io.lecroy_files` (and the `read_scope_data` legacy
+  shim) for `.trc`/HDF5 traces.
+
+Datasets are Blosc2 (bitshuffle+lz4, falling back to lzf) compressed, so HDFView
+needs the matching plugin to view them; the Python readers above do not (they
+register the filter automatically).
+
+### Parsing the WAVEDESC header
+
+Each `C*_header` is the raw 346-byte LeCroy WAVEDESC struct, stored opaquely
+(`np.void`). Decode it with the in-repo parser rather than reading bytes by hand:
+
+```python
+from scope_io import WAVEDESC_SIZE          # == 346
+from scope_io.wavedesc import LeCroyWavedesc
+
+with h5py.File(path, "r") as f:
+    raw  = f["bdotscope/shot_1/C1_data"][:]            # int16
+    hdr  = f["bdotscope/shot_1/C1_header"][()]          # 346 bytes
+    wd   = LeCroyWavedesc(hdr)
+    volts = raw.astype("float64") * wd.wd.vertical_gain - wd.wd.vertical_offset
+    # wd.dt, wd.t0, wd.num_samples, wd.time_array are also available
+```
+
+- Parser: [scope_io/wavedesc.py](scope_io/wavedesc.py) — `LeCroyWavedesc` unpacks
+  all 63 fields; `vertical_gain`, `vertical_offset`, `dt`, `t0` are the ones you
+  usually need.
+- In `lab_scopes`, the equivalent is `lab_scopes.lecroy.wavedesc.LeCroyWavedesc`.
+
+<details>
+<summary>Full file layout</summary>
 
 ```text
 run.hdf5
-  attrs:
-    description
-    creation_time
-    schema_version
-    run_mode
-    software_versions
-  Configuration/
-    experiment_config
-  Control/
-    Run/
-      attrs: config_path, num_duplicate_shots, num_run_repeats
-      shot_status
-    Devices/
-    Positions/
-      positions_setup_array
-      positions_array
-    FastCam/
-      shot number
-      cine file name
-      timestamp
-  ScopeName/
-    attrs: description, ip_address, scope_type, shot_count
-    time_array
-    shot_1/
-      C1_data
-      C1_header
-      C2_data
-      C2_header
+├─ attrs: description, creation_time, source_code
+├─ Configuration/
+│    ├─ experiment_config    # verbatim experiment_config.ini  (bytes)
+│    ├─ bmotion_config       # verbatim bmotion_config.toml    (bytes)
+│    └─ bmotion_selection    # JSON: motion-group keys, direction, order
+├─ Control/
+│    └─ Positions/
+│         └─ <motion_group>/                 # one per selected motion group
+│              ├─ attrs: name, key
+│              ├─ positions_setup_array       # planned grid (shot_num, x, y)
+│              │     └─ attrs: xpos, ypos      #   unique X / Y axis vectors
+│              └─ positions_array             # ACTUAL recorded (shot_num, x, y)
+└─ <ScopeName>/                              # one per scope (e.g. bdotscope)
+     ├─ attrs: description, ip_address, scope_type, shot_count,
+     │         <C1>_description, <C2>_description, …   # channel labels
+     ├─ time_array                           # float64 seconds
+     ├─ shot_1/
+     │    ├─ attrs: acquisition_time
+     │    ├─ C1_data     # raw int16 samples (compressed)
+     │    ├─ C1_header   # LeCroy WAVEDESC binary header (gain/offset live here)
+     │    ├─ C2_data
+     │    └─ C2_header
+     └─ shot_2/  …
 ```
 
-Scope waveform datasets store raw `int16` samples and LeCroy binary headers.
-Use the `lab_scopes` readers (e.g. `read_scope_data`) or the in-repo
-`read_and_analyze/` package to convert raw traces to voltage.
+- `positions_setup_array` / `positions_array` dtype:
+  `[('shot_num', '>u4'), ('x', '>f4'), ('y', '>f4')]`.
+- Skipped/failed shots are a `shot_N` group with `skipped=True`
+  (and `failed=True` if quarantined) + a `skip_reason` attr, and no datasets.
 
-Channel datasets are compressed (Blosc2, falling back to lzf), so HDFView may
-not decode them without the matching plugin; read them via the Python readers
-above.
+</details>
+
+
 
 ## Repository Layout
 
-```text
-LAPD_DAQ/
-  lapd_daq/        New framework: CLI, config model, run engine, devices, HDF5 writer
-  acquisition/     Acquisition package used by Data_Run*.py (spool, offload, scope/bmotion loops)
-  spooling/        Per-shot spool format + disk-full pause/retry helper
-  drivers/         LeCroy and Phantom hardware driver wrappers
-  motion/          Motor control and position management helpers
-  pi_gpio/         Raspberry Pi trigger/dropper client package
-  legacy/          Superseded scripts kept for reference
-  notebooks/       Scratch notebooks for scope and motor testing
-  tests/           Automated tests (mock by default, gated hardware checks) — see docs/tests.md
-  docs/            Long-form documentation pages
-  Data_Run.py      Standard spooled acquisition (stationary / grid)
-  Data_Run_bmotion.py            Spooled bmotion acquisition
-  Data_Run_MultiScope_Camera.py  Multi-scope + camera acquisition
-  Data_Run_45deg.py              Unsupported (exits early)
-  Offload_Run.py   Drains the spool into the HDF5 file (run alongside Data_Run*.py)
-  example_experiment_config.ini
-  pyproject.toml
-```
+**Packages**
+
+| Path | Contents |
+|---|---|
+| `lapd_daq/` | New framework: CLI, config model, run engine, devices, HDF5 writer |
+| `acquisition/` | Acquisition package used by `Data_Run*.py` (spool, offload, scope/bmotion loops) |
+| `spooling/` | Per-shot spool format + disk-full pause/retry helper |
+| `drivers/` | LeCroy and Phantom hardware driver wrappers |
+| `motion/` | Motor control and position management helpers |
+| `pi_gpio/` | Raspberry Pi trigger/dropper client package |
+| `legacy/` | Superseded scripts kept for reference |
+| `notebooks/` | Scratch notebooks for scope and motor testing |
+| `tests/` | Automated tests (mock by default, gated hardware checks) — see [docs/tests.md](docs/tests.md) |
+| `docs/` | Long-form documentation pages |
+
+**Entry-point scripts**
+
+| Script | Role |
+|---|---|
+| `Data_Run.py` | Standard spooled acquisition (stationary / grid) |
+| `Data_Run_bmotion.py` | Spooled bmotion acquisition |
+| `Data_Run_MultiScope_Camera.py` | Multi-scope + camera acquisition |
+| `Data_Run_45deg.py` | Unsupported (exits early) |
+| `Offload_Run.py` | Drains the spool into the HDF5 file (run alongside `Data_Run*.py`) |
+
+Plus `example_experiment_config.ini` and `pyproject.toml` at the root.
 
 ## Tests
 
