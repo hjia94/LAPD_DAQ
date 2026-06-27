@@ -82,7 +82,7 @@ Below are sections to be included in experiment_config.ini
 | Section | Purpose / key keys |
 |---|---|
 | `[storage]` | `hdf5_dir`, plus `disk_full_pause_seconds` / `disk_full_max_retries` to tune the pause+retry when the spool disk fills |
-| `[acquisition]` | Per-shot tuning for the spooled path |
+| `[acquisition]` | Per-shot tuning for the spooled path, plus `acquisition_mode` (`single` master/slave SINGLE-shot, default; or `averaging` for NORMAL-mode on-scope N-sweep averaging) and `averaging_timeout` |
 | `[nshots]` | `num_duplicate_shots`, `num_run_repeats` |
 | `[experiment]` | Run description lives in a separate `description.txt` next to the config (written to the HDF5 `description` attr at run start, overwritten at run end) |
 | `[scopes]` | Scope display names and descriptions |

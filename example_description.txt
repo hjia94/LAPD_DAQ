@@ -59,8 +59,30 @@ aborting. Defaults:
 
 [acquisition]
 ------------------------------------------------------------------------------
+acquisition_mode: 'single' (default) or 'averaging'.
+  single    -- master/slave synchronized SINGLE-shot (the [scopes] master/slave
+               wiring below applies). This is the default; omit the key for it.
+  averaging -- every scope runs in NORMAL trigger mode and ONE shot is an
+               on-scope N-sweep average read via wait_for_max_sweeps. There is
+               NO master/slave: scopes are NOT armed by the DAQ (they self-arm),
+               so the trigger-out -> EXT wiring and slave_ready_timeout below do
+               not apply. SET UP EACH SCOPE MANUALLY: trigger mode = NORMAL, and
+               turn on per-channel averaging (AverageSweeps = N) for every
+               displayed channel you want recorded. If a scope's AverageSweeps
+               is <= 1 the run warns at init and that "shot" is a single sweep.
+  A typo here fails loudly at startup rather than silently running 'single'.
+
+averaging_timeout: seconds (float) per shot, passed to wait_for_max_sweeps;
+  only used when acquisition_mode = averaging. Size it ABOVE N x (trigger
+  period) plus margin -- e.g. a 1 Hz timer with N=100 needs ~100 s, so use
+  120-150. A scope that does not reach its sweep count in time is recorded
+  missing for that shot (and a fully-missing shot counts toward
+  max_consecutive_skips). Default 120.
+
 OPTIONAL per-shot parallelism. All three flags default to true; set false to
 fall back to sequential behaviour (e.g. to A/B timing). No-ops with one scope.
+(parallel_scope_arm and slave_ready_timeout apply to 'single' mode only;
+averaging mode does not arm scopes.)
 
 parallel_scope_arm: arm all scopes for the next trigger concurrently. Serial
   arming leaves a window where a trigger edge is caught by some scopes and
@@ -139,9 +161,10 @@ section is ignored.
 Display name = free-text description. The name on the left (e.g. BdotScope) is
 the scope key referenced by [scope_ips] and [channels].
 
-MASTER/SLAVE TRIGGERING: the trigger comes from a free-running timer the DAQ
-cannot gate, so to guarantee every scope captures the SAME edge, one scope is
-the MASTER and the rest are SLAVES:
+MASTER/SLAVE TRIGGERING (acquisition_mode = single only; averaging mode runs
+every scope in NORMAL with no master/slave -- see [acquisition]): the trigger
+comes from a free-running timer the DAQ cannot gate, so to guarantee every scope
+captures the SAME edge, one scope is the MASTER and the rest are SLAVES:
   * Wiring: master's TRIGGER-OUT (Aux Out) -> every slave's EXT input.
   * Front-panel trigger sources (set MANUALLY; the software does not set them):
     master = the external timer; each slave = EXT.
