@@ -28,7 +28,7 @@ Run with:
 Setup (once):  python -m pip install scipy
 
 Created May.2026
-@author: Jia Han
+@author: Jia Han;  PP added filter_plane options
 """
 
 import os
@@ -58,9 +58,9 @@ try:  # works as a package (python -m read_and_analyze.plot_xy_map)
         read_positions, _scope_groups, _shot_numbers, _channel_names,
         resolve_data_file,
     )
-    from read_and_analyze.filter_data import _as_list, _filter_trace
+    from read_and_analyze.filter_data import _as_list, _filter_trace, _filter_plane
     from read_and_analyze.analysis_config import (
-        MED_SIZE, GAUSS_SIGMA,
+        MED_SIZE, GAUSS_SIGMA, XY_MED_SIZE, XY_GAUSS_SIGMA, XY_COMMON_SCALE, XY_INCLUDE_ZERO,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
@@ -71,9 +71,9 @@ except ImportError:  # fallback when run directly from inside the folder
         read_positions, _scope_groups, _shot_numbers, _channel_names,
         resolve_data_file,
     )
-    from filter_data import _as_list, _filter_trace
+    from filter_data import _as_list, _filter_trace, _filter_plane
     from analysis_config import (
-        MED_SIZE, GAUSS_SIGMA,
+        MED_SIZE, GAUSS_SIGMA, xy_MED_SIZE, xy_GAUSS_SIGMA, XY_COMMON_SCALE, XY_INCLUDE_ZERO,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
@@ -264,7 +264,7 @@ def _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma):
     return np.vstack(rows)
 
 
-def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
+def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma, xy_med_size, xy_gauss_sigma):
     """Reduce every planned position to one scalar and reshape onto the plane.
 
     Reads each position's repeat-shot stack in acquisition order, applies
@@ -291,11 +291,15 @@ def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
         stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
         vals[i] = reduce_fn(stack, tarr, i)
 
-    return vals.reshape((ny, nx)), xpos, ypos
+    if vals is not None:
+        vals = vals.reshape((ny,nx))
+        vals = _filter_plane(vals, xy_med_size, xy_gauss_sigma)
+
+    return vals, xpos, ypos
 
 
 def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
-                      med_size, gauss_sigma):
+                      med_size, gauss_sigma, xy_med_size, xy_gauss_sigma):
     """Build one plane per snapshot time in a single read pass.
 
     Loads each position's stack once, picks shot ``shot_index``, and samples it at
@@ -317,7 +321,7 @@ def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
         print(f"  warning: scope '{scope}' has {total} shots != npos({npos}) x "
               f"nshot -- not a clean grid; using position-lookup fallback")
 
-    vals = [np.full(npos, np.nan, dtype=float) for _ in idxs]
+    vals = [np.full(npos, np.nan, dtype=float) for _ in idxs]   # vals = list of len(idxs) entries, each a float array od Nan
     for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
                             total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
         stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
@@ -327,7 +331,9 @@ def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
         for k, idx in enumerate(idxs):
             vals[k][i] = float(trace[idx])
 
-    Zs = [v.reshape((ny, nx)) for v in vals]
+    #Zs = [v.reshape((ny, nx)) for v in vals]
+    Zs = [_filter_plane(v.reshape((ny, nx)), xy_med_size, xy_gauss_sigma) for v in vals]
+
     return Zs, xpos, ypos, t_los
 
 
@@ -352,18 +358,52 @@ def _draw_plane(ax, Z, xpos, ypos, cmap, show_contour, vmin=None, vmax=None):
         X, Y = np.meshgrid(xpos, ypos)
         masked = np.ma.masked_invalid(Z)
         ax.contour(X, Y, masked, levels=N_CONTOURS, colors="white",
-                   alpha=0.4, linewidths=0.5)
+                   alpha=0.4, linewidths=0.5, vmin=vmin, vmax=vmax)
     ax.set_xlabel("probe x (mm)")
     ax.set_ylabel("probe y (mm)")
     return im
 
 
+def _find_avg_extrema(data):
+    """ find the average of the top and bottom 5% (= 1/20) of the data """
+    finite = np.isfinite(data)
+    if finite.size:
+        fd = np.ravel(data)[np.ravel(finite)]
+        _, bin_edges = np.histogram(fd, 20)
+        amin = np.mean(fd[fd < bin_edges[1]])
+        amax = np.mean(fd[fd > bin_edges[-2]])
+        if amax == amin:  # bad?
+            amin = fd.min()
+            amax = fd.max()
+        if amax == amin:  # still bad?
+            amin = None
+            amax = None
+    else:
+        amin = None
+        amax = None
+    return amin, amax
+
+
+def _find_avg_extremas(data):
+    """ returns the extrema for each of the sequential frames, useful for _render_step_montage() """
+    amins = np.zeros(len(data))
+    amaxs = np.zeros(len(data))
+    for i,d in enumerate(data):
+        amins[i], amaxs[i] = _find_avg_extrema(d)
+    return amins, amaxs
+
+
 def _render_map(plt, Z, xpos, ypos, scope, ch, label, cmap, show_contour,
                 shot_index, path):
-    """Draw the single-plane ``range``/``step``-scalar figure."""
+    """ONLY USED FOR 'RANGE' CALLS"""
+    """Draw the single-plane ``range``/``step``-scalar figure. """
+
     fig, ax = plt.subplots(figsize=(8, 6.5))
-    im = _draw_plane(ax, Z, xpos, ypos, cmap, show_contour)
+    amin, amax = _find_avg_extrema(Z)
+
+    im = _draw_plane(ax, Z, xpos, ypos, cmap, show_contour, vmin=amin, vmax = amax)
     fig.colorbar(im, ax=ax, label=label)
+
     ax.set_title(f"scope '{scope}' / {ch}: {label}  (shot {shot_index})",
                  fontsize=10, loc="left")
     fig.suptitle(f"{os.path.basename(path)}  —  XY map", fontsize=10)
@@ -371,31 +411,54 @@ def _render_map(plt, Z, xpos, ypos, scope, ch, label, cmap, show_contour,
 
 
 def _render_step_montage(plt, Zs, xpos, ypos, t_los, scope, ch, cmap,
-                         show_contour, shot_index, path):
+                         show_contour, shot_index, path, xy_common_scale, xy_include_zero):
     """Draw the ``step``-mode montage: one plane per snapshot time, wrapped into a
-    roughly square grid, sharing a common color scale and one colorbar."""
+       roughly square grid, if common_scale is True, they share a common color scale and one 
+       colorbar, otherwise each is rescaled according to the data and there is no color ba
+    """
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
     n = len(Zs)
-    finite = np.concatenate([Z[np.isfinite(Z)].ravel() for Z in Zs]) if n else np.array([])
-    vmin = float(finite.min()) if finite.size else None
-    vmax = float(finite.max()) if finite.size else None
+    ####finite = np.concatenate([Z[np.isfinite(Z)].ravel() for Z in Zs]) if n else np.array([])
+    ####vmin = float(finite.min()) if finite.size else None
+    ####vmax = float(finite.max()) if finite.size else None
+    ####    I modified the limit calculation as in the next line
+    vmins, vmaxs = _find_avg_extremas(Zs)
+    if xy_include_zero:
+        vmins[:] = 0
+    if xy_common_scale:
+        vmins[:] = vmins.min()
+        vmaxs[:] = vmaxs.max()
 
     nrows, ncols = _grid_shape(n)
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.0 * nrows),
-                             squeeze=False)
+                             squeeze=False, sharex = True, sharey = True)     # this barfs: sharex = True, sharey = True
     flat = axes.ravel()
     im = None
     for k, (Z, t_lo) in enumerate(zip(Zs, t_los)):
         ax = flat[k]
-        im = _draw_plane(ax, Z, xpos, ypos, cmap, show_contour, vmin=vmin, vmax=vmax)
+        im = _draw_plane(ax, Z, xpos, ypos, cmap, show_contour, vmin=vmins[k], vmax=vmaxs[k])
+        ax.set_xlabel(None)
+        ax.set_ylabel(None)
         ax.set_title(f"t={t_lo * 1e3:.4f} ms", fontsize=9, loc="left")
+
+        if not xy_common_scale:
+            if im is not None:
+                divider = make_axes_locatable(ax)   # Create a divider for the current axes
+                cax = divider.append_axes("right", size="5%", pad=0.1)    # Append a new axis on the right, taking up 5% of the subplot width
+                fig.colorbar(im, cax=cax)            # Draw the colorbar in the newly created axis
 
     for ax in flat[n:]:   # hide any unused cells in the wrapped grid
         ax.axis("off")
 
-    if im is not None:
-        fig.colorbar(im, ax=axes, label="V", shrink=0.9)
+    if xy_common_scale:
+        if im is not None:
+            fig.colorbar(im, ax=axes, label="V", shrink=0.9)
+
     fig.suptitle(f"{os.path.basename(path)}  —  scope '{scope}' / {ch}: "
                  f"XY map (step, shot {shot_index})", fontsize=10)
+    fig.supylabel("probe y (mm)", fontsize=14, fontweight='bold')
+    fig.supxlabel("probe x (mm)", fontsize=14, fontweight='bold')
 
 
 # ======================================================================================
@@ -404,8 +467,8 @@ def _render_step_montage(plt, Zs, xpos, ypos, t_los, scope, ch, cmap,
 
 def plot_xy_map(path, scope=None, channels=None, mode=None,
                 t_start=None, t_end=None, t_step=None, shot_index=None,
-                med_size=None, gauss_sigma=None,
-                show_contour=None, cmap=None, show=None, save=None):
+                med_size=None, gauss_sigma=None, xy_med_size=None, xy_gauss_sigma=None,
+                show_contour=None, cmap=None, show=None, save=None, xy_common_scale=None, xy_include_zero=None):
     """Render a plane-only XY map per (scope, channel).
 
     For each scope/channel: pick one shot per position by ``shot_index``, reduce it
@@ -417,6 +480,7 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
     """
     import matplotlib.pyplot as plt
 
+
     scope = SCOPE if scope is None else scope
     channels = CHANNELS if channels is None else channels
     mode = MODE if mode is None else mode
@@ -424,9 +488,13 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
     t_end = T_END_MS if t_end is None else t_end
     t_step = T_STEP_MS if t_step is None else t_step
     shot_index = SHOT_INDEX if shot_index is None else shot_index
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
-    show_contour = SHOW_CONTOUR if show_contour is None else show_contour
+    med_size       = MED_SIZE       if med_size       is None else med_size
+    gauss_sigma    = GAUSS_SIGMA    if gauss_sigma    is None else gauss_sigma
+    xy_med_size    = XY_MED_SIZE    if xy_med_size    is None else xy_med_size
+    xy_gauss_sigma = XY_GAUSS_SIGMA if xy_gauss_sigma is None else xy_gauss_sigma
+    common_scale   = XY_COMMON_SCALE   if xy_common_scale   is None else xy_common_scale
+    show_contour   = SHOW_CONTOUR   if show_contour   is None else show_contour
+    xy_include_zero = XY_INCLUDE_ZERO if xy_include_zero is None else xy_include_zero
     cmap = CMAP if cmap is None else cmap
     show = SHOW_PLOT if show is None else show
     save = SAVE_PLOT if save is None else save
@@ -466,17 +534,17 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
                     t_steps = _as_step_list(t_step)
                     Zs, xp, yp, t_los = build_planes_step(
                         f, sc, ch, positions, t_steps, shot_index,
-                        med_size, gauss_sigma)
+                        med_size, gauss_sigma, xy_med_size, xy_gauss_sigma)
                     if Zs is None or all(np.all(np.isnan(Z)) for Z in Zs):
                         print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue
                     _render_step_montage(plt, Zs, xp, yp, t_los, sc, ch, cmap,
-                                         show_contour, shot_index, path)
-                else:
+                                         show_contour, shot_index, path, xy_common_scale, xy_include_zero)
+                else: # mode == "RANGE" (presumably)
                     Z, xp, yp = build_plane(
                         f, sc, ch, positions,
                         make_single_shot_reduce(shot_index, mode, t_start, t_end, t_step),
-                        med_size, gauss_sigma)
+                        med_size, gauss_sigma, xy_med_size, xy_gauss_sigma)
                     if Z is None or np.all(np.isnan(Z)):
                         print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue
@@ -500,4 +568,5 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
 
 
 if __name__ == "__main__":
-    plot_xy_map(resolve_data_file())
+    from PP_Rainbow_LCD import PP_Rainbow_cmap
+    plot_xy_map(resolve_data_file(), cmap = PP_Rainbow_cmap)
