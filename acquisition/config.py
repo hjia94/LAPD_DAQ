@@ -9,6 +9,7 @@ import configparser
 import os
 
 from .config_errors import IniConfigError, MISSING_FILE_HINT
+from .scope_modes import MODE_SINGLE, mode_from_name
 
 
 DESCRIPTION_FILENAME = "description.txt"
@@ -210,6 +211,30 @@ def get_channel_descriptions(config):
     if not config.has_section('channels'):
         return {}
     return dict(config.items('channels'))
+
+
+def get_scope_modes(config, scope_names):
+    """Return the per-scope acquisition mode map ``{scope_name: mode_int}``.
+
+    ``scope_names`` is the iterable of configured scope names (the keys of
+    ``[scope_ips]``). Every scope defaults to ``MODE_SINGLE`` so existing configs
+    are unchanged; an optional ``[scope_modes]`` section overrides per scope. An
+    unknown mode name raises ``ValueError`` (via :func:`mode_from_name`) so a typo
+    aborts the run at startup rather than silently mis-acquiring; a ``[scope_modes]``
+    key naming no configured scope is warned about (likely a typo) but is not
+    fatal. Keys are matched against ``scope_names`` as ConfigParser stores them
+    (lowercased), so the comparison is case-insensitive like the other lookups.
+    """
+    modes = {name: MODE_SINGLE for name in scope_names}
+    if not config.has_section('scope_modes'):
+        return modes
+    for name, mode_name in config.items('scope_modes'):
+        if name not in modes:
+            print(f"Warning: [scope_modes] names '{name}', which is not in "
+                  f"[scope_ips]; ignoring.")
+            continue
+        modes[name] = mode_from_name(mode_name)
+    return modes
 
 
 def hdf5_filename(exp_name, date=None):

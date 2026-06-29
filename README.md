@@ -88,6 +88,7 @@ Below are sections to be included in experiment_config.ini
 | `[scopes]` | Scope display names and descriptions |
 | `[channels]` | Channel descriptions, keyed `ScopeName_C1` |
 | `[scope_ips]` | Direct scope IPs |
+| `[scope_modes]` | Per-scope acquisition mode: `single` (default) or `sequence` — see [Acquisition modes](#acquisition-modes) |
 | `[analysis]` | `auto_plot` — post-run line-profile PNG plotting (default on) |
 | `[position]` / `[motor_ips]` | XY/XYZ grid parameters and motor IPs (grid mode) |
 | `[camera_config]` | Phantom camera settings (camera/dropper modes only) |
@@ -95,6 +96,39 @@ Below are sections to be included in experiment_config.ini
 | `[bmotion]` | Motion-group / direction / recovery settings for the bmotion script |
 
 See example_description.txt for full description of configurations.
+
+### Acquisition modes
+
+Each scope runs in one acquisition mode for the whole run, declared in the
+optional `[scope_modes]` section and keyed by scope name. Any scope not listed
+defaults to `single`, so existing configs are unchanged.
+
+```ini
+[scope_ips]
+BdotScope = 192.168.7.63
+XrayScope = 192.168.7.64
+
+[scope_modes]
+BdotScope = sequence
+# XrayScope omitted -> single (the default)
+```
+
+| Mode | What it captures | Stored shape (`/<Scope>/shot_N/C1_data`) |
+|---|---|---|
+| `single` (default) | One trace per shot — synchronized single capture (master/slave) | `(samples,)` int16 |
+| `sequence` | Segmented (sequence) capture — one acquisition fills all segments | `(n_segments, samples)` int16, one row per segment |
+
+A `sequence` scope is armed, triggered, and waited on **exactly like a `single`
+scope** (SINGLE trigger, master/slave arming, STOP-on-complete). The only
+difference is the returned data structure and how it is stored: sequence data is
+written as a 2-D dataset (one row per segment) instead of a 1-D trace. Because
+the two modes are otherwise identical, a sequence scope can coexist with single
+scopes in the same run.
+
+The scope must be placed into sequence (segmented) acquisition on its front
+panel; the config setting only tells the DAQ how to read and store the result.
+If the declared mode and the scope's actual acquisition setup disagree at
+startup, a warning is printed (the config value is still used).
 
 ## HDF5 Output
 
@@ -104,7 +138,7 @@ See example_description.txt for full description of configurations.
 
 | What | HDF5 path | Shape / dtype |
 | --- | --- | --- |
-| Channel waveform (shot `N`, trace `C1`) | `/<ScopeName>/shot_<N>/C1_data` | `(samples,)` raw `int16` |
+| Channel waveform (shot `N`, trace `C1`) | `/<ScopeName>/shot_<N>/C1_data` | `(samples,)` raw `int16` (single mode); `(n_segments, samples)` in sequence mode |
 | Per-trace WAVEDESC header (gain/offset) | `/<ScopeName>/shot_<N>/C1_header` | 346-byte opaque (`np.void`) |
 | Time base for all that scope's traces | `/<ScopeName>/time_array` | `(samples,)` `float64`, seconds |
 | Probe position per shot | `/Control/Positions/<motion_group>/positions_array` | structured `(shot_num, x, y)` |

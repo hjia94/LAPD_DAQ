@@ -32,6 +32,7 @@ from motion import PositionManager
 from . import hdf5_writer
 from . import config as config_module
 from .config import load_experiment_config
+from .scope_modes import MODE_SINGLE, MODE_SEQUENCE, name_from_mode
 
 
 # =============================================================================
@@ -131,7 +132,9 @@ def acquire_from_scope_sequence(scope, scope_name, traces, ref_channel=None):
     wait_for_fresh_acquisition(scope, ref_channel)
 
     for tr in traces:
-        segment_data, header = scope.acquire_sequence_data(tr)
+        # raw=True returns the int16 ADC counts; raw=False would scale to volts
+        # (floats), which the int16 cast below would then truncate to ~0.
+        segment_data, header = scope.acquire_sequence_data(tr, raw=True)
         segment_data = [np.asarray(seg, dtype=np.int16) for seg in segment_data]
         data[tr] = np.stack(segment_data)
         headers[tr] = header
@@ -213,6 +216,11 @@ class MultiScopeAcquisition:
             self.scope_ips = dict(config.items('scope_ips'))
         else:
             self.scope_ips = {}
+
+        # Per-scope declared acquisition mode. Default SINGLE so existing configs
+        # are unchanged. A scope listed in [scope_modes] with a bad value fails
+        # loudly here (ValueError) rather than mis-acquiring.
+        self._scope_modes = config_module.get_scope_modes(config, self.scope_ips)
 
     def cleanup(self):
         """Close every open scope handle."""
@@ -318,7 +326,8 @@ class MultiScopeAcquisition:
     def initialize_scopes(self):
         """Connect to every scope, capture its time array, and save metadata.
 
-        Returns: {scope_name: is_sequence_flag} for every scope that came up.
+        Returns: {scope_name: mode_int} (the declared acquisition mode) for
+        every scope that came up.
         """
         active_scopes = {}
         for name, ip in self.scope_ips.items():
@@ -336,15 +345,29 @@ class MultiScopeAcquisition:
 
                 scope.set_trigger_mode('SINGLE')
 
-                is_sequence, time_array, traces = init_acquire_from_scope(scope, name)
+                declared = self._scope_modes.get(name, MODE_SINGLE)
+                detected, time_array, traces = init_acquire_from_scope(scope, name)
 
-                if is_sequence is not None and time_array is not None:
+                if detected is not None and time_array is not None:
+                    # The declared config mode is authoritative; the detected
+                    # subarray_count is only a cross-check. A mismatch usually
+                    # means the scope's front-panel acquisition setup doesn't
+                    # match the config (e.g. config says sequence but the scope
+                    # is not in segmented mode) -- warn but trust the config.
+                    if detected != declared:
+                        print(f"Warning: {name} config mode is "
+                              f"{name_from_mode(declared)} but the scope looks "
+                              f"like {name_from_mode(detected)} (subarray_count). "
+                              f"Check the scope's acquisition setup.")
+
                     self._displayed_traces[name] = traces
-                    self.save_time_arrays(name, time_array, is_sequence)
+                    # write_time_array's is_sequence flag must reflect the actual
+                    # data shape, which is the declared mode for this run.
+                    self.save_time_arrays(name, time_array, declared)
                     self._save_scope_metadata(name, traces)
                     self.warn_missing_channel_descriptions(name, traces)
 
-                    active_scopes[name] = is_sequence
+                    active_scopes[name] = declared
                     print(f"Successfully initialized {name}")
                 else:
                     print(f"Warning: Could not initialize {name} - no valid data returned")
@@ -375,9 +398,9 @@ class MultiScopeAcquisition:
         scope = self.scopes[name]
         ref_channel = self._arm_channels.get(name)
         traces = self._displayed_traces[name]
-        if mode == 0:
+        if mode == MODE_SINGLE:
             return acquire_from_scope(scope, name, traces, ref_channel)
-        elif mode == 1:
+        elif mode == MODE_SEQUENCE:
             return acquire_from_scope_sequence(scope, name, traces, ref_channel)
         else:
             raise ValueError(f"Invalid active_scopes value for {name}: {mode}")
