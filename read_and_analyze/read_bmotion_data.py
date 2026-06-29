@@ -80,6 +80,21 @@ def _channel_names(scope_group, shot_num):
     return sorted(k[:-5] for k in shot.keys() if k.endswith("_data"))
 
 
+def _is_sequence_shot(scope_group, ch, shot_num):
+    """True if this channel/shot was acquired in sequence mode.
+
+    Sequence-mode acquisition stores ``<CH>_data`` as a 2-D
+    ``(n_segments, samples)`` array (one row per segment); single mode stores a
+    1-D ``(samples,)`` trace. The stored shape is the only signal -- there is no
+    per-shot mode flag -- so detect it from the dataset's rank.
+    """
+    shot = scope_group.get(f"shot_{shot_num}")
+    if shot is None:
+        return False
+    ds = shot.get(f"{ch}_data")
+    return ds is not None and ds.ndim > 1
+
+
 def read_channel_descriptions(f, scope_name):
     """Return ``{channel: description}`` for a scope, handling both layouts.
 
@@ -467,12 +482,23 @@ def _validate_trace(f, scope, ch, s, shot, tarr, add):
     if not np.all(np.isfinite(volts)):
         add("WARN", f"/{scope}/shot_{s}/{ch} contains non-finite voltages")
 
-    if tarr is not None and len(tarr) != len(volts):
+    # Sequence mode: volts is (n_segments, samples); the time axis spans one
+    # segment (the trailing sample axis), not the leading segment axis.
+    nsamp = volts.shape[-1]
+    if volts.ndim > 1:
+        if tarr is not None and len(tarr) != nsamp:
+            add("WARN", f"/{scope}/shot_{s}/{ch} time_array len {len(tarr)} "
+                        f"!= segment len {nsamp} (reader will reconstruct)")
+        else:
+            add("PASS", f"/{scope}/shot_{s}/{ch} sequence decoded OK "
+                        f"({volts.shape[0]} segments x {nsamp} samples, dt={dt:.3g}s, "
+                        f"V {volts.min():.4g}..{volts.max():.4g})")
+    elif tarr is not None and len(tarr) != nsamp:
         add("WARN", f"/{scope}/shot_{s}/{ch} time_array len {len(tarr)} "
-                    f"!= trace len {len(volts)} (reader will reconstruct)")
+                    f"!= trace len {nsamp} (reader will reconstruct)")
     else:
         add("PASS", f"/{scope}/shot_{s}/{ch} decoded OK "
-                    f"(n={len(volts)}, dt={dt:.3g}s, V {volts.min():.4g}..{volts.max():.4g})")
+                    f"(n={nsamp}, dt={dt:.3g}s, V {volts.min():.4g}..{volts.max():.4g})")
 
 
 # ======================================================================================
@@ -501,6 +527,15 @@ def print_summary(path):
             print(f"\nScope '{scope}'  ({sg.attrs.get('scope_type', '').strip()})")
             print(f"  ip={sg.attrs.get('ip_address')}  description={sg.attrs.get('description')}")
             print(f"  shots: {len(shots)}  (shot_{shots[0]}..shot_{shots[-1]})")
+            # Flag sequence mode from the stored shape of the first readable shot.
+            for s in shots:
+                chans = _channel_names(sg, s)
+                if chans and _is_sequence_shot(sg, chans[0], s):
+                    nseg = sg[f"shot_{s}"][f"{chans[0]}_data"].shape[0]
+                    print(f"  mode: SEQUENCE  ({nseg} segments/shot)")
+                    break
+                if chans:
+                    break
             ta = sg.get("time_array")
             if ta is not None and ta.shape[0] > 1:
                 t = ta[()]
@@ -529,6 +564,45 @@ def print_summary(path):
 # ======================================================================================
 # Plotting
 # ======================================================================================
+
+def _plot_sequence_channel(f, scope, ch, shots, ax):
+    """Plot every segment of every sequence-mode shot of one channel onto ``ax``.
+
+    Each shot's ``<CH>_data`` is a (n_segments, samples) volt stack; one line is
+    drawn per segment on the shared per-segment time axis (``time_array`` if its
+    length matches the segment width, else reconstructed from the WAVEDESC dt/t0).
+    The legend is suppressed past a handful of segments to stay readable.
+    """
+    try:
+        tarr = read_hdf5_scope_tarr(f, scope)
+    except Exception:
+        tarr = None
+
+    total_segments = 0
+    for s in shots:
+        try:
+            volts, dt, t0 = read_hdf5_scope_data(f, scope, ch, s)
+        except Exception as e:
+            print(f"  skip {scope}/shot_{s}/{ch}: {e}")
+            continue
+        segs = np.atleast_2d(volts)
+        nsamp = segs.shape[1]
+        if tarr is not None and len(tarr) == nsamp:
+            t = tarr
+        else:
+            t = np.arange(nsamp) * dt + t0
+        for i, seg in enumerate(segs):
+            total_segments += 1
+            label = (f"shot {s} seg {i}" if len(shots) > 1 else f"seg {i}")
+            ax.plot(t * 1e3, seg, lw=0.8,
+                    label=label if total_segments <= 12 else None)
+    if total_segments == 0:
+        print(f"  skip {scope}/{ch}: no readable sequence shots")
+    elif total_segments > 12:
+        # Too many segments to legend cleanly; annotate the count instead.
+        ax.text(0.99, 0.97, f"{total_segments} segments", transform=ax.transAxes,
+                ha="right", va="top", fontsize=8)
+
 
 def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=None):
     """Overlay a few traces per scope for visual comparison against the scope.
@@ -571,6 +645,16 @@ def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=Non
                                      figsize=(10, 2.4 * len(use_channels)), squeeze=False)
             axes = axes[:, 0]
             for ax, ch in zip(axes, use_channels):
+                # Sequence mode stores each shot as a (n_segments, samples) stack;
+                # plot every segment as its own trace so the file can be eyeballed.
+                if any(_is_sequence_shot(sg, ch, s) for s in use_shots):
+                    _plot_sequence_channel(f, sc, ch, use_shots, ax)
+                    ax.set_ylabel("V")
+                    ax.set_title(f"{ch}: {descs.get(ch, '')}", fontsize=9, loc="left")
+                    if ax.get_legend_handles_labels()[1]:
+                        ax.legend(fontsize=8, loc="upper right")
+                    ax.grid(alpha=0.3)
+                    continue
                 # Read all plotted shots of this channel in one pass (WAVEDESC
                 # decoded once); NaN rows mark unreadable/skipped shots.
                 stack, dt, t0 = read_hdf5_scope_channel_shots(f, sc, ch, use_shots)
