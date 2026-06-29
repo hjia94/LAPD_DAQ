@@ -565,43 +565,33 @@ def print_summary(path):
 # Plotting
 # ======================================================================================
 
-def _plot_sequence_channel(f, scope, ch, shots, ax):
-    """Plot every segment of every sequence-mode shot of one channel onto ``ax``.
+def _plot_sequence_shot(f, scope, ch, shot, ax, tarr=None):
+    """Plot every segment of ONE sequence-mode shot of one channel onto ``ax``.
 
-    Each shot's ``<CH>_data`` is a (n_segments, samples) volt stack; one line is
-    drawn per segment on the shared per-segment time axis (``time_array`` if its
-    length matches the segment width, else reconstructed from the WAVEDESC dt/t0).
-    The legend is suppressed past a handful of segments to stay readable.
+    The shot's ``<CH>_data`` is a (n_segments, samples) volt stack; one line is
+    drawn per segment on the per-segment time axis (``time_array`` if its length
+    matches the segment width, else reconstructed from the WAVEDESC dt/t0). The
+    per-segment legend is suppressed past a handful of segments to stay readable.
+    Returns the number of segments drawn (0 if the shot was unreadable).
     """
     try:
-        tarr = read_hdf5_scope_tarr(f, scope)
-    except Exception:
-        tarr = None
-
-    total_segments = 0
-    for s in shots:
-        try:
-            volts, dt, t0 = read_hdf5_scope_data(f, scope, ch, s)
-        except Exception as e:
-            print(f"  skip {scope}/shot_{s}/{ch}: {e}")
-            continue
-        segs = np.atleast_2d(volts)
-        nsamp = segs.shape[1]
-        if tarr is not None and len(tarr) == nsamp:
-            t = tarr
-        else:
-            t = np.arange(nsamp) * dt + t0
-        for i, seg in enumerate(segs):
-            total_segments += 1
-            label = (f"shot {s} seg {i}" if len(shots) > 1 else f"seg {i}")
-            ax.plot(t * 1e3, seg, lw=0.8,
-                    label=label if total_segments <= 12 else None)
-    if total_segments == 0:
-        print(f"  skip {scope}/{ch}: no readable sequence shots")
-    elif total_segments > 12:
+        volts, dt, t0 = read_hdf5_scope_data(f, scope, ch, shot)
+    except Exception as e:
+        print(f"  skip {scope}/shot_{shot}/{ch}: {e}")
+        return 0
+    segs = np.atleast_2d(volts)
+    nsamp = segs.shape[1]
+    if tarr is not None and len(tarr) == nsamp:
+        t = tarr
+    else:
+        t = np.arange(nsamp) * dt + t0
+    for i, seg in enumerate(segs):
+        ax.plot(t * 1e3, seg, lw=0.8, label=f"seg {i}" if len(segs) <= 12 else None)
+    if len(segs) > 12:
         # Too many segments to legend cleanly; annotate the count instead.
-        ax.text(0.99, 0.97, f"{total_segments} segments", transform=ax.transAxes,
+        ax.text(0.99, 0.97, f"{len(segs)} segments", transform=ax.transAxes,
                 ha="right", va="top", fontsize=8)
+    return len(segs)
 
 
 def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=None):
@@ -640,47 +630,73 @@ def plot_traces(path, scope=None, channels=None, shots=None, show=None, save=Non
                 continue
             use_channels = channels if channels else _channel_names(sg, use_shots[0])
             descs = read_channel_descriptions(f, sc)
+            is_seq = any(_is_sequence_shot(sg, use_channels[0], s) for s in use_shots)
 
-            fig, axes = plt.subplots(len(use_channels), 1, sharex=True,
-                                     figsize=(10, 2.4 * len(use_channels)), squeeze=False)
-            axes = axes[:, 0]
-            for ax, ch in zip(axes, use_channels):
-                # Sequence mode stores each shot as a (n_segments, samples) stack;
-                # plot every segment as its own trace so the file can be eyeballed.
-                if any(_is_sequence_shot(sg, ch, s) for s in use_shots):
-                    _plot_sequence_channel(f, sc, ch, use_shots, ax)
-                    ax.set_ylabel("V")
-                    ax.set_title(f"{ch}: {descs.get(ch, '')}", fontsize=9, loc="left")
-                    if ax.get_legend_handles_labels()[1]:
-                        ax.legend(fontsize=8, loc="upper right")
-                    ax.grid(alpha=0.3)
-                    continue
-                # Read all plotted shots of this channel in one pass (WAVEDESC
-                # decoded once); NaN rows mark unreadable/skipped shots.
-                stack, dt, t0 = read_hdf5_scope_channel_shots(f, sc, ch, use_shots)
-                if stack is None:
-                    print(f"  skip {sc}/{ch}: no readable shots")
-                    continue
+            if is_seq:
+                # Sequence mode: one COLUMN per shot so each shot's segments get
+                # their own panel (overlaying all shots is unreadable). Grid is
+                # (n_channels rows) x (n_shots cols), columns share x and y scale.
                 try:
                     tarr = read_hdf5_scope_tarr(f, sc)
-                    if len(tarr) != stack.shape[1]:
-                        tarr = np.arange(stack.shape[1]) * dt + t0
                 except Exception:
-                    tarr = np.arange(stack.shape[1]) * dt + t0
-                for s, volts in zip(use_shots, stack):
-                    if np.isnan(volts).all():
-                        print(f"  skip {sc}/shot_{s}/{ch}: unreadable")
+                    tarr = None
+                fig, axes = plt.subplots(
+                    len(use_channels), len(use_shots), sharex=True, sharey="row",
+                    figsize=(5.5 * len(use_shots), 2.4 * len(use_channels)),
+                    squeeze=False)
+                for r, ch in enumerate(use_channels):
+                    for c, s in enumerate(use_shots):
+                        ax = axes[r][c]
+                        _plot_sequence_shot(f, sc, ch, s, ax, tarr=tarr)
+                        if c == 0:
+                            ax.set_ylabel("V")
+                        if r == 0:
+                            pos = _position_for_shot(positions, s)
+                            head = f"shot {s}"
+                            if pos is not None:
+                                head += f" @ x={pos[0]:.1f}, y={pos[1]:.1f}"
+                            ax.set_title(head, fontsize=10)
+                        ax.text(0.01, 0.97, f"{ch}: {descs.get(ch, '')}",
+                                transform=ax.transAxes, ha="left", va="top",
+                                fontsize=8)
+                        if ax.get_legend_handles_labels()[1]:
+                            ax.legend(fontsize=7, loc="upper right")
+                        ax.grid(alpha=0.3)
+                for ax in axes[-1]:
+                    ax.set_xlabel("time (ms)")
+            else:
+                fig, axes2 = plt.subplots(len(use_channels), 1, sharex=True,
+                                          figsize=(10, 2.4 * len(use_channels)),
+                                          squeeze=False)
+                axes = axes2[:, 0]
+                for ax, ch in zip(axes, use_channels):
+                    # Read all plotted shots of this channel in one pass (WAVEDESC
+                    # decoded once); NaN rows mark unreadable/skipped shots.
+                    stack, dt, t0 = read_hdf5_scope_channel_shots(f, sc, ch, use_shots)
+                    if stack is None:
+                        print(f"  skip {sc}/{ch}: no readable shots")
                         continue
-                    pos = _position_for_shot(positions, s)
-                    label = f"shot {s}"
-                    if pos is not None:
-                        label += f" @ x={pos[0]:.1f}, y={pos[1]:.1f}"
-                    ax.plot(tarr * 1e3, volts, lw=0.8, label=label)
-                ax.set_ylabel("V")
-                ax.set_title(f"{ch}: {descs.get(ch, '')}", fontsize=9, loc="left")
-                ax.legend(fontsize=8, loc="upper right")
-                ax.grid(alpha=0.3)
-            axes[-1].set_xlabel("time (ms)")
+                    try:
+                        tarr = read_hdf5_scope_tarr(f, sc)
+                        if len(tarr) != stack.shape[1]:
+                            tarr = np.arange(stack.shape[1]) * dt + t0
+                    except Exception:
+                        tarr = np.arange(stack.shape[1]) * dt + t0
+                    for s, volts in zip(use_shots, stack):
+                        if np.isnan(volts).all():
+                            print(f"  skip {sc}/shot_{s}/{ch}: unreadable")
+                            continue
+                        pos = _position_for_shot(positions, s)
+                        label = f"shot {s}"
+                        if pos is not None:
+                            label += f" @ x={pos[0]:.1f}, y={pos[1]:.1f}"
+                        ax.plot(tarr * 1e3, volts, lw=0.8, label=label)
+                    ax.set_ylabel("V")
+                    ax.set_title(f"{ch}: {descs.get(ch, '')}", fontsize=9, loc="left")
+                    ax.legend(fontsize=8, loc="upper right")
+                    ax.grid(alpha=0.3)
+                axes[-1].set_xlabel("time (ms)")
+
             fig.suptitle(f"{os.path.basename(path)}  —  scope '{sc}'", fontsize=10)
             fig.tight_layout()
 
