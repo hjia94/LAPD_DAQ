@@ -235,7 +235,8 @@ def scope_channel_descriptions(descriptions, scope_name, traces):
     }
 
 
-def write_shot_data(save_path, all_data, shot_num, overwrite=False):
+def write_shot_data(save_path, all_data, shot_num, overwrite=False,
+                    acquisition_time=None):
     """Write shot_N for every scope (raw int16, blosc2/lzf-compressed, fletcher32 on).
 
     Args:
@@ -245,16 +246,22 @@ def write_shot_data(save_path, all_data, shot_num, overwrite=False):
         overwrite: when True, replace an existing shot_N group instead of
             raising. A general capability; no caller sets it on this branch.
             When False, an existing shot is treated as a programming error.
+        acquisition_time: ctime string of when the shot was actually acquired.
+            When None, falls back to "now" -- correct for the in-process writer,
+            but a spooled offload writes minutes later, so it must pass the
+            acquire-side stamp through.
 
     Channel descriptions are NOT written here: they live once per scope as
     ``<trace>_description`` attributes on the scope group (see
     :func:`write_scope_metadata`), not duplicated on every shot's datasets.
     """
     with h5py.File(save_path, 'a', **SHOT_WRITE_OPEN_KWARGS) as f:
-        _write_shot_data_into(f, all_data, shot_num, overwrite=overwrite)
+        _write_shot_data_into(f, all_data, shot_num, overwrite=overwrite,
+                              acquisition_time=acquisition_time)
 
 
-def _write_shot_data_into(f, all_data, shot_num, overwrite=False):
+def _write_shot_data_into(f, all_data, shot_num, overwrite=False,
+                          acquisition_time=None):
     """Write shot_N groups into an already-open HDF5 file handle.
 
     Split out of :func:`write_shot_data` so a caller that must also write other
@@ -270,7 +277,7 @@ def _write_shot_data_into(f, all_data, shot_num, overwrite=False):
                 raise RuntimeError(f"Shot {shot_num} already exists for scope {scope_name}.")
             del scope_group[shot_name]
         shot_group = scope_group.create_group(shot_name)
-        shot_group.attrs['acquisition_time'] = time.ctime()
+        shot_group.attrs['acquisition_time'] = acquisition_time or time.ctime()
 
         for tr in traces:
             if tr not in data:
@@ -295,7 +302,7 @@ def _write_shot_data_into(f, all_data, shot_num, overwrite=False):
 
 
 def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason,
-                                 skip_if_exists=False):
+                                 skip_if_exists=False, acquisition_time=None):
     """Record a skipped shot under each scope group with a human-readable reason.
 
     ``reason`` is either one string applied to every scope (whole-shot skip) or a
@@ -305,6 +312,7 @@ def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason,
     exists is left untouched -- idempotent across offload retries, and lets a
     partial-shot skip be written alongside the good scopes' real data without
     clobbering it. Scope names absent from the file are silently ignored.
+    ``acquisition_time`` is the acquire-side ctime stamp; None falls back to now.
     """
     per_scope = isinstance(reason, dict)
     shot_name = f'shot_{shot_num}'
@@ -316,7 +324,7 @@ def mark_shot_skipped_for_scopes(save_path, scope_names, shot_num, reason,
             shot_group.attrs['skipped'] = True
             shot_group.attrs['skip_reason'] = str(
                 reason[scope_name] if per_scope else reason)
-            shot_group.attrs['acquisition_time'] = time.ctime()
+            shot_group.attrs['acquisition_time'] = acquisition_time or time.ctime()
 
 
 def mark_shot_failed_for_scopes(save_path, scope_names, shot_num, reason):

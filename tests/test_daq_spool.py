@@ -491,6 +491,33 @@ class OffloadEquivalenceTests(unittest.TestCase):
                                    shuffle=True, fletcher32=True)
             self.assertEqual(ds.chunks, ds.shape)
 
+    def test_offload_preserves_acquire_time_stamp(self):
+        """acquisition_time must be the acquire-side stamp, not offload time.
+
+        The offload can drain minutes after the shot fired; the HDF5 attr is the
+        record analysis tools use to line shots up with other diagnostics, so it
+        must carry the payload's acquire-side ctime for both data and skipped
+        shots.
+        """
+        stamp = "Wed May 20 19:25:47 2026"
+        _build_bmotion_skeleton(self.off_h5, total_shots=2)
+        spool_format.write_run_metadata(
+            self.spool, _make_meta(hdf5_path=self.off_h5, total_shots=2))
+        payload = spool_adapter.all_data_to_payload(
+            _make_all_data(False), 1, {"MG_A": (1.0, 2.0)})
+        payload.acquisition_time = stamp
+        spool_format.write_shot(self.spool, payload)
+        skip = spool_adapter.skipped_payload(2, "no trigger")
+        skip.acquisition_time = stamp
+        spool_format.write_shot(self.spool, skip)
+        spool_format.write_run_complete(self.spool, 2)
+        offload_engine.run_offload(self.spool, poll_seconds=0.01)
+
+        with h5py.File(self.off_h5, "r") as f:
+            self.assertEqual(f["lpscope/shot_1"].attrs["acquisition_time"], stamp)
+            self.assertEqual(f["lpscope/shot_2"].attrs["acquisition_time"], stamp)
+            self.assertTrue(f["lpscope/shot_2"].attrs["skipped"])
+
 
 class VerifyAndDeleteTests(unittest.TestCase):
     def setUp(self):

@@ -99,7 +99,8 @@ def write_shot(hdf5_path, payload, meta):
 
     all_data = _payload_to_all_data(payload)
     with h5py.File(hdf5_path, "a", **hdf5_writer.SHOT_WRITE_OPEN_KWARGS) as f:
-        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num)
+        hdf5_writer._write_shot_data_into(f, all_data, payload.shot_num,
+                                          acquisition_time=payload.acquisition_time)
         _write_positions(f, payload, meta)
 
     # Per-scope partial: scopes that failed to arm/read/spool for this shot get
@@ -206,7 +207,7 @@ def _payload_to_all_data(payload):
 def _write_skip(hdf5_path, payload, meta):
     hdf5_writer.mark_shot_skipped_for_scopes(
         hdf5_path, meta["config_scope_names"], payload.shot_num,
-        payload.skip_reason,
+        payload.skip_reason, acquisition_time=payload.acquisition_time,
     )
 
 
@@ -222,6 +223,7 @@ def _write_missing_scopes(hdf5_path, payload):
     hdf5_writer.mark_shot_skipped_for_scopes(
         hdf5_path, list(payload.missing), payload.shot_num,
         payload.missing, skip_if_exists=True,
+        acquisition_time=payload.acquisition_time,
     )
 
 
