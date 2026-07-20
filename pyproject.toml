@@ -84,6 +84,7 @@ include = [
     "acquisition*",
     "drivers*",
     "lapd_daq*",
+    "mcpherson*",
     "motion*",
     "pi_gpio*",
     "read_and_analyze*",
