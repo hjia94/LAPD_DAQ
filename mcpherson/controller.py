@@ -126,7 +126,11 @@ class Spectrometer:
 
     def close(self):
         if self.sp is not None:
-            self.sp.flush()
+            # flush() can raise if the port already errored; teardown must not.
+            try:
+                self.sp.flush()
+            except Exception:
+                pass
             self.sp.close()
             self.sp = None
 

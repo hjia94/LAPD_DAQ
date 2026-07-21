@@ -233,11 +233,11 @@ class Window(QWidget):
         self.p.stop_motor()
 
     def FindHome(self):
-        self.HomeLabel3.setText('Start homing process...')
+        self.HomeLabel4.setText('Start homing process...')
         if self.p.homing():
-            self.HomeLabel3.setText('Homing process done.')
+            self.HomeLabel4.setText('Homing process done.')
         else:
-            self.HomeLabel3.setText('Homing process failed.')
+            self.HomeLabel4.setText('Homing process failed.')
 
     # --- Data acquisition ------------------------------------------------
     def StartDataRun(self):
@@ -256,12 +256,16 @@ class Window(QWidget):
 
             if os.path.isfile(hdf5_file):
                 size = os.stat(hdf5_file).st_size / (1024 * 1024)
-                print('wrote file "', hdf5_file, '",  ', time.ctime(),
-                      ', %6.1f' % size, ' MB     ', sep='')
+                print(f'wrote file "{hdf5_file}",  {time.ctime()}, {size:6.1f} MB     ')
                 self.StatusLabel.setText('Done: %.1f MB' % size)
             else:
                 print('*********** file "', hdf5_file, '" is not found - this seems bad', sep='')
                 self.StatusLabel.setText('File not found!')
+        except Exception as exc:
+            # A missing scope or serial fault would otherwise escape to the Qt
+            # event loop as an uncaught traceback; surface it in the status label.
+            print(f'Data run failed: {exc}')
+            self.StatusLabel.setText(f'Failed: {exc}')
         finally:
             self.page1.setEnabled(True)
             self.pageCombo.setEnabled(True)
