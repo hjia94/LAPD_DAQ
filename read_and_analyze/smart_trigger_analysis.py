@@ -618,9 +618,13 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
     return saved
 
 
-if __name__ == "__main__":
+def main():
     data_file = resolve_data_file()
     records = analyze_smart_triggers(data_file)
     _print_table(records)
     if SHOW_PLOT or SAVE_PLOT:
         plot_smart_triggers(data_file)
+
+
+if __name__ == "__main__":
+    main()

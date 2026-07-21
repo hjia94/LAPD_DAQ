@@ -419,9 +419,13 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
     return saved
 
 
-if __name__ == "__main__":
+def main():
     data_file = resolve_data_file()
     records = find_quiet_window(data_file)
     _print_table(records)
     if SHOW_PLOT or SAVE_PLOT:
         plot_quiet_window(data_file)
+
+
+if __name__ == "__main__":
+    main()

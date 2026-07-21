@@ -16,6 +16,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+read = [
+    # Read-only extra: everything needed to READ and analyze run HDF5 files, with
+    # NO lab equipment or lab_scopes. Decoding is handled by the in-repo scope_io
+    # package (numpy + h5py only); scipy + matplotlib drive the analysis/plot views.
+    # These already appear in the core dependencies above, but are restated here so
+    # a reader can `pip install ".[read]"` as a single self-documenting command.
+    "h5py",
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
 scope = [
     # lab_scopes is fetched from GitHub so `pip install ".[scope]"` works on any
     # machine (test PCs, fresh checkouts) with no extra steps.
@@ -75,6 +86,15 @@ dev = [
 
 [project.scripts]
 lapd-daq = "lapd_daq.cli:main"
+# Read-only analysis entry points. After `pip install ".[read]"` these run from
+# ANY directory (no repo-root/`-m` requirement), each calling the module's main().
+lapd-read = "read_and_analyze.read_bmotion_data:main"
+lapd-filter = "read_and_analyze.filter_data:main"
+lapd-fluctuation = "read_and_analyze.fluctuation_analysis:main"
+lapd-xy-map = "read_and_analyze.plot_xy_map:main"
+lapd-x-line = "read_and_analyze.plot_x_line:main"
+lapd-smart-trigger = "read_and_analyze.smart_trigger_analysis:main"
+lapd-fix-descriptions = "read_and_analyze.fix_channel_descriptions:main"
 
 [tool.setuptools]
 include-package-data = true

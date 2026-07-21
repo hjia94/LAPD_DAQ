@@ -341,5 +341,9 @@ def plot_line(path, scope=None, channels=None, mode=None,
 plot_x_line = plot_line
 
 
-if __name__ == "__main__":
+def main():
     plot_line(resolve_data_file())
+
+
+if __name__ == "__main__":
+    main()

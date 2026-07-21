@@ -499,5 +499,9 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
     return saved
 
 
-if __name__ == "__main__":
+def main():
     plot_xy_map(resolve_data_file())
+
+
+if __name__ == "__main__":
+    main()

@@ -47,17 +47,36 @@ WAVEDESC parser is [`scope_io/wavedesc.py`](../../scope_io/wavedesc.py)
 
 ## Setup (once)
 
-These tools need only standard scientific packages (no `lab_scopes`):
+These tools need only standard scientific packages (no `lab_scopes`). From the
+LAPD_DAQ repo root, install the read-only extra:
 
 ```bash
-python -m pip install numpy h5py scipy matplotlib
+python -m pip install ".[read]"
 ```
 
-`h5py` reads the data, `numpy` decodes/scales it, and `scipy` + `matplotlib`
-drive the filtering and plot views. Verify with
+This pulls in `h5py` + `numpy` (read/decode) and `scipy` + `matplotlib` (filter
+and plot views), and installs the `read_and_analyze` / `scope_io` packages so
+the console commands below work **from any directory**. Verify with
 `python -c "import h5py, numpy, matplotlib, scipy; print('ok')"`.
 
-Run every module **from the LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`.
+> Prefer not to install the package? You can instead install just the libraries
+> with `python -m pip install numpy h5py scipy matplotlib` and run each module
+> **from the LAPD_DAQ repo root** as `python -m read_and_analyze.<module>`.
+
+### Console commands
+
+After `pip install ".[read]"`, each module also has a short command that runs
+from anywhere (no repo-root/`-m` requirement):
+
+| Command | Equivalent module |
+|---|---|
+| `lapd-read [file.hdf5]` | `read_and_analyze.read_bmotion_data` |
+| `lapd-filter` | `read_and_analyze.filter_data` |
+| `lapd-fluctuation` | `read_and_analyze.fluctuation_analysis` |
+| `lapd-xy-map` | `read_and_analyze.plot_xy_map` |
+| `lapd-x-line` | `read_and_analyze.plot_x_line` |
+| `lapd-smart-trigger` | `read_and_analyze.smart_trigger_analysis` |
+| `lapd-fix-descriptions <file_or_folder>` | `read_and_analyze.fix_channel_descriptions` |
 
 ---
 

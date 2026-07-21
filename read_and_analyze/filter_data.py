@@ -285,5 +285,9 @@ def plot_sample_traces(path, scope=None, channels=None,
     return saved
 
 
-if __name__ == "__main__":
+def main():
     plot_sample_traces(resolve_data_file())
+
+
+if __name__ == "__main__":
+    main()
