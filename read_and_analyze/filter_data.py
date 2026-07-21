@@ -25,7 +25,7 @@ Created May.2026
 import os
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, median_filter
+from scipy.ndimage import gaussian_filter1d, median_filter, gaussian_filter
 
 # Allow running directly (IDE "Run" button / from inside this folder) as well as
 # ``python -m read_and_analyze.<module>`` from the repo root: the root-level
@@ -81,6 +81,18 @@ def _filter_trace(volts, med_size, gauss_sigma):
     if gauss_sigma and gauss_sigma > 0:
         v = gaussian_filter1d(v, gauss_sigma)
     return v
+
+
+def _filter_plane(Z, med_size, gauss_sigma):
+    """Denoise one image plane: median filter first (removes spikes/outliers),
+    then a Gaussian (smooths residual high-freq noise). A med_size of 1 or a
+    gauss_sigma of 0 disables that stage."""
+    Z = np.asarray(Z, dtype=float)
+    if med_size and med_size > 1:
+        Z = median_filter(Z, size=int(med_size))
+    if gauss_sigma and gauss_sigma > 0:
+        Z = gaussian_filter(Z, gauss_sigma)
+    return Z
 
 
 def _as_list(channels):

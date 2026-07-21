@@ -31,14 +31,8 @@ Created May.2026
 # SHARED -- used across modules (input file, scope/channel, plot toggles,
 #           filtering pipeline, grid tolerance)
 # ======================================================================================
-# Where Data_Run_bmotion.py writes its run HDF5 files (its base_path). Used only
-# when DATA_FILE is None: the newest COMPLETED run in this folder is analyzed.
-DATA_DIR    = r"E:\Shadow data\Electrode_Biasing\jun2026"
-
-# Explicit input file. None = auto: pick the newest completed run in DATA_DIR
-# (a run still being acquired/offloaded is skipped). Set a path to pin one file,
-# e.g. r"M:\BAPSF_Data\Low_Density_Topo\Jun2026\01-Isat-p21-line-Argon-2kG_2026-06-08.hdf5"
-DATA_FILE   = None
+DATA_DIR = r"E:\Shadow data\Bernhardt-LH-whsitler"
+DATA_FILE   = r"E:\Shadow data\Bernhardt-LH-whsitler\Density-p24\Density-p24-b_2026-06-28.hdf5"
 
 SELECT_SCOPE = None   # scope to analyze; None = all scopes (shared by every module)
 SELECT_CHAN  = None     # channels to analyze; None = all channels (shared by every module)
@@ -50,8 +44,9 @@ AUTO_PLOT   = True  # fallback default for the post-acquisition auto-plot hook w
                     # called without a config; the run's [analysis] auto_plot key
                     # (experiment_config.ini) overrides this during acquisition
 
-MED_SIZE    = 5    # median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
-GAUSS_SIGMA = 20   # Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
+                    # time series only:
+MED_SIZE    = 3     #   median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
+GAUSS_SIGMA = 0     #   Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
 
 POS_TOL     = 0.5  # round (x, y) to this many mm so encoder float-noise groups repeat shots cleanly
 
@@ -66,14 +61,21 @@ FLUCT_SIGNAL_FRAC = 0           # window mean must exceed this fraction of the p
 # ======================================================================================
 # XY_MAP -- plot_xy_map.py: 2D XY-plane map of a reduced scalar per grid position
 # ======================================================================================
-XY_MODE         = "range"     # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
-XY_T_START_MS   = 0         # window start (ms), used when XY_MODE == "range"
-XY_T_END_MS     = 2.0         # window end   (ms), used when XY_MODE == "range"
-XY_T_STEP_MS    = [10,12,15,19]  # snapshot time(s) in ms for "step" mode; one panel per time.
-                                   # A single float (e.g. 4.0) is also accepted -> one panel.
+XY_MODE         = "step"         # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
+XY_T_START_MS   = 50             # window start (ms), used when XY_MODE == "range"
+XY_T_END_MS     = 60             # window end   (ms), used when XY_MODE == "range"
+XY_T_STEP_MS    = [10,20,30,40,50,60] # snapshot time(s) in ms for "step" mode; one panel per time.
+                                    # A single float (e.g. 4.0) is also accepted -> one panel.
+XY_COMMON_SCALE    = False          # use common scale for all subplots in 'step' mode (good for afterglow)
+XY_INCLUDE_ZERO = True
 
 XY_SHOT_INDEX   = 0           # which shot (0-based) per position to map; no shot averaging yet
 
 XY_SHOW_CONTOUR = False       # overlay contour lines on top of the image
 XY_N_CONTOURS   = 8           # number of contour levels when XY_SHOW_CONTOUR is True
 XY_CMAP         = "rainbow"   # imshow colormap
+
+                              # plane data only:
+XY_MED_SIZE     = 3           #   median filter width For XY plot; 1 = off
+XY_GAUSS_SIGMA  = 2           #   gaussian filter width for XY plot; 0 = off
+
