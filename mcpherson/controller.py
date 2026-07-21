@@ -23,14 +23,21 @@ import serial.tools.list_ports
 STEPS_PER_REV = 36000
 NM_PER_REV = 4
 
+# Human-readable labels for the moving-status register ('^' reply). Any code not
+# listed here is treated as "still moving" (see is_moving).
+_MOVING_STATUS_LABELS = {
+    0: 'Not moving',
+    16: 'Slewing',
+    1: 'Moving',
+    2: 'Moving fast',
+    43: 'Somehow moving',
+}
+
 
 class Spectrometer:
     """Serial interface to the McPherson 789A-4 scan controller."""
 
     def __init__(self, comm_port=None, timeout=2, verbose=False):
-        self.steps_per_rev = STEPS_PER_REV
-        self.nm_per_rev = NM_PER_REV
-
         self.sp = None
         self.verbose = verbose
 
@@ -127,32 +134,13 @@ class Spectrometer:
 
     def is_moving(self):
         """Read the moving-status register to check if the motor is still moving."""
-        resp = self.send_cmd('^')
-        status = int(resp)
-
-        if status == 0:
+        status = int(self.send_cmd('^'))
+        if status in _MOVING_STATUS_LABELS:
             if self.verbose:
-                print('Not moving')
-            return False
-        if status == 16:
-            if self.verbose:
-                print('Slewing')
-            return True
-        if status == 1:
-            if self.verbose:
-                print('Moving')
-            return True
-        if status == 2:
-            if self.verbose:
-                print('Moving fast')
-            return True
-        if status == 43:
-            if self.verbose:
-                print('Somehow moving')
-            return True
-
-        print('Unknown moving status', status, '- assuming still moving')
-        return True
+                print(_MOVING_STATUS_LABELS[status])
+        else:
+            print('Unknown moving status', status, '- assuming still moving')
+        return status != 0
 
     def wait_for_motion_complete(self, delay=0.5):
         """Poll the moving status every ``delay`` seconds until the motor stops."""
@@ -164,12 +152,12 @@ class Spectrometer:
 
     def scan_up(self, nm):
         """Scan up by ``nm`` nanometers (relative move toward longer wavelength)."""
-        steps = int(nm / self.nm_per_rev * self.steps_per_rev)
+        steps = int(nm / NM_PER_REV * STEPS_PER_REV)
         self.send_cmd('+' + str(steps))
 
     def scan_down(self, nm):
         """Scan down by ``nm`` nanometers (relative move toward shorter wavelength)."""
-        steps = int(nm / self.nm_per_rev * self.steps_per_rev)
+        steps = int(nm / NM_PER_REV * STEPS_PER_REV)
         self.send_cmd('-' + str(steps))
 
     def set_speed(self, sps):
@@ -182,10 +170,86 @@ class Spectrometer:
             return
         self.send_cmd('V' + str(sps))
 
+    def scan_to(self, delta, on_speed_change=None):
+        """Approach a target with a coarse-to-fine speed ramp.
+
+        ``delta`` is the move expressed in dial-input units (tenths of nm): each
+        ``scan_up``/``scan_down`` here divides by 10 to get nm. Larger moves run
+        fast and drop to slower speeds as the remaining distance shrinks, so the
+        final approach is precise. ``on_speed_change(sps)`` is an optional
+        callback invoked whenever the speed changes, letting a GUI mirror the
+        value in its display. This is motion policy composed from the serial
+        primitives; it lives on the driver so non-GUI callers can reuse it.
+        """
+        def _speed(sps):
+            self.set_speed(sps)
+            if on_speed_change is not None:
+                on_speed_change(sps)
+
+        if delta <= 0:  # 0 causes a mechanical reset to the current position
+            _speed(40000)
+            self.scan_down((600 - delta) / 10)
+            self.wait_for_motion_complete(0.2)
+            delta = 600
+
+        if delta >= 600:
+            _speed(40000)
+            self.scan_up((delta - 50) / 10)
+            self.wait_for_motion_complete(0.2)
+            delta = 50
+
+        if delta >= 50:
+            _speed(10000)
+            self.scan_up((delta - 20) / 10)
+            self.wait_for_motion_complete(0.2)
+            delta = 20
+
+        if delta >= 20:
+            _speed(2500)
+            self.scan_up((delta - 10) / 10)
+            self.wait_for_motion_complete(0.2)
+            delta = 10
+
+        # now delta should be 10 or less
+        _speed(2500)
+        while delta > 2:
+            self.scan_up(1 / 10)
+            self.wait_for_motion_complete(0.1)
+            delta -= 1
+
+        while delta > 0.1:
+            self.scan_up(1 / 100)
+            self.wait_for_motion_complete(0.1)
+            delta -= 0.1
+
+        self.scan_up(delta / 10)
+
     def stop_motor(self):
         self.send_cmd('@')
 
 # =====================================================================
+
+    def _home_seek(self, move_cmd, target_status):
+        """Start a home-switch move and poll ``]`` until it reaches target_status.
+
+        Returns True when the target status is seen, False if interrupted.
+        """
+        self.send_cmd(move_cmd)
+        while True:
+            try:
+                resp = self.send_cmd(']')
+                if self.verbose:
+                    print('status is', resp, ', continue scanning...')
+                if int(resp) == target_status:
+                    if self.verbose:
+                        print('switch reached target status, moving to the next step.')
+                    self.stop_motor()
+                    return True
+                time.sleep(0.8)
+            except KeyboardInterrupt:
+                self.stop_motor()
+                print('Motor stopped by keyboard interruption. Homing procedure aborted.')
+                return False
 
     def homing(self):
         """Run the home-switch procedure.
@@ -201,44 +265,15 @@ class Spectrometer:
         if self.verbose:
             print('The initial home switch status is', status)
 
-        # Current wavelength is below the home wavelength.
         if int(status) == 32:
-            self.send_cmd('M+23000')
-            while True:
-                try:
-                    resp = self.send_cmd(']')
-                    if self.verbose:
-                        print('status is', resp, ', continue scanning...')
-                    if int(resp) == 2:
-                        if self.verbose:
-                            print('switch is now clear, moving to the next step.')
-                        self.stop_motor()
-                        break
-                    time.sleep(0.8)
-                except KeyboardInterrupt:
-                    self.stop_motor()
-                    print('Motor stopped by keyboard interruption. Homing procedure aborted.')
-                    return False
-
-        # Current wavelength is above the home wavelength (Home Switch LED off).
+            # Current wavelength is below the home wavelength: move up until clear.
+            if not self._home_seek('M+23000', target_status=2):
+                return False
         elif int(status) == 0:
-            self.send_cmd('M-23000')
-            while True:
-                try:
-                    resp = self.send_cmd(']')
-                    if self.verbose:
-                        print('status is', resp, ', continue scanning...')
-                    if int(resp) == 34:
-                        if self.verbose:
-                            print('switch is now blocked, moving to the next step.')
-                        self.stop_motor()
-                        break
-                    time.sleep(0.8)
-                except KeyboardInterrupt:
-                    self.stop_motor()
-                    print('Motor stopped by keyboard interruption. Homing procedure aborted.')
-                    return False
-
+            # Current wavelength is above the home wavelength (Home Switch LED
+            # off): move down until the switch is blocked.
+            if not self._home_seek('M-23000', target_status=34):
+                return False
         else:
             print('The starting status is:', status,
                   ' Cannot perform home switching. Please try again.')

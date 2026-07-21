@@ -55,11 +55,13 @@ def wavelength_array(cfg):
     )
 
 
-def acquire_traces(scope, save_raw, aux_text='', timeout=2000):
-    """Wait for averaging to finish, then read every displayed trace.
+def acquire_traces(scope, traces, save_raw, aux_text='', timeout=2000):
+    """Wait for averaging to finish, then read the given traces.
 
-    Returns ``(traces, data, headers)``:
-        traces: ordered tuple of trace keys currently displayed.
+    ``traces`` is the fixed set discovered once at run setup, so the whole scan
+    reads the same channels the output file was sized for.
+
+    Returns ``(data, headers)``:
         data: {trace: 1-D numpy array of samples}.
         headers: {trace: WAVEDESC bytes}.
     """
@@ -72,9 +74,7 @@ def acquire_traces(scope, save_raw, aux_text='', timeout=2000):
     else:
         print(f'    Averaging complete: {n}/{nsweeps} sweeps acquired')
 
-    traces = scope.displayed_traces()
     print(f'    Reading data from {len(traces)} traces...')
-
     data = {}
     headers = {}
     for tr in traces:
@@ -82,10 +82,10 @@ def acquire_traces(scope, save_raw, aux_text='', timeout=2000):
         data[tr] = samples
         headers[tr] = header_bytes
         print(f'      Trace {tr}: {len(samples)} samples read')
-    return traces, data, headers
+    return data, headers
 
 
-def run_wavelength_scan(cfg, spec, progress=None, descriptions=None):
+def run_wavelength_scan(cfg, spec, progress=None):
     """Run a wavelength scan and write the HDF5 file described by ``cfg``.
 
     Args:
@@ -95,12 +95,9 @@ def run_wavelength_scan(cfg, spec, progress=None, descriptions=None):
         progress: optional callback ``(index, total, wavelength)`` invoked after
             each position completes. Lets a GUI update without acquisition
             importing Qt.
-        descriptions: optional {trace: text} channel descriptions for the
-            recorded datasets.
 
     Returns the written HDF5 path (``cfg.save_path``).
     """
-    descriptions = descriptions or {}
     wavelengths = wavelength_array(cfg)
     npos = len(wavelengths) * cfg.num_shots
 
@@ -153,8 +150,8 @@ def run_wavelength_scan(cfg, spec, progress=None, descriptions=None):
                             print(f'McPherson : FAILED to move to wavelength {wavl}')
 
                     print('  Scope: Starting data acquisition...')
-                    traces, data, headers = acquire_traces(
-                        scope, cfg.save_raw, aux_text=str(index) + ': ')
+                    data, headers = acquire_traces(
+                        scope, traces, cfg.save_raw, aux_text=str(index) + ': ')
                     hdf5_writer.write_position(
                         cfg.save_path, index, traces, data, headers, trace_names, ntimes)
                     print('  Scope: Data acquisition complete')
@@ -183,7 +180,7 @@ def run_wavelength_scan(cfg, spec, progress=None, descriptions=None):
         if not time_written:
             hdf5_writer.write_time_array(cfg.save_path, scope.time_array(traces[0]), ntimes)
 
-        hdf5_writer.finalize(cfg.save_path, traces, trace_names, descriptions)
+        hdf5_writer.finalize(cfg.save_path, traces, trace_names)
 
     print(f'HDF5 file closed: {cfg.save_path}')
     return cfg.save_path

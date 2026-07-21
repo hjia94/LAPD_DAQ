@@ -205,64 +205,26 @@ class Window(QWidget):
     # --- Manual scan controls -------------------------------------------
     def ScanUp(self):
         self.SetSpeed()
-        wl = self.ScanUpInput.value() / 10   # dial position
-        self.p.scan_up(wl)
+        self.p.scan_up(self._dial_to_nm(self.ScanUpInput.value()))
 
     def ScanDown(self):
         self.SetSpeed()
-        wl = self.ScanDownInput.value() / 10  # dial position
-        self.p.scan_down(wl)
+        self.p.scan_down(self._dial_to_nm(self.ScanDownInput.value()))
 
     def ScanTo(self):
-        """Approach a target wavelength using a coarse-to-fine multi-speed ramp.
+        """Move to the target wavelength via the driver's coarse-to-fine ramp.
 
-        This is UI-level policy composed from the controller primitives; it is
-        not a driver command. delta_wl is expressed in the dial units used by the
-        Scan-from/Scan-to inputs.
+        The motion policy lives on the controller (``Spectrometer.scan_to``);
+        this slot just reads the two inputs and mirrors each speed change back
+        into the speed display.
         """
-        delta_wl = (self.ScanToInput.value() - self.ScanFromInput.value())
+        delta = self.ScanToInput.value() - self.ScanFromInput.value()
+        self.p.scan_to(delta, on_speed_change=self.SetSpeedInput.setValue)
 
-        if delta_wl <= 0:                    # 0 causes a mechanical reset to current position
-            self.p.set_speed(40000)
-            self.SetSpeedInput.setValue(40000)
-            self.p.scan_down((600 - delta_wl) / 10)
-            self.p.wait_for_motion_complete(0.2)
-            delta_wl = 600
-
-        if delta_wl >= 600:
-            self.p.set_speed(40000)
-            self.SetSpeedInput.setValue(40000)
-            self.p.scan_up((delta_wl - 50) / 10)
-            self.p.wait_for_motion_complete(0.2)
-            delta_wl = 50
-
-        if delta_wl >= 50:
-            self.p.set_speed(10000)
-            self.SetSpeedInput.setValue(10000)
-            self.p.scan_up((delta_wl - 20) / 10)
-            self.p.wait_for_motion_complete(0.2)
-            delta_wl = 20
-
-        if delta_wl >= 20:
-            self.p.set_speed(2500)
-            self.SetSpeedInput.setValue(2500)
-            self.p.scan_up((delta_wl - 10) / 10)
-            self.p.wait_for_motion_complete(0.2)
-            delta_wl = 10
-
-        # now delta_wl should be 10 or less
-        self.p.set_speed(2500)
-        while delta_wl > 2:
-            self.p.scan_up(1 / 10)
-            self.p.wait_for_motion_complete(0.1)
-            delta_wl -= 1
-
-        while delta_wl > 0.1:
-            self.p.scan_up(1 / 100)
-            self.p.wait_for_motion_complete(0.1)
-            delta_wl -= 0.1
-
-        self.p.scan_up(delta_wl / 10)
+    @staticmethod
+    def _dial_to_nm(value):
+        """Convert a spin-box 'dial position' value to nanometers."""
+        return value / 10
 
     def SetSpeed(self):
         self.p.set_speed(self.SetSpeedInput.value())
@@ -310,12 +272,12 @@ class Window(QWidget):
         The ``/10`` dial conversion and the small-increment kluge are preserved
         from the original GUI so users' entry conventions are unchanged.
         """
-        increment = self.IncrementInput.value() / 10  # dial position
+        increment = self._dial_to_nm(self.IncrementInput.value())
         if increment >= 10:
             # kluge to enter very small numbers, e.g. 250 -> .0025 nm
             increment /= 10000
         return ScanConfig(
-            start_nm=self.StartWavlInput.value() / 10,
+            start_nm=self._dial_to_nm(self.StartWavlInput.value()),
             num_wavl=int(self.NumWavlInput.value()),
             increment_nm=increment,
             num_shots=int(self.NumShotInput.value()),

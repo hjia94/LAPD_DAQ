@@ -2,7 +2,7 @@
 """HDF5 output for a McPherson wavelength scan.
 
 This is the ONLY module that writes HDF5 bytes for a scan. Following the pure
-style of :mod:`acquisition.hdf5_writer`, callers pass plain values (numpy arrays,
+style of the main DAQ's ``acquisition/hdf5_writer.py``, callers pass plain values (numpy arrays,
 strings, ints); nothing here reads a live scope, spectrometer, or GUI object, and
 no file handle is held across calls.
 
@@ -140,17 +140,18 @@ def write_time_array(save_path, time_array, ntimes):
         f['/Acquisition/LeCroy_scope']['time'][0:ntimes] = np.asarray(time_array)[0:ntimes]
 
 
-def finalize(save_path, traces, trace_names, descriptions):
-    """Tag each trace dataset with its description and a recorded=True flag.
+def finalize(save_path, traces, trace_names):
+    """Tag each trace dataset with a description and a recorded=True flag.
 
-    ``descriptions`` maps ``{trace: text}``. Every trace passed here was created
-    and filled by the scan loop, so all are marked recorded.
+    Every trace passed here was created and filled by the scan loop, so all are
+    marked recorded. Descriptions are left blank (the legacy format carried the
+    attr but the GUI never supplied text).
     """
     with h5py.File(save_path, 'a') as f:
         scope_grp = f['/Acquisition/LeCroy_scope']
         for tr in traces:
             ds = scope_grp[trace_names[tr]]
-            ds.attrs['description'] = descriptions.get(tr, '')
+            ds.attrs['description'] = ''
             ds.attrs['recorded'] = True
 
 
