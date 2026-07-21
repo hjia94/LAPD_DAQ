@@ -195,6 +195,14 @@ def _report_result(hdf5_path, t_start, config):
             maybe_autoplot(hdf5_path, config)
         except Exception as e:
             print(f"Warning: auto-plot hook failed to load: {e}")
+        # Interferometer merge runs last: the HDF5 is fully written here, and its
+        # one-line verdict is the last thing the offload terminal prints. It is
+        # itself never-raising, so the import is the only thing guarded here.
+        try:
+            from read_and_analyze.interferometer_merge import run_interferometer_merge
+            run_interferometer_merge(hdf5_path)
+        except Exception as e:
+            print(f"Interferometer merge hook failed to load: {e}")
     else:
         print(f'File "{hdf5_path}" was not created')
 
