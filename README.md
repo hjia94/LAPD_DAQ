@@ -53,6 +53,7 @@ Optional extras (install only what you need):
 |---|---|---|
 | `scope` | LeCroy scope control (`lab_scopes` + PyVISA) | `pip install -e ".[scope]"` |
 | `bmotion` | `bapsf_motion` workflows (`bapsf-motion` + xarray) | `pip install -e ".[bmotion]"` |
+| `mcpherson` | McPherson spectrometer control GUI + serial driver (pyserial + PyQt5; pair with `scope` for acquisition) | `pip install -e ".[mcpherson,scope]"` |
 | `dev` | Jupyter for the `notebooks/` examples | `pip install -e ".[dev]"` |
 | both | scope + bmotion at once | `pip install -e ".[scope,bmotion]"` |
 

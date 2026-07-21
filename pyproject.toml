@@ -68,6 +68,19 @@ bmotion = [
     "bapsf-motion>=2026.6.0b1",
     "xarray",
 ]
+mcpherson = [
+    # McPherson spectrometer control GUI + serial driver (the `mcpherson`
+    # package). pyserial drives the 789A-4 scan controller; PyQt5 is the GUI.
+    #
+    # A real data run also needs the LeCroy scope stack, so install the `scope`
+    # extra alongside this one for acquisition:
+    #     pip install -e ".[mcpherson,scope]"
+    # pyserial alone (without `scope`) is enough for headless motor control via
+    # `mcpherson.controller.Spectrometer`; the pure `mcpherson.hdf5_writer`
+    # needs neither extra.
+    "pyserial",
+    "PyQt5",
+]
 camera = []
 dev = [
     "jupyter",     # running the notebooks/ examples
