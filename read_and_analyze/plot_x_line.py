@@ -68,7 +68,7 @@ try:  # works as a package (python -m read_and_analyze.plot_x_line)
         _position_shotnums, _load_stack,
     )
     from read_and_analyze.analysis_config import (
-        MED_SIZE, GAUSS_SIGMA,
+        TS_MED_SIZE, TS_GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_CMAP as CMAP, XY_SHOT_INDEX as SHOT_INDEX,
@@ -85,7 +85,7 @@ except ImportError:  # fallback when run directly from inside the folder
         _position_shotnums, _load_stack,
     )
     from analysis_config import (
-        MED_SIZE, GAUSS_SIGMA,
+        TS_MED_SIZE, TS_GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_CMAP as CMAP, XY_SHOT_INDEX as SHOT_INDEX,
@@ -120,7 +120,7 @@ def _line_axis(xpos, ypos):
 # Line assembly
 # ======================================================================================
 
-def build_line(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
+def build_line(f, scope, ch, positions, reduce_fn, ts_med_size, ts_gauss_sigma):
     """Reduce every planned position to one scalar and lay it out along the line.
 
     Reads each position's repeat-shot stack in acquisition order, applies
@@ -144,14 +144,14 @@ def build_line(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
     vals = np.full(npos, np.nan, dtype=float)
     for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
                             total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
-        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        stack = _load_stack(f, scope, ch, shotnums, tarr, ts_med_size, ts_gauss_sigma)
         vals[i] = reduce_fn(stack, tarr, i)
 
     return vals, axis_pos, axis_name, fixed_val
 
 
 def build_lines_step(f, scope, ch, positions, t_steps_ms, shot_index,
-                     med_size, gauss_sigma):
+                     ts_med_size, ts_gauss_sigma):
     """Build one line profile per snapshot time in a single read pass.
 
     Loads each position's stack once, picks shot ``shot_index``, and samples it at
@@ -177,7 +177,7 @@ def build_lines_step(f, scope, ch, positions, t_steps_ms, shot_index,
     curves = [np.full(npos, np.nan, dtype=float) for _ in idxs]
     for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
                             total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
-        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        stack = _load_stack(f, scope, ch, shotnums, tarr, ts_med_size, ts_gauss_sigma)
         if stack is None or shot_index >= stack.shape[0]:
             continue
         trace = stack[shot_index]
@@ -239,7 +239,7 @@ def _render_step_overlay(plt, curves, axis_pos, axis_name, fixed_val, t_los,
 
 def plot_line(path, scope=None, channels=None, mode=None,
               t_start=None, t_end=None, t_step=None, shot_index=None,
-              med_size=None, gauss_sigma=None,
+              ts_med_size=None, ts_gauss_sigma=None,
               cmap=None, show=None, save=None):
     """Render a line-only profile per (scope, channel), x-line or y-line.
 
@@ -260,8 +260,8 @@ def plot_line(path, scope=None, channels=None, mode=None,
     t_end = T_END_MS if t_end is None else t_end
     t_step = T_STEP_MS if t_step is None else t_step
     shot_index = SHOT_INDEX if shot_index is None else shot_index
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
+    ts_med_size = TS_MED_SIZE if ts_med_size is None else ts_med_size
+    ts_gauss_sigma = TS_GAUSS_SIGMA if ts_gauss_sigma is None else ts_gauss_sigma
     cmap = CMAP if cmap is None else cmap
     show = SHOW_PLOT if show is None else show
     save = SAVE_PLOT if save is None else save
@@ -301,7 +301,7 @@ def plot_line(path, scope=None, channels=None, mode=None,
                     t_steps = _as_step_list(t_step)
                     curves, axp, axn, fixed, t_los = build_lines_step(
                         f, sc, ch, positions, t_steps, shot_index,
-                        med_size, gauss_sigma)
+                        ts_med_size, ts_gauss_sigma)
                     if curves is None or all(np.all(np.isnan(c)) for c in curves):
                         print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue
@@ -311,7 +311,7 @@ def plot_line(path, scope=None, channels=None, mode=None,
                     vals, axp, axn, fixed = build_line(
                         f, sc, ch, positions,
                         make_single_shot_reduce(shot_index, mode, t_start, t_end, t_step),
-                        med_size, gauss_sigma)
+                        ts_med_size, ts_gauss_sigma)
                     if vals is None or np.all(np.isnan(vals)):
                         print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue

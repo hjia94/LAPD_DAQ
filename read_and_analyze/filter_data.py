@@ -52,17 +52,16 @@ except ImportError:  # fallback when run directly from inside the folder
 
 # --------------------------------------------------------------------------------------
 # Knobs (no CLI). User-changeable values live in analysis_config.py; they are
-# imported here and re-exported under the historical names so the sibling
-# analysis modules can keep doing `from filter_data import SCOPE, MED_SIZE, ...`.
+# imported here and re-exported for sibling analysis modules.
 # --------------------------------------------------------------------------------------
 try:  # works as a package (python -m read_and_analyze.filter_data)
     from read_and_analyze.analysis_config import (
-        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        TS_MED_SIZE, TS_GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from analysis_config import (
-        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        TS_MED_SIZE, TS_GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
     )
 
@@ -71,27 +70,27 @@ except ImportError:  # fallback when run directly from inside the folder
 # Filtering
 # ======================================================================================
 
-def _filter_trace(volts, med_size, gauss_sigma):
+def _filter_trace(volts, ts_med_size, ts_gauss_sigma):
     """Denoise one trace along time: median filter first (removes spikes/outliers),
-    then a Gaussian (smooths residual high-freq noise). A med_size of 1 or a
-    gauss_sigma of 0 disables that stage."""
+    then a Gaussian (smooths residual high-freq noise). A ts_med_size of 1 or a
+    ts_gauss_sigma of 0 disables that stage."""
     v = np.asarray(volts, dtype=float)
-    if med_size and med_size > 1:
-        v = median_filter(v, size=int(med_size))
-    if gauss_sigma and gauss_sigma > 0:
-        v = gaussian_filter1d(v, gauss_sigma)
+    if ts_med_size and ts_med_size > 1:
+        v = median_filter(v, size=int(ts_med_size))
+    if ts_gauss_sigma and ts_gauss_sigma > 0:
+        v = gaussian_filter1d(v, ts_gauss_sigma)
     return v
 
 
-def _filter_plane(Z, med_size, gauss_sigma):
+def _filter_plane(Z, xy_med_size, xy_gauss_sigma):
     """Denoise one image plane: median filter first (removes spikes/outliers),
-    then a Gaussian (smooths residual high-freq noise). A med_size of 1 or a
-    gauss_sigma of 0 disables that stage."""
+    then a Gaussian (smooths residual high-freq noise). An xy_med_size of 1 or an
+    xy_gauss_sigma of 0 disables that stage."""
     Z = np.asarray(Z, dtype=float)
-    if med_size and med_size > 1:
-        Z = median_filter(Z, size=int(med_size))
-    if gauss_sigma and gauss_sigma > 0:
-        Z = gaussian_filter(Z, gauss_sigma)
+    if xy_med_size and xy_med_size > 1:
+        Z = median_filter(Z, size=int(xy_med_size))
+    if xy_gauss_sigma and xy_gauss_sigma > 0:
+        Z = gaussian_filter(Z, xy_gauss_sigma)
     return Z
 
 
@@ -104,7 +103,7 @@ def _as_list(channels):
     return list(channels)
 
 
-def load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma):
+def load_filtered_traces(f, scope, ch, shots, tarr, ts_med_size, ts_gauss_sigma):
     """Load and denoise the repeat-shot traces for one (scope, channel, position).
 
     Returns a list of filtered 1-D arrays — one per usable shot — skipping shots
@@ -120,7 +119,7 @@ def load_filtered_traces(f, scope, ch, shots, tarr, med_size, gauss_sigma):
         f, scope, ch, shots, expected_len=len(tarr))
     if raw is None:
         return []
-    return [_filter_trace(row, med_size, gauss_sigma)
+    return [_filter_trace(row, ts_med_size, ts_gauss_sigma)
             for row in raw if not np.isnan(row).all()]
 
 
@@ -134,15 +133,15 @@ class FilteredTraceCache:
     open file plus the two filter knobs in this object and caching on
     ``(scope, ch, shots)`` collapses those to a single read+filter per position.
 
-    Holds only ``f``, ``med_size``, ``gauss_sigma`` and its result dict (not any
+    Holds only ``f``, ``ts_med_size``, ``ts_gauss_sigma`` and its result dict (not any
     enclosing scope), so it can be discarded with the ``with h5py.File(...)``
     block that owns ``f``. Construct one per pass; do not retain it past the file.
     """
 
-    def __init__(self, f, med_size, gauss_sigma):
+    def __init__(self, f, ts_med_size, ts_gauss_sigma):
         self.f = f
-        self.med_size = med_size
-        self.gauss_sigma = gauss_sigma
+        self.ts_med_size = ts_med_size
+        self.ts_gauss_sigma = ts_gauss_sigma
         self._cache = {}
 
     def get(self, scope, ch, shots, tarr):
@@ -151,7 +150,7 @@ class FilteredTraceCache:
         rows = self._cache.get(key)
         if rows is None:
             rows = load_filtered_traces(
-                self.f, scope, ch, shots, tarr, self.med_size, self.gauss_sigma)
+                self.f, scope, ch, shots, tarr, self.ts_med_size, self.ts_gauss_sigma)
             self._cache[key] = rows
         return rows
 
@@ -186,7 +185,7 @@ def _shots_by_position(f, scope, positions):
 # ======================================================================================
 
 def plot_sample_traces(path, scope=None, channels=None,
-                       med_size=None, gauss_sigma=None, show=None, save=None):
+                       ts_med_size=None, ts_gauss_sigma=None, show=None, save=None):
     """Show the effect of each filtering stage on a sample trace.
 
     Shows up to three positions spread across x (first / middle / last usable),
@@ -203,8 +202,8 @@ def plot_sample_traces(path, scope=None, channels=None,
 
     scope = SCOPE if scope is None else scope
     channels = CHANNELS if channels is None else channels
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
+    ts_med_size = TS_MED_SIZE if ts_med_size is None else ts_med_size
+    ts_gauss_sigma = TS_GAUSS_SIGMA if ts_gauss_sigma is None else ts_gauss_sigma
     show = SHOW_PLOT if show is None else show
     save = SAVE_PLOT if save is None else save
     channels = _as_list(channels)
@@ -258,8 +257,8 @@ def plot_sample_traces(path, scope=None, channels=None,
                     if raw is None:
                         continue
 
-                    med = median_filter(raw, size=int(med_size)) if med_size and med_size > 1 else raw
-                    full = _filter_trace(raw, med_size, gauss_sigma)
+                    med = median_filter(raw, size=int(ts_med_size)) if ts_med_size and ts_med_size > 1 else raw
+                    full = _filter_trace(raw, ts_med_size, ts_gauss_sigma)
 
                     # Overlay all three stages on the same panel, one color per channel,
                     # increasing alpha so the final filtered trace reads on top.
@@ -280,7 +279,7 @@ def plot_sample_traces(path, scope=None, channels=None,
 
             fig.suptitle(
                 f"{os.path.basename(path)}  —  scope '{sc}' raw vs filtered "
-                f"(median size={med_size:g}, gaussian sigma={gauss_sigma:g} samples)",
+                f"(median size={ts_med_size:g}, gaussian sigma={ts_gauss_sigma:g} samples)",
                 fontsize=10)
             fig.tight_layout()
 

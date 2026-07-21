@@ -51,7 +51,7 @@ try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
         _filter_trace, _as_list, _shots_by_position, FilteredTraceCache,
     )
     from read_and_analyze.analysis_config import (
-        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        TS_MED_SIZE, TS_GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
@@ -64,7 +64,7 @@ except ImportError:  # fallback when run directly from inside the folder
         _filter_trace, _as_list, _shots_by_position, FilteredTraceCache,
     )
     from analysis_config import (
-        MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
+        TS_MED_SIZE, TS_GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
@@ -75,11 +75,11 @@ except ImportError:  # fallback when run directly from inside the folder
 # ======================================================================================
 
 def find_quiet_window(path, scope=None, channels=None, window_us=None,
-                      med_size=None, gauss_sigma=None, signal_frac=None):
+                      ts_med_size=None, ts_gauss_sigma=None, signal_frac=None):
     """Find the quiet, steep-gradient window per (scope, channel, position).
 
     Parameters default to the module constants. Traces are denoised with a
-    median filter (``med_size``) then a Gaussian (``gauss_sigma``). The window is
+    median filter (``ts_med_size``) then a Gaussian (``ts_gauss_sigma``). The window is
     chosen by lowest shot-to-shot CV; the score is then
     ``cv_shots + 1/|(dV/dx)/V|`` so windows on a steep fractional spatial gradient
     rank better. Returns a list of record dicts (one per scope/channel/position
@@ -92,8 +92,8 @@ def find_quiet_window(path, scope=None, channels=None, window_us=None,
     scope = SCOPE if scope is None else scope
     channels = CHANNELS if channels is None else channels
     window_us = WINDOW_US if window_us is None else window_us
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
+    ts_med_size = TS_MED_SIZE if ts_med_size is None else ts_med_size
+    ts_gauss_sigma = TS_GAUSS_SIGMA if ts_gauss_sigma is None else ts_gauss_sigma
     signal_frac = SIGNAL_FRAC if signal_frac is None else signal_frac
     channels = _as_list(channels)
 
@@ -114,7 +114,7 @@ def find_quiet_window(path, scope=None, channels=None, window_us=None,
 
             # One cache per scope: each position's filtered stack is read+filtered
             # once and reused by the window search and the gradient/profile pass.
-            cache = FilteredTraceCache(f, med_size, gauss_sigma)
+            cache = FilteredTraceCache(f, ts_med_size, ts_gauss_sigma)
 
             scope_records = []
             for ch in chans:
@@ -256,8 +256,8 @@ def _print_table(records):
     print("=" * 88)
     print("QUIET, STEEP-GRADIENT WINDOW PER POSITION  "
           "(lower score = more reproducible & steeper dV/dx)")
-    print(f"window={WINDOW_US:g} us   median={MED_SIZE:g} samples   "
-          f"gauss_sigma={GAUSS_SIGMA:g} samples   "
+    print(f"window={WINDOW_US:g} us   median={TS_MED_SIZE:g} samples   "
+          f"ts_gauss_sigma={TS_GAUSS_SIGMA:g} samples   "
           f"score = cv_shots + 1/|(dV/dx)/V|")
     print("-" * 88)
     if not records:
@@ -284,7 +284,7 @@ def _print_table(records):
 # ======================================================================================
 
 def plot_quiet_window(path, scope=None, channels=None, window_us=None,
-                      med_size=None, gauss_sigma=None, signal_frac=None,
+                      ts_med_size=None, ts_gauss_sigma=None, signal_frac=None,
                       show=None, save=None):
     """Plot the fluctuation analysis: score-vs-position and the best-window overlay.
 
@@ -295,14 +295,14 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
     import matplotlib.pyplot as plt
 
     scope = SCOPE if scope is None else scope
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
+    ts_med_size = TS_MED_SIZE if ts_med_size is None else ts_med_size
+    ts_gauss_sigma = TS_GAUSS_SIGMA if ts_gauss_sigma is None else ts_gauss_sigma
     show = SHOW_PLOT if show is None else show
     save = SAVE_PLOT if save is None else save
 
     records = find_quiet_window(path, scope=scope, channels=channels,
-                                window_us=window_us, med_size=med_size,
-                                gauss_sigma=gauss_sigma, signal_frac=signal_frac)
+                                window_us=window_us, ts_med_size=ts_med_size,
+                                ts_gauss_sigma=ts_gauss_sigma, signal_frac=signal_frac)
 
     saved = []
     if save:
@@ -326,7 +326,7 @@ def plot_quiet_window(path, scope=None, channels=None, window_us=None,
             dt = float(tarr[1] - tarr[0])
             w = max(2, math.ceil(WINDOW_US * 1e-6 / dt))
             # Reuse one filtered stack per position across all three panels below.
-            cache = FilteredTraceCache(f, med_size, gauss_sigma)
+            cache = FilteredTraceCache(f, ts_med_size, ts_gauss_sigma)
             best = min(recs, key=lambda r: r["score"])
             i0 = int(np.searchsorted(tarr, best["t_start"]))
             i1 = int(np.searchsorted(tarr, best["t_end"], side="right"))

@@ -32,7 +32,7 @@ Created May.2026
 #           filtering pipeline, grid tolerance)
 # ======================================================================================
 DATA_DIR = r"E:\Shadow data\Bernhardt-LH-whsitler"
-DATA_FILE   = r"E:\Shadow data\Bernhardt-LH-whsitler\Density-p24\Density-p24-b_2026-06-28.hdf5"
+DATA_FILE   = r"E:\Shadow data\Bernhardt-LH-whsitler\Ex_plane-P25-LH-whistler-interference\Ex_plane-p25-LH-whistler-interference_2026-07-01.hdf5"
 
 SELECT_SCOPE = None   # scope to analyze; None = all scopes (shared by every module)
 SELECT_CHAN  = None     # channels to analyze; None = all channels (shared by every module)
@@ -45,8 +45,8 @@ AUTO_PLOT   = True  # fallback default for the post-acquisition auto-plot hook w
                     # (experiment_config.ini) overrides this during acquisition
 
                     # time series only:
-MED_SIZE    = 3     #   median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
-GAUSS_SIGMA = 0     #   Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
+TS_MED_SIZE    = 3  #   median-filter window in SAMPLES, applied first (spike/outlier removal); 1 = off
+TS_GAUSS_SIGMA = 0  #   Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
 
 POS_TOL     = 0.5  # round (x, y) to this many mm so encoder float-noise groups repeat shots cleanly
 

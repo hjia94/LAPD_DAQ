@@ -26,18 +26,18 @@ Created May.2026
 import numpy as np
 try:  # works as a package (python -m read_and_analyze.smart_trigger_analysis)
     from read_and_analyze.analysis_config import (
-        DATA_FILE, MED_SIZE, GAUSS_SIGMA,
+        DATA_FILE, TS_MED_SIZE, TS_GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from analysis_config import (
-        DATA_FILE, MED_SIZE, GAUSS_SIGMA,
+        DATA_FILE, TS_MED_SIZE, TS_GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS,
     )
 
 # ======================================================================================
 # General -- output and preprocessing
-# (DATA_FILE / SCOPE / CHANNELS / MED_SIZE / GAUSS_SIGMA come from analysis_config above)
+# (DATA_FILE / SCOPE / CHANNELS / TS_MED_SIZE / TS_GAUSS_SIGMA come from analysis_config above)
 # ======================================================================================
 SHOW_PLOT  = False   # display the figure interactively
 SAVE_PLOT  = True    # write a PNG to a "plots/" subdir next to the data file

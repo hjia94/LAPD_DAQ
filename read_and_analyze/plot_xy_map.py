@@ -60,7 +60,7 @@ try:  # works as a package (python -m read_and_analyze.plot_xy_map)
     )
     from read_and_analyze.filter_data import _as_list, _filter_trace, _filter_plane
     from read_and_analyze.analysis_config import (
-        MED_SIZE, GAUSS_SIGMA, XY_MED_SIZE, XY_GAUSS_SIGMA, XY_COMMON_SCALE, XY_INCLUDE_ZERO,
+        TS_MED_SIZE, TS_GAUSS_SIGMA, XY_MED_SIZE, XY_GAUSS_SIGMA, XY_COMMON_SCALE, XY_INCLUDE_ZERO,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
@@ -73,7 +73,7 @@ except ImportError:  # fallback when run directly from inside the folder
     )
     from filter_data import _as_list, _filter_trace, _filter_plane
     from analysis_config import (
-        MED_SIZE, GAUSS_SIGMA, xy_MED_SIZE, xy_GAUSS_SIGMA, XY_COMMON_SCALE, XY_INCLUDE_ZERO,
+        TS_MED_SIZE, TS_GAUSS_SIGMA, xy_MED_SIZE, xy_GAUSS_SIGMA, XY_COMMON_SCALE, XY_INCLUDE_ZERO,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
         XY_MODE as MODE, XY_T_START_MS as T_START_MS, XY_T_END_MS as T_END_MS,
         XY_T_STEP_MS as T_STEP_MS, XY_SHOW_CONTOUR as SHOW_CONTOUR,
@@ -247,7 +247,7 @@ def _position_shotnums(positions, npos, nshot, mismatch):
         yield i, buckets[i]
 
 
-def _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma):
+def _load_stack(f, scope, ch, shotnums, tarr, ts_med_size, ts_gauss_sigma):
     """Read + filter the given shots into a ``(nshot, nsamples)`` stack.
 
     The raw shots are read in one pass via ``read_hdf5_scope_channel_shots`` (the
@@ -259,12 +259,12 @@ def _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma):
         f, scope, ch, shotnums, expected_len=len(tarr))
     if raw is None:
         return None
-    rows = [row if np.isnan(row).all() else _filter_trace(row, med_size, gauss_sigma)
+    rows = [row if np.isnan(row).all() else _filter_trace(row, ts_med_size, ts_gauss_sigma)
             for row in raw]
     return np.vstack(rows)
 
 
-def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma, xy_med_size, xy_gauss_sigma):
+def build_plane(f, scope, ch, positions, reduce_fn, ts_med_size, ts_gauss_sigma, xy_med_size, xy_gauss_sigma):
     """Reduce every planned position to one scalar and reshape onto the plane.
 
     Reads each position's repeat-shot stack in acquisition order, applies
@@ -288,7 +288,7 @@ def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma, xy_me
     vals = np.full(npos, np.nan, dtype=float)
     for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
                             total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
-        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        stack = _load_stack(f, scope, ch, shotnums, tarr, ts_med_size, ts_gauss_sigma)
         vals[i] = reduce_fn(stack, tarr, i)
 
     if vals is not None:
@@ -299,7 +299,7 @@ def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma, xy_me
 
 
 def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
-                      med_size, gauss_sigma, xy_med_size, xy_gauss_sigma):
+                      ts_med_size, ts_gauss_sigma, xy_med_size, xy_gauss_sigma):
     """Build one plane per snapshot time in a single read pass.
 
     Loads each position's stack once, picks shot ``shot_index``, and samples it at
@@ -324,7 +324,7 @@ def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
     vals = [np.full(npos, np.nan, dtype=float) for _ in idxs]   # vals = list of len(idxs) entries, each a float array od Nan
     for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
                             total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
-        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        stack = _load_stack(f, scope, ch, shotnums, tarr, ts_med_size, ts_gauss_sigma)
         if stack is None or shot_index >= stack.shape[0]:
             continue
         trace = stack[shot_index]
@@ -413,7 +413,7 @@ def _render_map(plt, Z, xpos, ypos, scope, ch, label, cmap, show_contour,
 def _render_step_montage(plt, Zs, xpos, ypos, t_los, scope, ch, cmap,
                          show_contour, shot_index, path, xy_common_scale, xy_include_zero):
     """Draw the ``step``-mode montage: one plane per snapshot time, wrapped into a
-       roughly square grid, if common_scale is True, they share a common color scale and one 
+       roughly square grid, if xy_common_scale is True, they share a common color scale and one
        colorbar, otherwise each is rescaled according to the data and there is no color ba
     """
     from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -467,7 +467,7 @@ def _render_step_montage(plt, Zs, xpos, ypos, t_los, scope, ch, cmap,
 
 def plot_xy_map(path, scope=None, channels=None, mode=None,
                 t_start=None, t_end=None, t_step=None, shot_index=None,
-                med_size=None, gauss_sigma=None, xy_med_size=None, xy_gauss_sigma=None,
+                ts_med_size=None, ts_gauss_sigma=None, xy_med_size=None, xy_gauss_sigma=None,
                 show_contour=None, cmap=None, show=None, save=None, xy_common_scale=None, xy_include_zero=None):
     """Render a plane-only XY map per (scope, channel).
 
@@ -488,11 +488,11 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
     t_end = T_END_MS if t_end is None else t_end
     t_step = T_STEP_MS if t_step is None else t_step
     shot_index = SHOT_INDEX if shot_index is None else shot_index
-    med_size       = MED_SIZE       if med_size       is None else med_size
-    gauss_sigma    = GAUSS_SIGMA    if gauss_sigma    is None else gauss_sigma
+    ts_med_size       = TS_MED_SIZE       if ts_med_size       is None else ts_med_size
+    ts_gauss_sigma    = TS_GAUSS_SIGMA    if ts_gauss_sigma    is None else ts_gauss_sigma
     xy_med_size    = XY_MED_SIZE    if xy_med_size    is None else xy_med_size
     xy_gauss_sigma = XY_GAUSS_SIGMA if xy_gauss_sigma is None else xy_gauss_sigma
-    common_scale   = XY_COMMON_SCALE   if xy_common_scale   is None else xy_common_scale
+    xy_common_scale   = XY_COMMON_SCALE   if xy_common_scale   is None else xy_common_scale
     show_contour   = SHOW_CONTOUR   if show_contour   is None else show_contour
     xy_include_zero = XY_INCLUDE_ZERO if xy_include_zero is None else xy_include_zero
     cmap = CMAP if cmap is None else cmap
@@ -534,7 +534,7 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
                     t_steps = _as_step_list(t_step)
                     Zs, xp, yp, t_los = build_planes_step(
                         f, sc, ch, positions, t_steps, shot_index,
-                        med_size, gauss_sigma, xy_med_size, xy_gauss_sigma)
+                        ts_med_size, ts_gauss_sigma, xy_med_size, xy_gauss_sigma)
                     if Zs is None or all(np.all(np.isnan(Z)) for Z in Zs):
                         print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue
@@ -544,7 +544,7 @@ def plot_xy_map(path, scope=None, channels=None, mode=None,
                     Z, xp, yp = build_plane(
                         f, sc, ch, positions,
                         make_single_shot_reduce(shot_index, mode, t_start, t_end, t_step),
-                        med_size, gauss_sigma, xy_med_size, xy_gauss_sigma)
+                        ts_med_size, ts_gauss_sigma, xy_med_size, xy_gauss_sigma)
                     if Z is None or np.all(np.isnan(Z)):
                         print(f"scope '{sc}' / {ch}: no usable shots — skipping")
                         continue

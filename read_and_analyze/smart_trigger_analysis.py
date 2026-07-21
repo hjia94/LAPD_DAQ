@@ -84,8 +84,8 @@ except ImportError:  # fallback when run directly from inside the folder
 # (The input file is resolved at run time via resolve_data_file, not a knob here.)
 SCOPE       = cfg.SCOPE
 CHANNELS    = cfg.CHANNELS
-MED_SIZE    = cfg.MED_SIZE
-GAUSS_SIGMA = cfg.GAUSS_SIGMA
+TS_MED_SIZE    = cfg.TS_MED_SIZE
+TS_GAUSS_SIGMA = cfg.TS_GAUSS_SIGMA
 SHOW_PLOT  = cfg.SHOW_PLOT
 SAVE_PLOT  = cfg.SAVE_PLOT
 SHOTS      = cfg.SHOTS
@@ -371,14 +371,14 @@ def _resolve_shots(sg, shots):
 
 
 def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
-                           holdoff_us=None, math=None, med_size=None, gauss_sigma=None):
+                           holdoff_us=None, math=None, ts_med_size=None, ts_gauss_sigma=None):
     """Scan recorded traces for the events each SmartTrigger type would catch.
 
     Parameters default to the module constants. ``shots`` may be a list, tuple,
     or numpy array of shot numbers (e.g. ``np.arange(0, 10)``); ``None`` uses the
     sample shots (first/middle/last per position). For every (scope, channel,
-    selected shot) the trace is denoised (median ``med_size`` then Gaussian
-    ``gauss_sigma``), optionally transformed by ``math`` (derivative / integral /
+    selected shot) the trace is denoised (median ``ts_med_size`` then Gaussian
+    ``ts_gauss_sigma``), optionally transformed by ``math`` (derivative / integral /
     abs), gated by ``holdoff_us``, then run through each detector in ``kinds``
     (default all four). Returns a list of record dicts -- one per
     (scope, channel, shot, kind) -- each with keys: ``scope, channel, shot, x,
@@ -390,8 +390,8 @@ def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=No
     shots = SHOTS if shots is None else shots
     holdoff_us = HOLDOFF_US if holdoff_us is None else holdoff_us
     math = MATH if math is None else math
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
+    ts_med_size = TS_MED_SIZE if ts_med_size is None else ts_med_size
+    ts_gauss_sigma = TS_GAUSS_SIGMA if ts_gauss_sigma is None else ts_gauss_sigma
     channels = _as_list(channels)
     kinds = list(DETECTORS) if kinds is None else list(kinds)
 
@@ -419,7 +419,7 @@ def analyze_smart_triggers(path, scope=None, channels=None, shots=None, kinds=No
                 for s, volts in zip(shot_list, stack):
                     if np.isnan(volts).all():
                         continue
-                    filt = _filter_trace(volts, med_size, gauss_sigma)
+                    filt = _filter_trace(volts, ts_med_size, ts_gauss_sigma)
                     sig = _apply_math(filt, tarr, math)
                     sig, t = _holdoff_slice(sig, tarr, holdoff_us)
                     if len(sig) < 4:
@@ -449,7 +449,7 @@ def _print_table(records):
     math = next((r["math"] for r in records), MATH)
     holdoff = next((r["holdoff_us"] for r in records), HOLDOFF_US)
     print(f"math={math}   holdoff={holdoff:g} us   "
-          f"median={MED_SIZE:g} samples   gauss_sigma={GAUSS_SIGMA:g} samples")
+          f"median={TS_MED_SIZE:g} samples   ts_gauss_sigma={TS_GAUSS_SIGMA:g} samples")
 
     def _bnd(lo, hi):  # format an [min, max] ns band, "-" for an open side
         return f"[{'-' if lo is None else f'{lo:g}'}, {'-' if hi is None else f'{hi:g}'}] ns"
@@ -483,7 +483,7 @@ def _print_table(records):
 # ======================================================================================
 
 def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
-                        holdoff_us=None, math=None, med_size=None, gauss_sigma=None,
+                        holdoff_us=None, math=None, ts_med_size=None, ts_gauss_sigma=None,
                         show=None, save=None):
     """Plot the scanned signal per shot with detected SmartTrigger events shaded.
 
@@ -502,8 +502,8 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
     shots = SHOTS if shots is None else shots
     holdoff_us = HOLDOFF_US if holdoff_us is None else holdoff_us
     math = MATH if math is None else math
-    med_size = MED_SIZE if med_size is None else med_size
-    gauss_sigma = GAUSS_SIGMA if gauss_sigma is None else gauss_sigma
+    ts_med_size = TS_MED_SIZE if ts_med_size is None else ts_med_size
+    ts_gauss_sigma = TS_GAUSS_SIGMA if ts_gauss_sigma is None else ts_gauss_sigma
     show = SHOW_PLOT if show is None else show
     save = SAVE_PLOT if save is None else save
     channels = _as_list(channels)
@@ -547,7 +547,7 @@ def plot_smart_triggers(path, scope=None, channels=None, shots=None, kinds=None,
             for ax, s, volts in zip(axes, shot_list, stack):
                 if np.isnan(volts).all():
                     continue
-                filt = _filter_trace(volts, med_size, gauss_sigma)
+                filt = _filter_trace(volts, ts_med_size, ts_gauss_sigma)
                 sig_full = _apply_math(filt, tarr, math)
                 sig, t = _holdoff_slice(sig_full, tarr, holdoff_us)
                 if len(sig) < 4:

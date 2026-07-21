@@ -111,8 +111,8 @@ SAVE_PLOT    = False       # write PNGs to a "plots/" subdir next to the data fi
 AUTO_PLOT    = True        # fallback default for the auto_plot.py post-run hook when
                            # called without a config; the run's [analysis] auto_plot
                            # key (experiment_config.ini) overrides this in acquisition
-MED_SIZE     = 5           # median-filter width in SAMPLES (spike removal); 1 = off
-GAUSS_SIGMA  = 20          # Gaussian smoothing width in SAMPLES; 0 = off
+TS_MED_SIZE     = 5        # median-filter width in SAMPLES (spike removal); 1 = off
+TS_GAUSS_SIGMA  = 20       # Gaussian smoothing width in SAMPLES; 0 = off
 POS_TOL      = 0.5         # group repeat shots within this many mm
 
 # FLUCTUATION — fluctuation_analysis.py only
@@ -140,7 +140,7 @@ XY_CMAP         = "rainbow"
 ### `smart_trigger_config.py` — SmartTrigger scan only
 
 [`smart_trigger_config.py`](../smart_trigger_config.py) imports
-`DATA_FILE`/`SELECT_SCOPE`/`SELECT_CHAN`/`MED_SIZE`/`GAUSS_SIGMA` from
+`DATA_FILE`/`SELECT_SCOPE`/`SELECT_CHAN`/`TS_MED_SIZE`/`TS_GAUSS_SIGMA` from
 `analysis_config.py`, then adds the scan-specific knobs, grouped per trigger mode:
 
 ```python
@@ -180,8 +180,8 @@ the window mean (so large steady signal beats small noisy signal):
 
 Their sum is the **score**; the lowest wins per (scope, channel, position). Only
 windows with `|mean| > FLUCT_SIGNAL_FRAC × peak` qualify, so the quiet pre-plasma
-region can't trivially win. Traces are denoised (median `MED_SIZE` → Gaussian
-`GAUSS_SIGMA`) first. Output: a best-first table (position, window-center time,
+region can't trivially win. Traces are denoised (median `TS_MED_SIZE` -> Gaussian
+`TS_GAUSS_SIGMA`) first. Output: a best-first table (position, window-center time,
 `flat_rel`, `scat_rel`, `score`, mean V) and
 `plots/<base>_<scope>_fluctuation.png`.
 

@@ -53,7 +53,11 @@ experiment_config.ini ([experiment] name = ...); the config and bmotion TOML
 are found inside base_path, and the HDF5 filename is built from the parsed
 experiment name after the config is read.
 '''
-base_path = r"E:\Shadow data\Bernhardt-LH-whsitler\Density-p24"
+base_path = r"E:\Shadow data\Bernhardt-LH-whsitler\Magnetic_field_line-p29-LH-whistler-interference2"
+base_path = r"E:\Shadow data\Bernhardt-LH-whsitler\Iisat_line-p24-LH-whistler-interference"
+base_path = r"E:\Shadow data\Bernhardt-LH-whsitler\Ex_line_p23_LH-whistler-interference"
+base_path = r"E:\Shadow data\Bernhardt-LH-whsitler\Ey_corr_plane_p33_LH-whistler-interference"
+
 config_path = os.path.join(base_path, 'experiment_config.ini')
 toml_path = os.path.join(base_path, 'bmotion_config.toml')
 # Free-text run description lives in its own file (not in experiment_config.ini),
