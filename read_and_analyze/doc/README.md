@@ -20,6 +20,7 @@ The analysis tools run as console commands **from any directory**, for example
 | `lapd-filter` | Shows selected trace with median and Gaussian filter result |
 | `lapd-x-line` | A 1D plot of **line scan** averaged over selected time along the scanned axis (x or y) |
 | `lapd-xy-map` | A **2D XY plane** of the data averaged over selected time plotted using imshow |
+| `lapd-xy-slider` | A **2D XY plane vs time** written as a standalone HTML page with a time slider |
 
 Run `lapd-read` first. This is an overview — the three remaining commands
 (`lapd-fluctuation`, `lapd-smart-trigger`, `lapd-fix-descriptions`), the module
@@ -89,6 +90,9 @@ required.
 | [`fluctuation_analysis.py`](../fluctuation_analysis.py) | Finds, per position, the **flattest / most reproducible** time window (see [below](#fluctuation-analysis)). Prints a best-first table + a score/overlay figure. | 
 | [`plot_xy_map.py`](../plot_xy_map.py) | Reduces each grid position's trace to one scalar (mean over a time range, or value at one instant) and renders a **2D XY map** (`imshow`, optional contours). Genuine 2D planes only; line scans are skipped (use `plot_x_line`).
 | [`plot_x_line.py`](../plot_x_line.py) | The 1D **line-scan** counterpart to `plot_xy_map`: reduces each position to a scalar and plots value vs probe position. Auto-detects the moving axis (x or y). Genuine 2D planes are skipped.
+| [`plot_xy_slider.py`](../plot_xy_slider.py) | The time-resolved counterpart to `plot_xy_map`: writes a **standalone HTML page** with a time slider (and Play) sweeping the XY map through the record (see [below](#html-time-slider-map)). Averages all shots per position with the repeat standard error. Planes only. |
+| [`signals.py`](../signals.py) | Defines **what gets mapped** — a raw channel or arithmetic across channels (`"C3/C4"`, `"C3 - C4"`, `"sqrt(C2*C2 + C3*C3)"`). Expressions are parsed with `ast` against a whitelist, never `eval`. Used by `plot_xy_slider`; not run directly. |
+| [`state_grouping.py`](../state_grouping.py) | Classifies shots into groups by **monitor-channel RMS** (e.g. which antenna was driven), so shots at one position are averaged *within* state. Used by `plot_xy_slider`; not run directly. |
 | [`smart_trigger_analysis.py`](../smart_trigger_analysis.py) | Replays a LeCroy scope's **SmartTriggers** post-hoc (see [below](#smarttrigger-scan)) and reports which events would have triggered. Prints a per-shot table + a per-shot scan figure.
 | [`fix_channel_descriptions.py`](../fix_channel_descriptions.py) | Maintenance code: for hdf5 files that didn't parse channel description successfully.|
 | [`interferometer_merge.py`](../interferometer_merge.py) | Merges the day's interferometer traces into a run HDF5.|
@@ -128,8 +132,8 @@ SAVE_PLOT    = False       # write PNGs to a "plots/" subdir next to the data fi
 AUTO_PLOT    = True        # fallback default for the auto_plot.py post-run hook when
                            # called without a config; the run's [analysis] auto_plot
                            # key (experiment_config.ini) overrides this in acquisition
-MED_SIZE     = 5           # median-filter width in SAMPLES (spike removal); 1 = off
-GAUSS_SIGMA  = 20          # Gaussian smoothing width in SAMPLES; 0 = off
+MED_SIZE     = 1           # median-filter width in SAMPLES (spike removal); 1 = off
+GAUSS_SIGMA  = 0           # Gaussian smoothing width in SAMPLES; 0 = off
 POS_TOL      = 0.5         # group repeat shots within this many mm
 
 # XY_MAP — plot_xy_map.py and plot_x_line.py
@@ -146,12 +150,14 @@ XY_CMAP         = "rainbow"
 
 > Module-private knobs live at the top of the module that owns them, under a
 > `# ---- knobs ----` marker — `fluctuation_analysis` defines `WINDOW_US` /
-> `SIGNAL_FRAC` that way. The SmartTrigger scan is the exception: its ~20 knobs
+> `SIGNAL_FRAC` that way, and `plot_xy_slider` its frame window, `SIGNALS`, and
+> `OUTPUT_PATH`. The SmartTrigger scan is the exception: its ~20 knobs
 > live in `smart_trigger_config.py` (below), including its **own**
 > `SHOW_PLOT`/`SAVE_PLOT` toggles. The shared toggles above drive every other
 > module (`read_bmotion_data`, `filter_data`, `fluctuation_analysis`,
 > `plot_xy_map`, `plot_x_line`); `read_bmotion_data` can override them per-run
-> with `--no-show`/`--no-save`.
+> with `--no-show`/`--no-save`. `plot_xy_slider` always writes its HTML and so
+> reads neither toggle.
 
 ### `smart_trigger_config.py` — SmartTrigger scan only
 
@@ -192,6 +198,85 @@ INTERVAL_LEVEL = 0.4; INTERVAL_HYST = 0.05; INTERVAL_MIN_NS = None; INTERVAL_MAX
 | `smart_trigger_analysis` | `<base>_<scope>_smart_triggers.png` |
 
 e.g. `D:\data\LAPD\plots\my_run_<scope>.png`.
+
+`plot_xy_slider` is the exception: it always writes its output (there is no
+`SAVE_PLOT` to set) as `<base>_<scope>_<signal>_xyslider.html` plus a `.npz`
+sidecar of the same arrays, and its `OUTPUT_PATH` knob chooses the directory
+rather than always using `plots/`.
+
+---
+
+## HTML time-slider map
+
+[`plot_xy_slider.py`](../plot_xy_slider.py) renders the XY plane at many time
+steps into one **standalone HTML file** with a slider and a Play button, so a
+structure moving across the probe plane can be watched rather than inferred from
+a few static panels. Run it with
+
+```bash
+python -m read_and_analyze.plot_xy_slider
+```
+
+The written page needs **neither Python nor the HDF5 file** — the reduced frames
+are embedded in it, so it opens by double-click and can be copied anywhere. The
+expensive read happens once, when the page is written; changing the window,
+frame count, filtering, or grouping means re-running the module. The `.npz`
+sidecar holds the same arrays for further work in numpy.
+
+Its knobs live at the top of the module:
+
+```python
+T_START_MS  = 0.0     # window start (ms); None = start of the digitized record
+T_END_MS    = None    # window end   (ms); None = end of the digitized record
+N_FRAMES    = 200     # time steps in the slider; file size scales with this
+SHOT_MODE   = "mean"  # "mean" = average all shots (+ SEM) | "index" | "state"
+SHOT_INDEX  = 0       # which shot, when SHOT_MODE == "index"
+SIGNALS     = ["C3/C4"]   # None = one raw signal per channel in SELECT_CHAN
+STATE_GROUPS = None   # dict configuring the monitor-RMS classifier (below)
+OUTPUT_PATH = r"D:\data\LAPD\plots"   # None = "plots/" beside the data file
+```
+
+`None` time bounds mean *use the digitized record*, which covers a full
+discharge for a Langmuir run and confines itself to the digitized segment for a
+B-dot run without per-run editing. Requests outside the record are clamped with
+a printed notice.
+
+**What gets mapped.** `SIGNALS` accepts a raw channel or arithmetic across
+channels of the same scope: `"C3/C4"`, `"C3 - C4"`, `"(C3-C4)/(C3+C4)"`,
+`"sqrt(C2*C2 + C3*C3)"`. Allowed are channel names, numbers, `+ - * / **`, unary
+minus, and `abs`/`log`/`log10`/`sqrt`; anything else is refused when the
+expression is parsed, before any reading starts. The combination is applied
+**per shot, before averaging** — the two orders agree only for linear
+operations, and `log(a/b)` is not one. Division by zero and non-positive `log`
+input become `NaN`, which renders as a grey cell rather than aborting the run.
+
+**Which shots are averaged.** `SHOT_MODE = "mean"` (the default) averages every
+shot at each position and computes the repeat standard error alongside; the page
+shows mean, SEM, and the contributing-shot count `n`, and the hover readout
+gives all three for the cell under the cursor. SEM is `NaN` where a position has
+only one shot — one measurement cannot estimate its own scatter. `"index"` picks
+a single shot instead.
+
+**Grouping by antenna state.** With `SHOT_MODE = "state"`, shots at one position
+are averaged *within* state rather than across, and the page gains a dropdown to
+switch between them on a shared colour scale:
+
+```python
+from read_and_analyze.state_grouping import TWO_ANTENNA_LABELS
+SHOT_MODE = "state"
+STATE_GROUPS = {"scope": "bdot_scope", "channels": ("C7", "C8"),
+                "window_ms": (0.0, 20.0), "labels": TWO_ANTENNA_LABELS}
+```
+
+Nothing in the file records the state, so it is measured: the per-shot
+mean-subtracted RMS of each monitor channel is computed in `window_ms`, and the
+on/off threshold is set at the **geometric midpoint of the largest logarithmic
+gap** in the sorted values. A genuinely bimodal on/off population separates by a
+large factor, so the cut lands between the clusters wherever they sit — no
+hardcoded volt level to re-tune when the drive amplitude or gain changes. If the
+separation ratio is under 2× the classifier refuses rather than guessing, and
+shots matching no configured state are grouped as `unknown` with a warning.
+This is a second pass over the file, so it runs only when requested.
 
 ---
 

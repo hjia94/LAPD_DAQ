@@ -93,6 +93,7 @@ lapd-filter = "read_and_analyze.filter_data:main"
 lapd-fluctuation = "read_and_analyze.fluctuation_analysis:main"
 lapd-xy-map = "read_and_analyze.plot_xy_map:main"
 lapd-x-line = "read_and_analyze.plot_x_line:main"
+lapd-xy-slider = "read_and_analyze.plot_xy_slider:main"
 lapd-smart-trigger = "read_and_analyze.smart_trigger_analysis:main"
 lapd-fix-descriptions = "read_and_analyze.fix_channel_descriptions:main"
 

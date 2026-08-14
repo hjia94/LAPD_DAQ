@@ -27,6 +27,7 @@ Created Aug.2026
 @author: Jia Han
 """
 
+import itertools
 import os
 import sys
 
@@ -162,10 +163,31 @@ def classify_by_channel_rms(f, scope, channels, shots, labels,
     return state_by_shot, metadata
 
 
-# Ready-made label map for the two-antenna case these runs use.
+# Ready-made label map for the two-antenna case these runs use. Channel order is
+# (south, north), matching the ``channels`` tuple passed to the classifier.
 TWO_ANTENNA_LABELS = {
     (False, False): "background",
     (True, False): "south_only",
     (False, True): "north_only",
     (True, True): "both_on",
 }
+
+
+def default_labels(channels):
+    """Label map to use when the caller did not supply one.
+
+    Two monitor channels is the case these runs actually take, so it gets the
+    ready-made names above and the caller can leave ``labels`` out entirely. Any
+    other channel count has no meaningful default -- ``south``/``north`` would be
+    a lie -- so fall back to a generic on/off name built from the channel names,
+    e.g. ``("C5","C6","C7") -> (True, False, True)`` becomes ``"C5+C7"``, and
+    all-off becomes ``"background"``.
+    """
+    if len(channels) == 2:
+        return TWO_ANTENNA_LABELS
+
+    labels = {}
+    for bits in itertools.product((False, True), repeat=len(channels)):
+        on = [ch for ch, active in zip(channels, bits) if active]
+        labels[bits] = "+".join(on) if on else "background"
+    return labels

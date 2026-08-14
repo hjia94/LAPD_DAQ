@@ -53,7 +53,9 @@ try:  # works as a package (python -m read_and_analyze.plot_xy_slider)
         _plane_axes, _is_plane, window_indices,
     )
     from read_and_analyze.signals import as_signal_list, raw as raw_signal
-    from read_and_analyze.state_grouping import classify_by_channel_rms
+    from read_and_analyze.state_grouping import (
+        classify_by_channel_rms, default_labels,
+    )
     from read_and_analyze.analysis_config import (
         MED_SIZE, GAUSS_SIGMA, SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS,
         XY_CMAP as CMAP,
@@ -68,7 +70,7 @@ except ImportError:  # fallback when run directly from inside the folder
         _plane_axes, _is_plane, window_indices,
     )
     from signals import as_signal_list, raw as raw_signal
-    from state_grouping import classify_by_channel_rms
+    from state_grouping import classify_by_channel_rms, default_labels
     from analysis_config import (
         MED_SIZE, GAUSS_SIGMA, SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS,
         XY_CMAP as CMAP,
@@ -89,9 +91,12 @@ SHOT_INDEX = 0       # which shot, when SHOT_MODE == "index"
 # expressions or Signal objects, e.g. ["C2", "C3 - C4", "sqrt(C2*C2+C3*C3)"].
 SIGNALS = ["C3/C4"]
 
-# STATE_GROUPS: None, or a dict configuring the monitor-RMS classifier, e.g.
-#   {"scope": "bdot_scope", "channels": ("C7", "C8"),
-#    "window_ms": (0.0, 20.0), "labels": TWO_ANTENNA_LABELS}
+# STATE_GROUPS: None, or a dict configuring the monitor-RMS classifier. Only
+# "channels" is required -- "scope" defaults to the scope being plotted,
+# "labels" to state_grouping.default_labels() (the two-antenna names for two
+# monitors), "window_ms" to the whole record, "min_ratio" to 2.0:
+#   {"channels": ("C7", "C8")}
+#   {"channels": ("C7", "C8"), "scope": "bdot_scope", "window_ms": (0.0, 20.0)}
 STATE_GROUPS = None
 
 # Where the HTML lands. None = a "plots/" subdir beside the data file (the
@@ -368,12 +373,14 @@ def _resolve_selector(f, scope, shot_mode, shot_index, state_groups):
         if not state_groups:
             raise ValueError("SHOT_MODE='state' requires STATE_GROUPS to be set")
         cls_scope = state_groups.get("scope", scope)
+        channels = state_groups["channels"]
+        labels = state_groups.get("labels") or default_labels(channels)
         shots = _shot_numbers(f[cls_scope])
         print(f"classifying {len(shots)} shots on {cls_scope}/"
-              f"{','.join(state_groups['channels'])} ...")
+              f"{','.join(channels)} ...")
         state_by_shot, meta = classify_by_channel_rms(
-            f, cls_scope, state_groups["channels"], shots,
-            state_groups["labels"], state_groups.get("window_ms"),
+            f, cls_scope, channels, shots, labels,
+            state_groups.get("window_ms"),
             state_groups.get("min_ratio", 2.0))
         counts = ", ".join(f"{k}: {v}" for k, v in sorted(meta["state_counts"].items()))
         return select_by_state(state_by_shot), f"grouped by antenna state ({counts})"
