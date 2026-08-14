@@ -80,29 +80,24 @@ except ImportError:  # fallback when run directly from inside the folder
 # None means "use the digitized record": tarr already *is* the digitized window,
 # so this covers a full discharge for a Langmuir run and confines itself to the
 # digitized segment for a B-dot run, with no per-run editing.
-T_START_MS = 0.0     # window start (ms); None = start of the record
+T_START_MS = None     # window start (ms); None = start of the record
 T_END_MS   = None    # window end   (ms); None = end of the record
-N_FRAMES   = 200     # time steps in the slider; file size scales with this
+N_FRAMES   = 1000     # time steps in the slider; file size scales with this
 
-SHOT_MODE  = "mean"  # "mean" = average all shots (+ SEM) | "index" | "state"
+SHOT_MODE  = "state"  # "mean" = average all shots (+ SEM) | "index" | "state"
 SHOT_INDEX = 0       # which shot, when SHOT_MODE == "index"
 
 # SIGNALS: None = one raw signal per channel in SELECT_CHAN. Otherwise a list of
 # expressions or Signal objects, e.g. ["C2", "C3 - C4", "sqrt(C2*C2+C3*C3)"].
-SIGNALS = ["C3/C4"]
+SIGNALS = ["C1","C2","C3"]
 
-# STATE_GROUPS: None, or a dict configuring the monitor-RMS classifier. Only
-# "channels" is required -- "scope" defaults to the scope being plotted,
-# "labels" to state_grouping.default_labels() (the two-antenna names for two
-# monitors), "window_ms" to the whole record, "min_ratio" to 2.0:
-#   {"channels": ("C7", "C8")}
-#   {"channels": ("C7", "C8"), "scope": "bdot_scope", "window_ms": (0.0, 20.0)}
-STATE_GROUPS = None
+# Group shots based on the following channels
+STATE_GROUPS = {"channels": ("C7", "C8"), "scope": "bdot_scope", "window_ms": (0.0, 20.0)}
 
 # Where the HTML lands. None = a "plots/" subdir beside the data file (the
 # convention the other modules follow); a directory = auto-named files inside
 # it; a path ending in .html = that exact file (only when one page is written).
-OUTPUT_PATH = r"D:\data\LAPD\plots"
+OUTPUT_PATH = r"E:\Shadow data\Alfven_zonal_flow\aug2026\results"
 
 
 # ======================================================================================
