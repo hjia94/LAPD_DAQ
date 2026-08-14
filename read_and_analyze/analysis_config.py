@@ -2,26 +2,16 @@
 """
 Single source of user-changeable knobs for the read_and_analyze modules.
 
-Every setting a user normally edits lives here so there is one place to look --
-no need to open the analysis modules themselves. The file is organized into
-clearly separated sections:
+Knobs shared by every module live here, in two sections:
 
-  * SHARED            -- knobs used by every module: the input file, the scope /
-                         channels to analyze (SELECT_SCOPE / SELECT_CHAN), the
-                         plot toggles (SHOW_PLOT / SAVE_PLOT), the time-domain
-                         filtering pipeline, and the position grid tolerance.
-                         (read_bmotion_data.py uses only these shared knobs.)
-  * FLUCTUATION       -- fluctuation_analysis.py (quietest-window search)
-  * XY_MAP            -- plot_xy_map.py (2D XY-plane maps)
+  * SHARED   -- input file, scope/channel selection, plot toggles, the
+                time-domain filtering pipeline, and the grid tolerance
+  * XY_MAP   -- plot_xy_map.py / plot_x_line.py (2D XY-plane maps)
 
-SmartTrigger knobs live in their own ``smart_trigger_config.py`` (which imports
-the SHARED knobs from this file), kept separate because there are many of them,
-grouped per trigger mode.
-
-Each module reads its values from here. The input file, scope/channel selection,
-and plot toggles are shared across every module and live in the SHARED section;
-the remaining sections hold only the knobs unique to one module. Levels/times
-are in the units noted on each line.
+Module-private knobs live at the top of the module that owns them, under a
+``# ---- knobs ----`` marker (see ``fluctuation_analysis.py``). The exception is
+``smart_trigger_analysis.py``, whose ~20 knobs are grouped per trigger mode in
+their own ``smart_trigger_config.py``.
 
 Created May.2026
 @author: Jia Han
@@ -31,13 +21,8 @@ Created May.2026
 # SHARED -- used across modules (input file, scope/channel, plot toggles,
 #           filtering pipeline, grid tolerance)
 # ======================================================================================
-# Where Data_Run_bmotion.py writes its run HDF5 files (its base_path). Used only
-# when DATA_FILE is None: the newest COMPLETED run in this folder is analyzed.
-DATA_DIR    = r"E:\Shadow data\Electrode_Biasing\jun2026"
-
-# Explicit input file. None = auto: pick the newest completed run in DATA_DIR
-# (a run still being acquired/offloaded is skipped). Set a path to pin one file,
-# e.g. r"M:\BAPSF_Data\Low_Density_Topo\Jun2026\01-Isat-p21-line-Argon-2kG_2026-06-08.hdf5"
+# Full path to the run HDF5 file to analyze, e.g.
+# r"M:\BAPSF_Data\Low_Density_Topo\Jun2026\01-Isat-p21-line-Argon-2kG_2026-06-08.hdf5"
 DATA_FILE   = None
 
 SELECT_SCOPE = None   # scope to analyze; None = all scopes (shared by every module)
@@ -54,13 +39,6 @@ MED_SIZE    = 5    # median-filter window in SAMPLES, applied first (spike/outli
 GAUSS_SIGMA = 20   # Gaussian smoothing width in SAMPLES, applied after the median (high-freq noise); 0 = off
 
 POS_TOL     = 0.5  # round (x, y) to this many mm so encoder float-noise groups repeat shots cleanly
-
-
-# ======================================================================================
-# FLUCTUATION -- fluctuation_analysis.py: find the quietest time window per position
-# ======================================================================================
-FLUCT_WINDOW_US   = 10.0        # analysis window width (microseconds) slid across the record
-FLUCT_SIGNAL_FRAC = 0           # window mean must exceed this fraction of the position's peak |mean|
 
 
 # ======================================================================================

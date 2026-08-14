@@ -120,10 +120,7 @@ required.
 
 ```python
 # SHARED — used by every module
-DATA_DIR     = r"E:\Shadow data\..."        # Data_Run_bmotion.py's output folder (its base_path)
-DATA_FILE    = None                         # None = auto-pick the newest COMPLETED run in
-                                            # DATA_DIR (in-progress runs are skipped);
-                                            # or pin one file: r"D:\data\LAPD\my_run.hdf5"
+DATA_FILE    = r"D:\data\LAPD\my_run.hdf5"  # full path to the run HDF5 to analyze
 SELECT_SCOPE = None        # scope to analyze; None = all scopes
 SELECT_CHAN  = None        # channels to analyze; None = all channels
 SHOW_PLOT    = True        # display figures interactively
@@ -134,10 +131,6 @@ AUTO_PLOT    = True        # fallback default for the auto_plot.py post-run hook
 MED_SIZE     = 5           # median-filter width in SAMPLES (spike removal); 1 = off
 GAUSS_SIGMA  = 20          # Gaussian smoothing width in SAMPLES; 0 = off
 POS_TOL      = 0.5         # group repeat shots within this many mm
-
-# FLUCTUATION — fluctuation_analysis.py only
-FLUCT_WINDOW_US   = 10.0   # window width (us) slid across the record
-FLUCT_SIGNAL_FRAC = 0      # window |mean| must exceed this fraction of the position's peak
 
 # XY_MAP — plot_xy_map.py and plot_x_line.py
 XY_MODE         = "range"  # "range" = mean over [T_START_MS, T_END_MS]; "step" = snapshot(s) at XY_T_STEP_MS
@@ -151,11 +144,14 @@ XY_N_CONTOURS   = 8        # contour count when XY_SHOW_CONTOUR is True
 XY_CMAP         = "rainbow"
 ```
 
-> The SmartTrigger scan keeps its **own** plot toggles in `smart_trigger_config.py`
-> (`SHOW_PLOT`/`SAVE_PLOT`); the shared toggles above drive the other analysis
-> modules (`read_bmotion_data`, `filter_data`, `fluctuation_analysis`,
-> `plot_xy_map`, `plot_x_line`). `read_bmotion_data` can also override its toggles
-> per-run with `--no-show`/`--no-save`.
+> Module-private knobs live at the top of the module that owns them, under a
+> `# ---- knobs ----` marker — `fluctuation_analysis` defines `WINDOW_US` /
+> `SIGNAL_FRAC` that way. The SmartTrigger scan is the exception: its ~20 knobs
+> live in `smart_trigger_config.py` (below), including its **own**
+> `SHOW_PLOT`/`SAVE_PLOT` toggles. The shared toggles above drive every other
+> module (`read_bmotion_data`, `filter_data`, `fluctuation_analysis`,
+> `plot_xy_map`, `plot_x_line`); `read_bmotion_data` can override them per-run
+> with `--no-show`/`--no-save`.
 
 ### `smart_trigger_config.py` — SmartTrigger scan only
 
@@ -204,10 +200,12 @@ e.g. `D:\data\LAPD\plots\my_run_<scope>.png`.
 For each position the best window is picked in two stages:
 
 1. **Window choice — shot-to-shot reproducibility alone.** Sliding a
-   `FLUCT_WINDOW_US`-wide window over the record, the winner is the one with the
+   `WINDOW_US`-wide window over the record, the winner is the one with the
    smallest `cv_shots` = `std-across-shots / |mean|` of the per-shot window
-   means. Only windows with `|mean| > FLUCT_SIGNAL_FRAC × peak` qualify, so the
+   means. Only windows with `|mean| > SIGNAL_FRAC × peak` qualify, so the
    quiet pre-plasma region can't trivially win.
+   (`WINDOW_US` / `SIGNAL_FRAC` are defined at the top of
+   [`fluctuation_analysis.py`](../fluctuation_analysis.py).)
 2. **Ranking — reproducibility plus spatial gradient.** Once every position has
    its window, a profile across positions is built at one fixed reference window
    (the scope's quietest by `cv_shots`, so the gradient is comparable across
@@ -264,4 +262,4 @@ by kind).
 | `Install h5py to use the scope_io HDF5 readers.` | `h5py` is missing — `python -m pip install h5py`. |
 | Plot window never appears | `SHOW_PLOT=False`, `--no-show`, or a headless machine — use `SAVE_PLOT=True` instead. |
 | A shot reports as *skipped* | The acquisition marked it; the validator counts it `PASS` and plotting omits it. |
-| Fluctuation table says *no valid windows* | Signal never exceeded `FLUCT_SIGNAL_FRAC × peak` — lower it, or check the file has plasma signal. Positions with fewer than 2 usable repeat shots are also dropped (no shot-to-shot scatter to measure). |
+| Fluctuation table says *no valid windows* | Signal never exceeded `SIGNAL_FRAC × peak` (in `fluctuation_analysis.py`) — lower it, or check the file has plasma signal. Positions with fewer than 2 usable repeat shots are also dropped (no shot-to-shot scatter to measure). |

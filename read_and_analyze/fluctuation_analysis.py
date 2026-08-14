@@ -15,11 +15,11 @@ Filtering, shot grouping, and trace loading are imported from
 :mod:`read_and_analyze.filter_data`; reading/decoding is delegated to the
 in-repo ``scope_io`` package.
 
-There is NO command line; all knobs are the constants below (filtering knobs
-live in ``filter_data``). Run with:
+There is NO command line. Run with:
     python -m read_and_analyze.fluctuation_analysis
-Edit DATA_FILE/DATA_DIR and the constants in analysis_config.py to change the
-file (or auto-pick the newest completed run) and parameters.
+The window/threshold knobs are WINDOW_US / SIGNAL_FRAC below; the input file,
+scope/channel selection, filtering, and plot toggles come from
+``analysis_config.py``.
 
 Setup (once):  python -m pip install scipy
 
@@ -53,7 +53,6 @@ try:  # works as a package (python -m read_and_analyze.fluctuation_analysis)
     from read_and_analyze.analysis_config import (
         MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
-        FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
 except ImportError:  # fallback when run directly from inside the folder
     from read_bmotion_data import (
@@ -66,8 +65,11 @@ except ImportError:  # fallback when run directly from inside the folder
     from analysis_config import (
         MED_SIZE, GAUSS_SIGMA, POS_TOL as _POS_TOL,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
-        FLUCT_WINDOW_US as WINDOW_US, FLUCT_SIGNAL_FRAC as SIGNAL_FRAC,
     )
+
+# ---- knobs ---- (module-private; shared ones come from analysis_config.py)
+WINDOW_US   = 10.0   # analysis window width (microseconds) slid across the record
+SIGNAL_FRAC = 0      # window mean must exceed this fraction of the position's peak |mean|
 
 
 # ======================================================================================

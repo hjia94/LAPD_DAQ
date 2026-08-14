@@ -50,16 +50,29 @@ def _doc_text():
     return _DOC.read_text(encoding="utf-8")
 
 
-def _config_constants(module_filename):
-    """Module-level UPPER_CASE assignment names in a config file, via ast."""
-    src = (_PKG_DIR / module_filename).read_text(encoding="utf-8")
-    tree = ast.parse(src)
+def _module_constants(path):
+    """Module-level UPPER_CASE assignment names in a .py file, via ast."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     names = set()
-    for node in ast.walk(tree):
+    for node in tree.body:  # module level only, not nested scopes
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and re.fullmatch(r"[A-Z][A-Z0-9_]+", target.id):
                     names.add(target.id)
+    return names
+
+
+def _all_knob_names():
+    """Every module-level CONSTANT in the package.
+
+    Knobs live in analysis_config.py (shared), smart_trigger_config.py, or at
+    the top of the module that owns them (the ``# ---- knobs ----`` convention,
+    e.g. WINDOW_US in fluctuation_analysis.py). Scanning every module keeps
+    in-module knobs covered by this check instead of silently exempt.
+    """
+    names = set()
+    for path in sorted(_PKG_DIR.glob("*.py")):
+        names |= _module_constants(path)
     return names
 
 
@@ -90,23 +103,36 @@ class TestReadAnalyzeDocSync(unittest.TestCase):
         )
 
     def test_doc_config_constants_exist(self):
-        """Every CONSTANT shown in a doc python block must exist in a config file.
+        """Every CONSTANT shown in a doc python block must still exist in the code.
 
-        Guards against stale/renamed knobs in the example blocks. A name is OK if
-        it lives in analysis_config.py OR smart_trigger_config.py (the doc shows
-        blocks from both).
+        Guards against stale/renamed knobs in the example blocks, wherever the
+        knob lives -- a config module or the owning module's own knob block.
         """
-        valid = _config_constants("analysis_config.py") | _config_constants(
-            "smart_trigger_config.py"
-        )
         documented = _python_block_assignments(_doc_text())
-        # DATA_DIR appears in the doc with a placeholder value; it is a real knob.
-        stale = sorted(documented - valid)
+        stale = sorted(documented - _all_knob_names())
         self.assertFalse(
             stale,
-            "Constants in doc/README.md python blocks no longer exist in "
-            f"analysis_config.py / smart_trigger_config.py: {stale}. Update the "
-            "doc example to match the renamed/removed knobs.",
+            "Constants in doc/README.md python blocks no longer exist in any "
+            f"read_and_analyze module: {stale}. Update the doc example to match "
+            "the renamed/removed knobs.",
+        )
+
+    def test_documented_inline_knobs_exist(self):
+        """Knobs the doc names in prose (backticked) must exist in the code.
+
+        The doc references module-private knobs such as `WINDOW_US` outside the
+        python blocks; without this they could be renamed or deleted and the doc
+        would rot silently, which the block-only check above would not catch.
+        """
+        known = _all_knob_names()
+        # Backticked ALL_CAPS names in prose that look like knobs (>=2 chars,
+        # underscore or long) -- ignore prose acronyms like HDF5/PASS/FAIL.
+        prose = set(re.findall(r"`([A-Z][A-Z0-9]*_[A-Z0-9_]+)`", _doc_text()))
+        stale = sorted(prose - known)
+        self.assertFalse(
+            stale,
+            "Knobs named in doc/README.md prose no longer exist in any "
+            f"read_and_analyze module: {stale}.",
         )
 
 
