@@ -33,6 +33,12 @@ import sys
 
 import numpy as np
 
+try:  # progress bar over the per-channel monitor read; optional dependency
+    from tqdm import tqdm
+except ImportError:  # fall back to a no-op pass-through if tqdm isn't installed
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -45,6 +51,9 @@ except ImportError:  # fallback when run directly from inside the folder
     from plot_xy_map import window_indices
 
 UNKNOWN = "unknown"
+
+# ---- knobs ----
+_RMS_CHUNK = 50   # shots read per bulk call; sets the progress-bar granularity
 
 
 class ClassificationError(ValueError):
@@ -87,19 +96,29 @@ def channel_rms(f, scope, channel, shots, t_window_ms=None):
     mean is removed first so a DC offset does not masquerade as drive amplitude.
     ``t_window_ms`` is ``(start, end)`` in ms; None uses the whole record.
     """
+    shots = list(shots)
     tarr = read_hdf5_scope_tarr(f, scope)
-    raw, _dt, _t0 = read_hdf5_scope_channel_shots(
-        f, scope, channel, list(shots), expected_len=len(tarr))
-    if raw is None:
-        return np.full(len(shots), np.nan)
-
+    sl = slice(None)
     if t_window_ms is not None:
         i0, i1 = window_indices(tarr, t_window_ms[0] * 1e-3, t_window_ms[1] * 1e-3)
-        raw = raw[:, i0:i1]
+        sl = slice(i0, i1)
 
-    with np.errstate(invalid="ignore"):
-        centered = raw - np.nanmean(raw, axis=1, keepdims=True)
-        return np.sqrt(np.nanmean(centered ** 2, axis=1))
+    # Read in chunks rather than one bulk call: the progress bar then advances
+    # during the read (the wait is per shot, not per channel), and only a chunk
+    # of the record is held at once instead of every shot of the channel.
+    out = np.full(len(shots), np.nan)
+    for start in tqdm(range(0, len(shots), _RMS_CHUNK), desc=f"  {channel}",
+                      unit="chunk", leave=False):
+        block = shots[start:start + _RMS_CHUNK]
+        raw, _dt, _t0 = read_hdf5_scope_channel_shots(
+            f, scope, channel, block, expected_len=len(tarr))
+        if raw is None:
+            continue
+        with np.errstate(invalid="ignore"):
+            win = raw[:, sl]
+            centered = win - np.nanmean(win, axis=1, keepdims=True)
+            out[start:start + len(block)] = np.sqrt(np.nanmean(centered ** 2, axis=1))
+    return out
 
 
 def classify_by_channel_rms(f, scope, channels, shots, labels,
@@ -126,7 +145,10 @@ def classify_by_channel_rms(f, scope, channels, shots, labels,
     """
     shots = list(shots)
     rms, thresholds, ratios = {}, {}, {}
-    for ch in channels:
+    # One bar over the monitor channels: each iteration reads every shot of one
+    # channel, so the bar advances in the units the wait is actually made of.
+    bar = tqdm(channels, desc="monitor RMS", unit="ch", leave=False)
+    for ch in bar:
         rms[ch] = channel_rms(f, scope, ch, shots, t_window_ms)
         thresholds[ch], ratios[ch] = largest_log_gap_threshold(rms[ch], min_ratio)
         n_on = int(np.sum(rms[ch] > thresholds[ch]))
