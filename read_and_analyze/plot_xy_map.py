@@ -32,6 +32,7 @@ Created May.2026
 """
 
 import os
+from collections import defaultdict
 
 import numpy as np
 
@@ -59,6 +60,7 @@ try:  # works as a package (python -m read_and_analyze.plot_xy_map)
         resolve_data_file,
     )
     from read_and_analyze.filter_data import _as_list, _filter_trace
+    from read_and_analyze.signals import raw as raw_signal
     from read_and_analyze.analysis_config import (
         MED_SIZE, GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
@@ -72,6 +74,7 @@ except ImportError:  # fallback when run directly from inside the folder
         resolve_data_file,
     )
     from filter_data import _as_list, _filter_trace
+    from signals import raw as raw_signal
     from analysis_config import (
         MED_SIZE, GAUSS_SIGMA,
         SELECT_SCOPE as SCOPE, SELECT_CHAN as CHANNELS, SHOW_PLOT, SAVE_PLOT,
@@ -97,8 +100,20 @@ def _reduction_indices(tarr, mode, t_start, t_end, t_step):
         idx = int(np.argmin(np.abs(tarr - t_step * 1e-3)))
         return idx, idx + 1
 
-    i0 = int(np.searchsorted(tarr, t_start * 1e-3))
-    i1 = int(np.searchsorted(tarr, t_end * 1e-3, side="right"))
+    return window_indices(tarr, t_start * 1e-3, t_end * 1e-3)
+
+
+def window_indices(tarr, t_lo, t_hi):
+    """Half-open ``[i0, i1)`` sample slice for the closed window [t_lo, t_hi].
+
+    Bounds are in **seconds** (``tarr``'s own units, unlike the ms-based callers
+    above). Always returns a non-empty slice clamped to the record, so callers
+    can read the realized bounds straight from ``tarr``. This is the single
+    ms/seconds-to-index contract for the package -- the slider's frame axis and
+    the monitor-RMS classifier both resolve their windows through it.
+    """
+    i0 = int(np.searchsorted(tarr, t_lo))
+    i1 = int(np.searchsorted(tarr, t_hi, side="right"))
     i0 = max(0, min(i0, len(tarr) - 1))
     i1 = max(i0 + 1, min(i1, len(tarr)))
     return i0, i1
@@ -203,6 +218,149 @@ def make_single_shot_reduce(shot_index, mode, t_start, t_end, t_step):
 
 
 # ======================================================================================
+# Shot selectors   selector(shotnums) -> {group_label: [shot_nums]}
+# ======================================================================================
+# A selector answers one question: given the shots recorded at one position,
+# which subsets get averaged together, and what is each subset called? Keeping
+# it position-local means the selector knows nothing about *why* shots group --
+# antenna state, parity, anything -- so a new grouping is a new dict, not a new
+# code path through the builder.
+
+def select_all_shots(shotnums):
+    """Average every shot at the position into one group (the default)."""
+    return {"mean": list(shotnums)}
+
+
+def select_shot_index(shot_index):
+    """Pick one shot per position by index -- the historical single-shot behavior."""
+    def selector(shotnums):
+        if shot_index >= len(shotnums):
+            return {}
+        return {f"shot {shot_index}": [shotnums[shot_index]]}
+    return selector
+
+
+def select_by_state(state_by_shot):
+    """Group a position's shots by a precomputed ``{shot_num: label}`` map.
+
+    Shots with no entry are dropped; see
+    :func:`read_and_analyze.state_grouping.classify_by_channel_rms`, which labels
+    the unclassifiable as ``"unknown"`` rather than omitting them, so a dropped
+    shot here means the classifier never saw it at all.
+    """
+    def selector(shotnums):
+        groups = {}
+        for s in shotnums:
+            label = state_by_shot.get(s)
+            if label is not None:
+                groups.setdefault(label, []).append(s)
+        return groups
+    return selector
+
+
+# ======================================================================================
+# Frame assembly   (shared by the static map and the HTML slider)
+# ======================================================================================
+
+def _grid_layout(f, scope, npos):
+    """Time axis, shots-per-position, and whether the run is a clean grid.
+
+    ``mismatch`` True means the recorded shot count is not ``npos x nshot``, so
+    callers must map shots to positions by recorded coordinate instead of by
+    acquisition order. Shared by both plane builders so the rule (and its
+    warning) is stated once.
+    """
+    tarr = read_hdf5_scope_tarr(f, scope)
+    total = len(_shot_numbers(f[scope]))
+    nshot = total // npos if npos else 0
+    mismatch = (nshot == 0) or (npos * nshot != total)
+    if mismatch:
+        print(f"  warning: scope '{scope}' has {total} shots != npos({npos}) x "
+              f"nshot -- not a clean grid; using position-lookup fallback")
+    return tarr, nshot, mismatch
+
+
+def _reduce_group(stack, rows, idxs):
+    """Mean, standard error, and contributing-shot count at each time index.
+
+    ``rows`` are the stack rows belonging to one group. Returns three length-N
+    arrays parallel to ``idxs``. The standard error uses ``ddof=1`` because these
+    are sample repeats, so a single-shot cell yields NaN -- one measurement
+    cannot estimate its own scatter, and NaN says that honestly.
+    """
+    # Slice the sampled columns *before* the fancy row index: ``stack[rows]``
+    # would copy the whole (nshot, nsamples) array first -- 4 MB per position on
+    # a 100k-sample record -- only to discard all but a few hundred columns.
+    sub = stack[:, idxs][rows]                     # (ngroup_shots, nframes)
+    n = np.sum(np.isfinite(sub), axis=0).astype(float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.nanmean(sub, axis=0) if sub.size else np.full(len(idxs), np.nan)
+        sd = np.nanstd(sub, axis=0, ddof=1) if sub.shape[0] > 1 else np.full(len(idxs), np.nan)
+        sem = np.where(n > 1, sd / np.sqrt(np.where(n > 0, n, np.nan)), np.nan)
+    return mean, sem, n
+
+
+def build_frames(f, scope, signal, positions, idxs, selector,
+                 med_size, gauss_sigma):
+    """Reduce every planned position to per-group (mean, sem, n) at each time index.
+
+    One read pass: each position's channel stacks are loaded once, combined into
+    the derived signal per shot, then split into groups and reduced. Returns
+    ``({label: (values, sem, n)}, xpos, ypos)`` with each array shaped
+    ``(nframes, ny, nx)``; or ``({}, None, None)`` if the run is not a 2D plane.
+
+    Group labels are collected across positions, so a state that appears only at
+    some positions still gets a full-size array (NaN where absent).
+    """
+    xpos, ypos, npos, _name = _plane_axes(positions)
+    if not _is_plane(xpos, ypos):
+        return {}, None, None
+    nx, ny = len(xpos), len(ypos)
+    nframes = len(idxs)
+
+    tarr, nshot, mismatch = _grid_layout(f, scope, npos)
+
+    # label -> (values, sem, n), each (npos, nframes). Values/sem default to NaN
+    # ("not measured"); n defaults to 0 ("no shots"), which is a real count.
+    acc = defaultdict(lambda: (np.full((npos, nframes), np.nan),
+                               np.full((npos, nframes), np.nan),
+                               np.zeros((npos, nframes))))
+
+    desc = f"reduce {scope}/{signal.key}"
+    for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
+                            total=npos, desc=desc, unit="pos"):
+        if not shotnums:
+            continue
+        # Ask the selector first: a position it rejects entirely (an out-of-range
+        # shot index, or shots that classified into no state) must not cost a
+        # read of every channel the signal needs.
+        groups = selector(shotnums)
+        if not groups:
+            continue
+        stack = _load_signal_stack(f, scope, signal, shotnums, tarr,
+                                   med_size, gauss_sigma)
+        if stack is None:
+            continue
+        # Map shot number -> row in the stack, so a selector can name shots
+        # without knowing how they were ordered on read.
+        row_of = {s: r for r, s in enumerate(shotnums)}
+        for label, shots in groups.items():
+            rows = [row_of[s] for s in shots if s in row_of]
+            if not rows:
+                continue
+            slot = acc[label]
+            slot[0][i], slot[1][i], slot[2][i] = _reduce_group(stack, rows, idxs)
+
+    # (npos, nframes) -> (nframes, ny, nx), the same acquisition-order reshape
+    # the static map uses.
+    def to_plane(a):
+        return a.reshape(ny, nx, nframes).transpose(2, 0, 1)
+
+    return ({label: tuple(to_plane(a) for a in arrays)
+             for label, arrays in acc.items()}, xpos, ypos)
+
+
+# ======================================================================================
 # Plane assembly
 # ======================================================================================
 
@@ -259,9 +417,29 @@ def _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma):
         f, scope, ch, shotnums, expected_len=len(tarr))
     if raw is None:
         return None
+    if not (med_size and med_size > 1) and not (gauss_sigma and gauss_sigma > 0):
+        return raw   # both stages disabled: the row scan and vstack would only
+                     # rebuild an array identical to the one just read
     rows = [row if np.isnan(row).all() else _filter_trace(row, med_size, gauss_sigma)
             for row in raw]
     return np.vstack(rows)
+
+
+def _load_signal_stack(f, scope, signal, shotnums, tarr, med_size, gauss_sigma):
+    """Read every channel the ``signal`` needs and combine them into one stack.
+
+    Returns a ``(nshot, nsamples)`` array of the *derived* quantity, or None if
+    any required channel could not be read. ``signal.combine`` runs here, per
+    shot, before any averaging -- see :mod:`read_and_analyze.signals` for why
+    that ordering is required for nonlinear signals.
+    """
+    stacks = {}
+    for ch in signal.channels:
+        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
+        if stack is None:
+            return None
+        stacks[ch] = stack
+    return np.asarray(signal.combine(stacks), dtype=float)
 
 
 def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
@@ -277,13 +455,7 @@ def build_plane(f, scope, ch, positions, reduce_fn, med_size, gauss_sigma):
         return None, None, None
     nx, ny = len(xpos), len(ypos)
 
-    tarr = read_hdf5_scope_tarr(f, scope)
-    total = len(_shot_numbers(f[scope]))
-    nshot = total // npos if npos else 0
-    mismatch = (nshot == 0) or (npos * nshot != total)
-    if mismatch:
-        print(f"  warning: scope '{scope}' has {total} shots != npos({npos}) x "
-              f"nshot -- not a clean grid; using position-lookup fallback")
+    tarr, nshot, mismatch = _grid_layout(f, scope, npos)
 
     vals = np.full(npos, np.nan, dtype=float)
     for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
@@ -298,37 +470,23 @@ def build_planes_step(f, scope, ch, positions, t_steps_ms, shot_index,
                       med_size, gauss_sigma):
     """Build one plane per snapshot time in a single read pass.
 
-    Loads each position's stack once, picks shot ``shot_index``, and samples it at
-    every requested snapshot index. Returns ``(Zs, xpos, ypos, t_los)`` where
-    ``Zs`` is a list of ``(ny, nx)`` arrays parallel to ``t_los`` (realized
+    Thin wrapper over :func:`build_frames` with the single-shot selector, kept
+    for the static ``step``-mode montage. Returns ``(Zs, xpos, ypos, t_los)``
+    where ``Zs`` is a list of ``(ny, nx)`` arrays parallel to ``t_los`` (realized
     tarr-snapped times in seconds); or ``(None, None, None, None)`` if not a plane.
     """
-    xpos, ypos, npos, _name = _plane_axes(positions)
-    if not _is_plane(xpos, ypos):
-        return None, None, None, None
-    nx, ny = len(xpos), len(ypos)
-
     tarr = read_hdf5_scope_tarr(f, scope)
     idxs, t_los = _step_indices(tarr, t_steps_ms)
-    total = len(_shot_numbers(f[scope]))
-    nshot = total // npos if npos else 0
-    mismatch = (nshot == 0) or (npos * nshot != total)
-    if mismatch:
-        print(f"  warning: scope '{scope}' has {total} shots != npos({npos}) x "
-              f"nshot -- not a clean grid; using position-lookup fallback")
-
-    vals = [np.full(npos, np.nan, dtype=float) for _ in idxs]
-    for i, shotnums in tqdm(_position_shotnums(positions, npos, nshot, mismatch),
-                            total=npos, desc=f"reduce {scope}/{ch}", unit="pos"):
-        stack = _load_stack(f, scope, ch, shotnums, tarr, med_size, gauss_sigma)
-        if stack is None or shot_index >= stack.shape[0]:
-            continue
-        trace = stack[shot_index]
-        for k, idx in enumerate(idxs):
-            vals[k][i] = float(trace[idx])
-
-    Zs = [v.reshape((ny, nx)) for v in vals]
-    return Zs, xpos, ypos, t_los
+    frames, xpos, ypos = build_frames(
+        f, scope, raw_signal(ch), positions, idxs,
+        select_shot_index(shot_index), med_size, gauss_sigma)
+    if xpos is None:
+        return None, None, None, None
+    if not frames:   # no position yielded that shot index
+        ny, nx = len(ypos), len(xpos)
+        return [np.full((ny, nx), np.nan) for _ in idxs], xpos, ypos, t_los
+    values = next(iter(frames.values()))[0]      # (nframes, ny, nx)
+    return [values[k] for k in range(len(idxs))], xpos, ypos, t_los
 
 
 # ======================================================================================
