@@ -117,7 +117,20 @@ SHOT_INDEX = 0         # which shot, when SHOT_MODE == "index"
 # it is ignored under SHOT_MODE "mean" (already that average) and "index" (a
 # single shot). Set to a string to relabel the curve.
 INCLUDE_ALL_SHOTS = True
-ALL_SHOTS_LABEL = "all shots (avg)"
+ALL_SHOTS_LABEL = None   # None = auto-label from the window, e.g. "all shots 5-7 ms"
+
+# Window for that baseline curve alone, in ms. None = the same window as the
+# grouped curves. Pointing it at the quiet interval before the antenna fires is
+# what makes it a background reference rather than a blend of the conditions --
+# the same split analysis_TB draws between its "pre_antenna" and "driven" gates.
+#
+# Under Welch the frequency axis is set by the segment length, not the window,
+# so a different window here still lands on the shared axis; build_spectra
+# verifies that rather than assuming it. A window shorter than one segment is
+# still valid but gets no segment averaging, so it will look noisier than the
+# grouped curves -- shorten FFT_SEGMENT_MS if that matters more than resolution.
+ALL_SHOTS_T_START_MS = 5.0
+ALL_SHOTS_T_END_MS   = 7.0
 
 # Group shots based on the following channels (same contract as plot_xy_slider)
 STATE_GROUPS = {"channels": ("C7", "C8"), "scope": "bdot_scope", "window_ms": (0.0, 20.0)}
@@ -310,7 +323,8 @@ def planned_coords(positions):
 
 
 def build_spectra(f, scope, signals, positions, selector, t_start_ms, t_end_ms,
-                  f_max_khz, segment_ms, med_size, gauss_sigma):
+                  f_max_khz, segment_ms, med_size, gauss_sigma,
+                  alt_label=None, alt_t_start_ms=None, alt_t_end_ms=None):
     """Compute per-position, per-group, per-signal spectra in one read pass.
 
     Returns ``(result, freq_khz, coords, meta)``:
@@ -322,6 +336,11 @@ def build_spectra(f, scope, signals, positions, selector, t_start_ms, t_end_ms,
     Every planned position gets a row whether or not it yielded data, so the
     slider index and the position index are the same number -- a NaN row reads as
     "nothing usable here", which is the honest answer.
+
+    ``alt_label``, when given, is computed over ``alt_t_start_ms..alt_t_end_ms``
+    instead of the shared window -- the pre-antenna baseline case. Both windows
+    must land on the same frequency axis for the page to plot them together;
+    that is checked here rather than assumed.
     """
     coords, npos = planned_coords(positions)
     if npos == 0:
@@ -336,6 +355,30 @@ def build_spectra(f, scope, signals, positions, selector, t_start_ms, t_end_ms,
     freq_hz, keep, nperseg, nfft = spectrum_grid(nrequested, dt, segment_ms, f_max_khz)
     if nperseg is None:
         i1 = i0 + nfft   # transform the FFT-friendly prefix, not the odd tail
+
+    # The baseline curve's own window, resolved the same way and then required to
+    # produce the identical axis. Under Welch it will, because the axis follows
+    # the segment length -- but a mismatched knob pair (say a window shorter than
+    # one segment, or segment_ms=None) has to fail loudly rather than write a
+    # curve whose bins silently mean different frequencies than its neighbours'.
+    alt = None
+    if alt_label is not None and (alt_t_start_ms is not None or alt_t_end_ms is not None):
+        a_lo = tarr[0] if alt_t_start_ms is None else alt_t_start_ms * 1e-3
+        a_hi = tarr[-1] if alt_t_end_ms is None else alt_t_end_ms * 1e-3
+        a0, a1 = window_indices(tarr, a_lo, a_hi)
+        a_freq, a_keep, a_nperseg, a_nfft = spectrum_grid(a1 - a0, dt, segment_ms,
+                                                          f_max_khz)
+        if a_nperseg is None:
+            a1 = a0 + a_nfft
+        if a_freq.shape != freq_hz.shape or not np.allclose(a_freq, freq_hz,
+                                                            rtol=1e-7, atol=1e-6):
+            raise ValueError(
+                f"'{alt_label}' window {alt_t_start_ms}-{alt_t_end_ms} ms gives a "
+                f"{a_freq.size}-bin axis at {a_freq[1] - a_freq[0]:.4g} Hz, but the "
+                f"grouped windows give {freq_hz.size} bins at "
+                f"{freq_hz[1] - freq_hz[0]:.4g} Hz. Set FFT_SEGMENT_MS to a value "
+                "that fits inside both windows so they share one frequency axis.")
+        alt = (a0, a1, a_keep, a_nperseg, a_nfft)
 
     _tarr, nshot, mismatch = _grid_layout(f, scope, npos)
 
@@ -359,15 +402,21 @@ def build_spectra(f, scope, signals, positions, selector, t_start_ms, t_end_ms,
             if stack is None:
                 continue
             psd = shot_psd(stack[:, i0:i1], dt, keep, nperseg, nfft)
+            # Second transform only when a baseline window was asked for. The
+            # read above already pulled the whole record, so this is one more
+            # slice and FFT, not another pass over the file.
+            alt_psd = (None if alt is None else
+                       shot_psd(stack[:, alt[0]:alt[1]], dt, *alt[2:]))
             for label, shots in groups.items():
                 rows = [row_of[s] for s in shots if s in row_of]
                 if not rows:
                     continue
+                src = alt_psd if (alt_psd is not None and label == alt_label) else psd
                 # Space-joined to match key() in the page. Unambiguous because
                 # signals._safe_key collapses whitespace out of a signal key, so
                 # the first space is always the separator.
                 mean_a, sem_a, n_a = acc[f"{sig.key} {label}"]
-                mean_a[i], sem_a[i], n_a[i] = group_statistics(psd, rows)
+                mean_a[i], sem_a[i], n_a[i] = group_statistics(src, rows)
 
     meta = {
         "window_ms": (float(tarr[i0] * 1e3), float(tarr[i1 - 1] * 1e3)),
@@ -375,6 +424,12 @@ def build_spectra(f, scope, signals, positions, selector, t_start_ms, t_end_ms,
         "df_hz": float(freq_hz[1] - freq_hz[0]) if freq_hz.size > 1 else 0.0,
         "nperseg": nperseg,
         "ntrimmed": int(nrequested - nfft) if nperseg is None else 0,
+        "nseg": (None if nperseg is None else
+                 max(1, (i1 - i0 - nperseg) // max(1, nperseg // 2) + 1)),
+        "alt_window_ms": (None if alt is None else
+                          (float(tarr[alt[0]] * 1e3), float(tarr[alt[1] - 1] * 1e3))),
+        "alt_nseg": (None if alt is None or alt[3] is None else
+                     max(1, (alt[1] - alt[0] - alt[3]) // max(1, alt[3] // 2) + 1)),
     }
     return dict(acc), freq_hz / 1e3, coords, meta
 
@@ -678,6 +733,18 @@ def write_html(out_file, acc, freq_khz, coords, signals, title, subtitle, note,
 # Driver
 # ======================================================================================
 
+def _ms(value, fallback):
+    """Format a ms knob for a label, falling back when it is None.
+
+    Both being None means the window runs to the edge of the record, whose
+    numeric value is not known until the file is open; the label says so rather
+    than guessing, and the page subtitle carries the resolved numbers anyway.
+    """
+    if value is None:
+        value = fallback
+    return "?" if value is None else f"{value:g}"
+
+
 def _with_pooled_group(selector, label):
     """Wrap a selector so every position also yields one all-shot group.
 
@@ -739,6 +806,7 @@ def plot_fft_slider(path, scope=None, channels=None, signals=None,
                     t_start=None, t_end=None, f_max_khz=None, segment_ms=None,
                     med_size=None, gauss_sigma=None, state_groups=None,
                     include_all_shots=None, all_shots_label=None,
+                    alt_start=None, alt_end=None,
                     output_path=None, save_npz=True):
     """Write one standalone HTML position-slider FFT page per scope.
 
@@ -759,8 +827,16 @@ def plot_fft_slider(path, scope=None, channels=None, signals=None,
     state_groups = STATE_GROUPS if state_groups is None else state_groups
     include_all_shots = (INCLUDE_ALL_SHOTS if include_all_shots is None
                          else include_all_shots)
-    all_shots_label = (ALL_SHOTS_LABEL if all_shots_label is None
-                       else all_shots_label)
+    alt_start = ALL_SHOTS_T_START_MS if alt_start is None else alt_start
+    alt_end = ALL_SHOTS_T_END_MS if alt_end is None else alt_end
+    if all_shots_label is None:
+        all_shots_label = ALL_SHOTS_LABEL
+    # The label names the window it was computed over, so the legend cannot claim
+    # a baseline curve shares the grouped curves' window when it does not.
+    if all_shots_label is None:
+        all_shots_label = ("all shots (avg)" if alt_start is None and alt_end is None
+                           else f"all shots {_ms(alt_start, t_start)}"
+                                f"–{_ms(alt_end, t_end)} ms")
     output_path = OUTPUT_PATH if output_path is None else output_path
 
     sig_list = as_signal_list(signals)
@@ -792,7 +868,9 @@ def plot_fft_slider(path, scope=None, channels=None, signals=None,
 
             acc, freq_khz, coords, meta = build_spectra(
                 f, sc, sigs, positions, selector, t_start, t_end,
-                f_max_khz, segment_ms, med_size, gauss_sigma)
+                f_max_khz, segment_ms, med_size, gauss_sigma,
+                alt_label=all_shots_label if include_all_shots else None,
+                alt_t_start_ms=alt_start, alt_t_end_ms=alt_end)
             if not acc:
                 print(f"  no usable shots for {sc} — skipping")
                 continue
@@ -805,6 +883,23 @@ def plot_fft_slider(path, scope=None, channels=None, signals=None,
                    else f"Welch, {meta['nperseg']} samples/segment, 50% overlap")
             filt = (f"median {med_size} / gaussian {gauss_sigma} samples"
                     if (med_size > 1 or gauss_sigma > 0) else "unfiltered")
+            # Spelled out because the subtitle's window applies only to the
+            # grouped curves once a baseline window is in play, and a reader who
+            # missed that would compare two different intervals as if they were
+            # one. The segment count is the honest caveat: a short baseline
+            # window averages fewer segments and so looks noisier.
+            alt_note = ""
+            if meta["alt_window_ms"]:
+                a_lo, a_hi = meta["alt_window_ms"]
+                nseg = meta["alt_nseg"]
+                alt_note = (f"The '{all_shots_label}' curve pools every shot at the "
+                            f"position over {a_lo:.4g}–{a_hi:.4g} ms instead, on the "
+                            "same frequency axis"
+                            + (f" but averaging {nseg} segment(s) rather than "
+                               f"{meta['nseg']}, so it carries more scatter"
+                               if nseg and meta.get("nseg") and nseg < meta["nseg"]
+                               else "")
+                            + ". ")
             nbytes = write_html(
                 out_file, acc, freq_khz, coords, sigs,
                 title=f"{base} — {sc} FFT vs position",
@@ -813,8 +908,8 @@ def plot_fft_slider(path, scope=None, channels=None, signals=None,
                 note=(f"Estimator: Hann {est}; df = {meta['df_hz']:.4g} Hz. Each curve "
                       "is the mean of the per-shot PSDs in that group at that position, "
                       "with the shot standard error shaded (absent when a group has one "
-                      f"shot). Filtering: {filt}. Values are scope V²/Hz with no "
-                      "normalization. Spectra are embedded in this file — it needs "
+                      f"shot). {alt_note}Filtering: {filt}. Values are scope V²/Hz with "
+                      "no normalization. Spectra are embedded in this file — it needs "
                       "neither the HDF5 nor Python to open."),
                 pooled_label=all_shots_label if include_all_shots else None)
             written.append(out_file)
